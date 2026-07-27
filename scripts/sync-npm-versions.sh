@@ -33,7 +33,7 @@ update_optional_deps() {
   "
 }
 
-update_napi_lockfile() {
+update_package_lockfile() {
   node -e "
     const fs = require('fs');
     const lockPath = '$1';
@@ -88,8 +88,13 @@ echo "  Updated crates/napi/package.json → $VERSION"
 update_version "$ROOT/tools/type-aware-sidecar/package.json"
 echo "  Updated tools/type-aware-sidecar/package.json → $VERSION"
 
+if [ -f "$ROOT/tools/type-aware-sidecar/package-lock.json" ]; then
+  update_package_lockfile "$ROOT/tools/type-aware-sidecar/package-lock.json"
+  echo "  Updated tools/type-aware-sidecar/package-lock.json → $VERSION"
+fi
+
 if [ -f "$ROOT/crates/napi/package-lock.json" ]; then
-  update_napi_lockfile "$ROOT/crates/napi/package-lock.json"
+  update_package_lockfile "$ROOT/crates/napi/package-lock.json"
   echo "  Updated crates/napi/package-lock.json → $VERSION"
 fi
 

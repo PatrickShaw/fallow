@@ -632,7 +632,7 @@ fn refine_dead_code_results_with_transport(
     if !include_symbol_use {
         discard_unverified_semantic_candidates(results);
     }
-    let canonical_root = root.canonicalize().map_err(|error| {
+    let canonical_root = dunce::canonicalize(root).map_err(|error| {
         TypeAwareError::from(format!(
             "failed to resolve project root {}: {error}",
             root.display()
@@ -943,7 +943,7 @@ pub fn inspect_symbol(
     symbol: SemanticSymbol,
     entry_points: &[PathBuf],
 ) -> Result<SemanticInspectOutcome, TypeAwareError> {
-    let canonical_root = root.canonicalize().map_err(|error| {
+    let canonical_root = dunce::canonicalize(root).map_err(|error| {
         TypeAwareError::from(format!(
             "failed to resolve project root {}: {error}",
             root.display()
@@ -1099,7 +1099,7 @@ pub fn type_coupling(
     projects: &[PathBuf],
     entry_points: &[PathBuf],
 ) -> Result<SemanticCouplingOutcome, TypeAwareError> {
-    let canonical_root = root.canonicalize().map_err(|error| {
+    let canonical_root = dunce::canonicalize(root).map_err(|error| {
         TypeAwareError::from(format!(
             "failed to resolve project root {}: {error}",
             root.display()
@@ -1311,7 +1311,7 @@ fn run_single_query(
     projects: &[PathBuf],
     query: SemanticQuery,
 ) -> Result<(SemanticRequest, SemanticResponse), TypeAwareError> {
-    let canonical_root = root.canonicalize().map_err(|error| {
+    let canonical_root = dunce::canonicalize(root).map_err(|error| {
         TypeAwareError::from(format!(
             "failed to resolve project root {}: {error}",
             root.display()
@@ -1375,6 +1375,8 @@ const fn namespace_name(namespace: SemanticNamespace) -> &'static str {
 }
 
 fn protocol_path(root: &Path, path: &Path) -> Result<PathBuf, TypeAwareError> {
+    let root = dunce::simplified(root);
+    let path = dunce::simplified(path);
     let relative = if path.is_absolute() {
         path.strip_prefix(root).map_err(|_| {
             TypeAwareError::from(format!(
@@ -3007,6 +3009,22 @@ mod tests {
         );
         assert_eq!(identity.project_config_hash, DEFERRED_PROJECT_CONFIG_HASH);
         assert!(outcome.type_coupling.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protocol_path_accepts_windows_verbatim_paths_within_root() {
+        let directory = tempdir().expect("temporary directory");
+        let root = dunce::canonicalize(directory.path()).expect("canonical project root");
+        let source = root.join("src").join("config.ts");
+        fs::create_dir_all(source.parent().expect("source directory")).expect("source directory");
+        fs::write(&source, "export const config = true;").expect("source fixture");
+        let verbatim_source = PathBuf::from(format!(r"\\?\{}", source.display()));
+
+        assert_eq!(
+            protocol_path(&root, &verbatim_source).expect("project-relative path"),
+            PathBuf::from("src").join("config.ts")
+        );
     }
 
     #[test]

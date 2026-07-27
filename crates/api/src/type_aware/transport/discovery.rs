@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) fn canonicalize_root(root: &Path) -> Result<PathBuf, TypeAwareError> {
-    root.canonicalize().map_err(|err| {
+    dunce::canonicalize(root).map_err(|err| {
         TypeAwareError(format!(
             "failed to resolve project root {}: {err}",
             root.display()
@@ -43,7 +43,7 @@ pub(super) fn discover_type_aware_sidecar_from(
 }
 
 pub(super) fn canonical_sidecar_path(path: &Path) -> Result<PathBuf, String> {
-    path.canonicalize().map_err(|err| {
+    dunce::canonicalize(path).map_err(|err| {
         format!(
             "failed to resolve type-aware sidecar {}: {err}",
             path.display()
@@ -63,7 +63,7 @@ pub(super) fn non_empty_env(key: &str) -> Option<String> {
     reason = "security-sensitive sidecar discovery accepts regular files only"
 )]
 pub(super) fn find_installed_sidecar(current_exe: &Path) -> Option<PathBuf> {
-    let current_exe = current_exe.canonicalize().ok()?;
+    let current_exe = dunce::canonicalize(current_exe).ok()?;
     let install_dir = current_exe.parent()?;
     binary_names(SIDECAR_BINARY).into_iter().find_map(|name| {
         let candidate = install_dir.join(name);
@@ -71,7 +71,7 @@ pub(super) fn find_installed_sidecar(current_exe: &Path) -> Option<PathBuf> {
         if !metadata.file_type().is_file() {
             return None;
         }
-        let canonical = candidate.canonicalize().ok()?;
+        let canonical = dunce::canonicalize(candidate).ok()?;
         (canonical.parent() == Some(install_dir)).then_some(canonical)
     })
 }

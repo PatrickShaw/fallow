@@ -149,7 +149,7 @@ pub(super) fn sanitize_search_path(root: &Path, value: &OsStr) -> Option<OsStrin
         if !entry.is_absolute() {
             continue;
         }
-        let Ok(canonical) = entry.canonicalize() else {
+        let Ok(canonical) = dunce::canonicalize(entry) else {
             continue;
         };
         if canonical.starts_with(root) || safe.contains(&canonical) {

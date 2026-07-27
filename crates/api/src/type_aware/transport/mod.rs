@@ -289,9 +289,7 @@ mod tests {
 
         assert_eq!(
             discovered,
-            override_sidecar
-                .canonicalize()
-                .expect("canonical override sidecar")
+            dunce::canonicalize(override_sidecar).expect("canonical override sidecar")
         );
     }
 
@@ -324,7 +322,7 @@ mod tests {
 
         assert_eq!(
             discovered,
-            sibling.canonicalize().expect("canonical sibling sidecar")
+            dunce::canonicalize(sibling).expect("canonical sibling sidecar")
         );
     }
 
@@ -376,10 +374,7 @@ mod tests {
     #[test]
     fn child_path_removes_project_local_node_shims() {
         let project = tempfile::tempdir().expect("temporary project directory");
-        let root = project
-            .path()
-            .canonicalize()
-            .expect("canonical project root");
+        let root = dunce::canonicalize(project.path()).expect("canonical project root");
         let project_bin = root.join("node_modules").join(".bin");
         std::fs::create_dir_all(&project_bin).expect("create project bin directory");
         std::fs::write(project_bin.join("node"), []).expect("write project-local node shim");
@@ -398,10 +393,7 @@ mod tests {
 
         assert_eq!(
             entries,
-            [trusted
-                .path()
-                .canonicalize()
-                .expect("canonical trusted path")]
+            [dunce::canonicalize(trusted.path()).expect("canonical trusted path")]
         );
     }
 
@@ -410,10 +402,7 @@ mod tests {
     fn windows_sidecar_command_cannot_resolve_a_project_root_node_shim() {
         let _lock = lock_sidecar_lifecycle_tests();
         let project = tempfile::tempdir().expect("temporary project directory");
-        let root = project
-            .path()
-            .canonicalize()
-            .expect("canonical project root");
+        let root = dunce::canonicalize(project.path()).expect("canonical project root");
         std::fs::write(root.join("node.cmd"), "@exit /b 99\r\n")
             .expect("write project-root node shim");
 
@@ -439,10 +428,7 @@ mod tests {
     fn windows_script_sidecar_runs_electron_as_node() {
         let _lock = lock_sidecar_lifecycle_tests();
         let project = tempfile::tempdir().expect("temporary project directory");
-        let root = project
-            .path()
-            .canonicalize()
-            .expect("canonical project root");
+        let root = dunce::canonicalize(project.path()).expect("canonical project root");
         let install = tempfile::tempdir().expect("temporary trusted install directory");
         let electron = install.path().join("Code.exe");
         let script = install.path().join("fallow-type-aware.mjs");
@@ -450,6 +436,11 @@ mod tests {
         std::fs::write(&script, []).expect("write sidecar script fixture");
         let canonical_script =
             canonical_sidecar_path(&script).expect("canonical sidecar script fixture");
+        assert_eq!(
+            canonical_script,
+            dunce::simplified(&canonical_script),
+            "Node must receive a non-verbatim Windows path"
+        );
         let previous = std::env::var_os(SIDECAR_SCRIPT_ENV);
         unsafe {
             std::env::set_var(SIDECAR_SCRIPT_ENV, &script);

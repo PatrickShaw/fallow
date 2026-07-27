@@ -169,6 +169,11 @@ test("type-aware manifest keeps every runtime and package surface in parity", ()
   assert.equal(sidecarPackage.dependencies.typescript, manifest.backend.version);
   assert.equal(sidecarLock.packages[""].dependencies.typescript, manifest.backend.version);
   assert.equal(sidecarLock.packages["node_modules/typescript"].version, manifest.backend.version);
+  assert.deepEqual(sidecarPackage.bin, {
+    "fallow-type-aware": "fallow-type-aware.mjs",
+  });
+  assert.deepEqual(sidecarLock.packages[""].bin, sidecarPackage.bin);
+  assert.ok(sidecarPackage.files.includes("fallow-type-aware.mjs"));
   assert.ok(sidecarPackage.files.includes("src"));
   assert.match(generated, /Generated from crates\/api\/type-aware-protocol\.json/u);
   assert.match(vscodePackager, /cpSync\(join\(sourceRoot, "src"\)/u);

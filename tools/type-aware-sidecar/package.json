@@ -14,7 +14,7 @@
   ],
   "type": "module",
   "bin": {
-    "fallow-type-aware": "./fallow-type-aware.mjs"
+    "fallow-type-aware": "fallow-type-aware.mjs"
   },
   "scripts": {
     "bench": "node bench/session.mjs",

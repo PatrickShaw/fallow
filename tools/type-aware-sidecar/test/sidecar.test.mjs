@@ -28,6 +28,8 @@ import {
 } from "../src/generated-protocol.mjs";
 
 const sidecarRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const sidecarPackage = JSON.parse(readFileSync(path.join(sidecarRoot, "package.json"), "utf8"));
+const sidecarVersion = sidecarPackage.version;
 const executable = process.env.FALLOW_TYPE_AWARE_BIN
   ? path.resolve(process.env.FALLOW_TYPE_AWARE_BIN)
   : path.join(sidecarRoot, "fallow-type-aware.mjs");
@@ -38,7 +40,7 @@ test("status reports protocol and backend without a project request", () => {
   const result = spawnSync(executable, ["--status"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), {
-    package_version: "3.9.1",
+    package_version: sidecarVersion,
     protocol_version: WIRE_PROTOCOL_VERSION,
     backend_family: BACKEND_FAMILY,
     backend_version: BACKEND_VERSION,
@@ -2389,10 +2391,9 @@ test("bounds and normalizes warning text", () => {
 });
 
 test("sidecar version matches the package version", () => {
-  const packageJson = JSON.parse(readFileSync(path.join(sidecarRoot, "package.json"), "utf8"));
   const response = createStatusResponse();
 
-  assert.equal(response.package_version, packageJson.version);
+  assert.equal(response.package_version, sidecarVersion);
 });
 
 test("rejects oversized stdin while reading", async () => {
@@ -2404,7 +2405,7 @@ test("returns provenance for an empty semantic request", () => {
 
   assert.equal(response.protocol_version, 6);
   assert.equal(response.operation, "semantic-queries");
-  assert.equal(response.sidecar_version, "3.9.1");
+  assert.equal(response.sidecar_version, sidecarVersion);
   assert.equal(response.backend, "typescript-go");
   assert.deepEqual(response.selected_tsconfigs, []);
   assert.deepEqual(response.projects, []);

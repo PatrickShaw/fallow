@@ -7,11 +7,9 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use std::path::Path;
-
 use common::{
     fixture_path, parse_json, redact_all, run_fallow, run_fallow_combined, run_fallow_in_root,
-    run_fallow_raw, run_fallow_raw_with_env,
+    run_fallow_raw, run_fallow_raw_with_env, run_fallow_raw_with_type_aware_sidecar,
 };
 
 #[test]
@@ -177,23 +175,17 @@ fn environment_enabled_type_aware_rejects_renderer_without_semantic_provenance()
 fn type_aware_class_method_impact_uses_exact_owner_identity() {
     let root = fixture_path("type-aware-class-method-impact");
     let root_arg = root.to_string_lossy();
-    let sidecar = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tools/type-aware-sidecar/fallow-type-aware.mjs");
-    let sidecar_arg = sidecar.to_string_lossy();
-    let output = run_fallow_raw_with_env(
-        &[
-            "dead-code",
-            "--root",
-            &root_arg,
-            "--type-aware",
-            "--symbol-impact",
-            "src/repository.ts:UserRepository.save",
-            "--format",
-            "json",
-            "--quiet",
-        ],
-        &[("FALLOW_TYPE_AWARE_BIN", &sidecar_arg)],
-    );
+    let output = run_fallow_raw_with_type_aware_sidecar(&[
+        "dead-code",
+        "--root",
+        &root_arg,
+        "--type-aware",
+        "--symbol-impact",
+        "src/repository.ts:UserRepository.save",
+        "--format",
+        "json",
+        "--quiet",
+    ]);
 
     assert_eq!(output.code, 0, "stderr: {}", output.stderr);
     let json = parse_json(&output);
@@ -214,19 +206,16 @@ fn type_aware_class_method_impact_uses_exact_owner_identity() {
         "the same-named AuditRepository.save declaration is not a consumer"
     );
 
-    let preview = run_fallow_raw_with_env(
-        &[
-            "fix",
-            "--root",
-            &root_arg,
-            "--type-aware",
-            "--dry-run",
-            "--format",
-            "json",
-            "--quiet",
-        ],
-        &[("FALLOW_TYPE_AWARE_BIN", &sidecar_arg)],
-    );
+    let preview = run_fallow_raw_with_type_aware_sidecar(&[
+        "fix",
+        "--root",
+        &root_arg,
+        "--type-aware",
+        "--dry-run",
+        "--format",
+        "json",
+        "--quiet",
+    ]);
     assert_eq!(preview.code, 0, "stderr: {}", preview.stderr);
     let preview = parse_json(&preview);
     let fixes = preview["fixes"].as_array().expect("fix preview");
@@ -248,9 +237,6 @@ fn type_aware_class_method_impact_uses_exact_owner_identity() {
 fn type_aware_refines_ambiguous_unused_exports_without_unsafe_fixes() {
     let root = fixture_path("type-aware-unused-export-refinement");
     let root_arg = root.to_string_lossy();
-    let sidecar = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tools/type-aware-sidecar/fallow-type-aware.mjs");
-    let sidecar_arg = sidecar.to_string_lossy();
     let args = [
         "dead-code",
         "--root",
@@ -290,10 +276,7 @@ fn type_aware_refines_ambiguous_unused_exports_without_unsafe_fixes() {
         "json",
         "--quiet",
     ];
-    let typed = parse_json(&run_fallow_raw_with_env(
-        &type_aware_args,
-        &[("FALLOW_TYPE_AWARE_BIN", &sidecar_arg)],
-    ));
+    let typed = parse_json(&run_fallow_raw_with_type_aware_sidecar(&type_aware_args));
     let typed_exports = typed["unused_exports"].as_array().expect("unused exports");
     let typed_types = typed["unused_types"].as_array().expect("unused types");
 
@@ -382,22 +365,16 @@ fn type_aware_framework_contract_requires_package_provenance() {
     .expect("write entry point");
 
     let root_arg = root.to_string_lossy();
-    let sidecar = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tools/type-aware-sidecar/fallow-type-aware.mjs");
-    let sidecar_arg = sidecar.to_string_lossy();
-    let output = run_fallow_raw_with_env(
-        &[
-            "dead-code",
-            "--root",
-            &root_arg,
-            "--unused-class-members",
-            "--type-aware",
-            "--format",
-            "json",
-            "--quiet",
-        ],
-        &[("FALLOW_TYPE_AWARE_BIN", &sidecar_arg)],
-    );
+    let output = run_fallow_raw_with_type_aware_sidecar(&[
+        "dead-code",
+        "--root",
+        &root_arg,
+        "--unused-class-members",
+        "--type-aware",
+        "--format",
+        "json",
+        "--quiet",
+    ]);
 
     assert_eq!(output.code, 1, "stderr: {}", output.stderr);
     let json = parse_json(&output);

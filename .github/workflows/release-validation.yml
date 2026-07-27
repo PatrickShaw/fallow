@@ -47,6 +47,9 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install type-aware sidecar dependencies
+        run: npm ci --prefix tools/type-aware-sidecar --no-audit --no-fund --ignore-scripts
+
       - name: Run workspace tests
         run: cargo test --workspace --lib --bins --tests --examples
 

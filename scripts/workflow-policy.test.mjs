@@ -285,6 +285,10 @@ test("release runs Windows correctness and lifecycle verification without creden
   assert.match(job, /runs-on: windows-latest/);
   assert.match(job, /permissions:\n\s+contents: read/);
   assert.doesNotMatch(job, /id-token: write|contents: write|secrets\./);
+  assert.match(
+    job,
+    /name: Install type-aware sidecar dependencies[\s\S]*npm ci --prefix tools\/type-aware-sidecar --no-audit --no-fund --ignore-scripts[\s\S]*name: Run workspace tests/,
+  );
   assert.match(job, /cargo test --workspace --lib --bins --tests --examples/);
   assert.match(job, /cargo clippy --workspace --all-targets -- -D warnings/);
   assert.match(job, /cargo fmt --all -- --check/);

@@ -54,6 +54,7 @@ fallow-api = { workspace = true }
 fallow-engine = { workspace = true }
 fallow-config = { workspace = true }
 fallow-output = { workspace = true }
+fallow-process = { workspace = true }
 fallow-security = { workspace = true }
 fallow-types = { workspace = true }
 fallow-v8-coverage = { version = "3.9.1", path = "../v8-coverage" }

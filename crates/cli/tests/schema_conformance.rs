@@ -26,7 +26,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::fallow_bin;
+use common::{configure_type_aware_sidecar, fallow_bin};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -47,7 +47,7 @@ fn assert_conforms(root: &Value, kind: &str, value: &Value) {
     assert_eq!(
         value.get("kind").and_then(Value::as_str),
         Some(kind),
-        "document kind must be {kind:?}, got {:?}",
+        "document kind must be {kind:?}, got {:?}\ndocument:\n{value}",
         value.get("kind"),
     );
 
@@ -159,19 +159,19 @@ fn git_fixture() -> TempDir {
 /// Run `fallow <args> --root <root> --format json --quiet --no-cache`, parse
 /// stdout, and validate it against the schema branch for `expected_kind`.
 fn run_and_validate(schema: &Value, root: &Path, args: &[&str], expected_kind: &str) {
-    run_and_validate_with_env(schema, root, args, expected_kind, &[]);
+    run_and_validate_with(schema, root, args, expected_kind, |_| {});
 }
 
-fn run_and_validate_with_env(
+fn run_and_validate_with(
     schema: &Value,
     root: &Path,
     args: &[&str],
     expected_kind: &str,
-    env: &[(&str, &str)],
+    configure: impl FnOnce(&mut Command),
 ) {
     let mut cmd = Command::new(fallow_bin());
     cmd.env("RUST_LOG", "").env("NO_COLOR", "1");
-    cmd.envs(env.iter().copied());
+    configure(&mut cmd);
     for arg in args {
         cmd.arg(arg);
     }
@@ -233,17 +233,12 @@ fn cli_json_documents_conform_to_output_schema() {
         &["trace", "src/lib.ts:used", "--callers"],
         "trace",
     );
-    let sidecar = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tools/type-aware-sidecar/fallow-type-aware.mjs");
-    run_and_validate_with_env(
+    run_and_validate_with(
         &schema,
         root,
         &["dead-code", "--trace", "src/lib.ts:used", "--type-aware"],
         "trace",
-        &[(
-            "FALLOW_TYPE_AWARE_BIN",
-            sidecar.to_str().expect("sidecar path is UTF-8"),
-        )],
+        configure_type_aware_sidecar,
     );
     run_and_validate(
         &schema,

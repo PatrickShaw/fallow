@@ -121,11 +121,11 @@ pub fn run_fallow_raw_with_env(args: &[&str], env: &[(&str, &str)]) -> CommandOu
     }
 }
 
-/// Run fallow with the repository's real type-aware sidecar.
+/// Configure a command to use the repository's real type-aware sidecar.
 ///
 /// Windows cannot execute the `.mjs` entry point directly, so the harness
 /// mirrors the editor integration by launching the script through Node.
-pub fn run_fallow_raw_with_type_aware_sidecar(args: &[&str]) -> CommandOutput {
+pub fn configure_type_aware_sidecar(cmd: &mut Command) {
     let mut sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     sidecar.pop(); // crates/
     sidecar.pop(); // project root
@@ -142,13 +142,17 @@ pub fn run_fallow_raw_with_type_aware_sidecar(args: &[&str]) -> CommandOutput {
     #[cfg(not(windows))]
     let sidecar_bin = sidecar.clone();
 
-    let bin = fallow_bin();
-    let mut cmd = Command::new(&bin);
-    cmd.env("RUST_LOG", "")
-        .env("NO_COLOR", "1")
-        .env("FALLOW_TYPE_AWARE_BIN", sidecar_bin);
+    cmd.env("FALLOW_TYPE_AWARE_BIN", sidecar_bin);
     #[cfg(windows)]
     cmd.env("FALLOW_TYPE_AWARE_SCRIPT", sidecar);
+}
+
+/// Run fallow with the repository's real type-aware sidecar.
+pub fn run_fallow_raw_with_type_aware_sidecar(args: &[&str]) -> CommandOutput {
+    let bin = fallow_bin();
+    let mut cmd = Command::new(&bin);
+    cmd.env("RUST_LOG", "").env("NO_COLOR", "1");
+    configure_type_aware_sidecar(&mut cmd);
     for arg in args {
         cmd.arg(arg);
     }

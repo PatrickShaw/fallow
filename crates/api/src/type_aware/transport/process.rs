@@ -86,6 +86,18 @@ where
 }
 
 pub(super) fn sidecar_command(sidecar: &Path, root: &Path) -> Result<Command, String> {
+    #[cfg(windows)]
+    let script = non_empty_env(SIDECAR_SCRIPT_ENV).map(PathBuf::from);
+    #[cfg(not(windows))]
+    let script: Option<PathBuf> = None;
+    sidecar_command_with_script(sidecar, root, script.as_deref())
+}
+
+pub(super) fn sidecar_command_with_script(
+    sidecar: &Path,
+    root: &Path,
+    script: Option<&Path>,
+) -> Result<Command, String> {
     let install_dir = sidecar.parent().ok_or_else(|| {
         format!(
             "type-aware sidecar {} has no trusted parent directory",
@@ -94,13 +106,15 @@ pub(super) fn sidecar_command(sidecar: &Path, root: &Path) -> Result<Command, St
     })?;
     let mut command = Command::new(sidecar);
     #[cfg(windows)]
-    let launch_via_script = if let Some(script) = non_empty_env(SIDECAR_SCRIPT_ENV) {
-        let script = canonical_sidecar_path(Path::new(&script))?;
+    let launch_via_script = if let Some(script) = script {
+        let script = canonical_sidecar_path(script)?;
         command.arg(script);
         true
     } else {
         false
     };
+    #[cfg(not(windows))]
+    let _ = script;
     command
         .current_dir(install_dir)
         .stdin(Stdio::piped())

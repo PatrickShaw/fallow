@@ -23,15 +23,19 @@ use super::manifest::{
 };
 #[cfg(windows)]
 use discovery::canonical_sidecar_path;
-use discovery::{canonicalize_root, discover_type_aware_sidecar, non_empty_env};
 #[cfg(test)]
-use discovery::{discover_type_aware_sidecar_from, find_installed_sidecar};
+use discovery::discover_type_aware_sidecar_from;
+#[cfg(all(test, unix))]
+use discovery::find_installed_sidecar;
+use discovery::{canonicalize_root, discover_type_aware_sidecar, non_empty_env};
+#[cfg(all(test, windows))]
+use process::sidecar_command_with_script;
 use process::{
     SidecarTimeout, join_sidecar_worker, read_bounded_stream, run_sidecar_json, sidecar_command,
 };
 #[cfg(test)]
 use process::{bounded_text, sanitize_search_path};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use session::TypeAwareSessionProcess;
 pub use session::{TypeAwareFileChanges, TypeAwareSession};
 
@@ -441,17 +445,9 @@ mod tests {
             dunce::simplified(&canonical_script),
             "Node must receive a non-verbatim Windows path"
         );
-        let previous = std::env::var_os(SIDECAR_SCRIPT_ENV);
-        unsafe {
-            std::env::set_var(SIDECAR_SCRIPT_ENV, &script);
-        }
 
-        let command = sidecar_command(&electron, &root).expect("configure sidecar command");
-
-        match previous {
-            Some(value) => unsafe { std::env::set_var(SIDECAR_SCRIPT_ENV, value) },
-            None => unsafe { std::env::remove_var(SIDECAR_SCRIPT_ENV) },
-        }
+        let command = sidecar_command_with_script(&electron, &root, Some(&script))
+            .expect("configure sidecar command");
         let electron_run_as_node = command
             .get_envs()
             .find(|(key, _)| *key == OsStr::new("ELECTRON_RUN_AS_NODE"))

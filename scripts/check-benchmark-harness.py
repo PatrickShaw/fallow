@@ -19,6 +19,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BENCH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "bench.yml"
+# The walltime instrument lives in its own workflow so each CodSpeed run carries
+# a single instrument; see issue #2024.
+TYPE_AWARE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "bench-type-aware.yml"
 MATRIX_SCRIPT = REPO_ROOT / ".github" / "scripts" / "generate-benchmark-matrix.mjs"
 
 FAST_JOB = "benchmark"
@@ -180,28 +183,29 @@ def benchmark_names(path: Path) -> list[str]:
     return re.findall(r'bench_function\(\s*"([^"]+)"', text)
 
 
-def assert_codspeed_action_modes(text: str) -> list[str]:
+def assert_codspeed_action_modes(text: str, type_aware_text: str) -> list[str]:
     errors: list[str] = []
-    action_refs = re.findall(r"uses:\s*CodSpeedHQ/action@([^\s]+)", text)
+    # Both workflows upload through the same action, so the pin is checked across
+    # the pair: splitting them must not let one drift to another version.
+    action_refs = re.findall(
+        r"uses:\s*CodSpeedHQ/action@([^\s]+)", f"{text}\n{type_aware_text}"
+    )
     if not action_refs:
-        errors.append("bench workflow does not use CodSpeedHQ/action")
+        errors.append("benchmark workflows do not use CodSpeedHQ/action")
     elif len(set(action_refs)) != 1:
         errors.append(f"CodSpeed action refs differ: {sorted(set(action_refs))}")
 
-    job_match = re.search(
-        rf"(?ms)^  {TYPE_AWARE_JOB}:\s*$\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)",
-        text,
-    )
-    if job_match is None:
-        errors.append(f"bench workflow is missing {TYPE_AWARE_JOB}")
-        rust_jobs = text
-    else:
-        type_aware_job = job_match.group(1)
-        if re.findall(r"mode:\s*([^\s]+)", type_aware_job) != [TYPE_AWARE_MODE]:
-            errors.append(f"{TYPE_AWARE_JOB} must use {TYPE_AWARE_MODE} mode")
-        rust_jobs = f"{text[: job_match.start()]}{text[job_match.end() :]}"
+    if f"  {TYPE_AWARE_JOB}:" not in type_aware_text:
+        errors.append(f"type-aware workflow is missing {TYPE_AWARE_JOB}")
+    elif re.findall(r"mode:\s*([^\s]+)", type_aware_text) != [TYPE_AWARE_MODE]:
+        errors.append(f"{TYPE_AWARE_JOB} must use {TYPE_AWARE_MODE} mode")
+    if TYPE_AWARE_JOB in text:
+        errors.append(
+            f"{TYPE_AWARE_JOB} must stay out of the bench workflow: a CodSpeed run "
+            "carries one instrument"
+        )
 
-    modes = re.findall(r"mode:\s*([^\s]+)", rust_jobs)
+    modes = re.findall(r"mode:\s*([^\s]+)", text)
     codspeed_modes = [mode for mode in modes if mode in {"simulation", "walltime", "memory"}]
     if not codspeed_modes:
         errors.append("bench workflow does not declare a CodSpeed mode")
@@ -315,6 +319,10 @@ def validate_unique_names() -> list[str]:
 
 def main() -> int:
     text = BENCH_WORKFLOW.read_text(encoding="utf-8")
+    if not TYPE_AWARE_WORKFLOW.is_file():
+        error(f"type-aware benchmark workflow is missing at {TYPE_AWARE_WORKFLOW}")
+        return 1
+    type_aware_text = TYPE_AWARE_WORKFLOW.read_text(encoding="utf-8")
     try:
         static_targets = extract_matrix_targets(text)
         targets = fast_targets_from_generator() + [
@@ -325,11 +333,11 @@ def main() -> int:
         return 1
 
     errors = []
-    errors.extend(assert_codspeed_action_modes(text))
+    errors.extend(assert_codspeed_action_modes(text, type_aware_text))
     errors.extend(validate_targets(targets))
     errors.extend(validate_required_targets(targets))
     errors.extend(validate_unique_names())
-    errors.extend(validate_type_aware_benchmark(text))
+    errors.extend(validate_type_aware_benchmark(type_aware_text))
 
     if not any(target.job == FAST_JOB for target in targets):
         errors.append("fast benchmark job has no matrix targets")

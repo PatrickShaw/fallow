@@ -408,6 +408,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_sidecar_command_cannot_resolve_a_project_root_node_shim() {
+        let _lock = lock_sidecar_lifecycle_tests();
         let project = tempfile::tempdir().expect("temporary project directory");
         let root = project
             .path()
@@ -447,6 +448,8 @@ mod tests {
         let script = install.path().join("fallow-type-aware.mjs");
         std::fs::write(&electron, []).expect("write Electron fixture");
         std::fs::write(&script, []).expect("write sidecar script fixture");
+        let canonical_script =
+            canonical_sidecar_path(&script).expect("canonical sidecar script fixture");
         let previous = std::env::var_os(SIDECAR_SCRIPT_ENV);
         unsafe {
             std::env::set_var(SIDECAR_SCRIPT_ENV, &script);
@@ -463,7 +466,10 @@ mod tests {
             .find(|(key, _)| *key == OsStr::new("ELECTRON_RUN_AS_NODE"))
             .and_then(|(_, value)| value);
 
-        assert_eq!(command.get_args().collect::<Vec<_>>(), [script.as_os_str()]);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [canonical_script.as_os_str()]
+        );
         assert_eq!(electron_run_as_node, Some(OsStr::new("1")));
     }
 

@@ -36,8 +36,8 @@ fn run_analyze(
             .iter()
             .map(PathBuf::from)
             .collect::<Vec<_>>();
-        let outcome = fallow_api::refine_type_aware_results(
-            &config.root,
+        let outcome = fallow_api::refine_type_aware_results_with_config(
+            config,
             &mut results,
             &projects,
             &[],

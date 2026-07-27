@@ -1520,6 +1520,7 @@ mod tests {
                 extends: vec![],
                 entry: vec![],
                 ignore_patterns: ignores,
+                ignore_findings: vec![],
                 framework: vec![],
                 workspaces: None,
                 ignore_dependencies: vec![],

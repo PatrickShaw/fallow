@@ -61,8 +61,8 @@ pub fn refine_programmatic_dead_code(
     .collect::<Vec<_>>();
 
     if options.require != fallow_config::TypeAwareRequire::Complete {
-        let outcome = refine_dead_code_results(
-            session.root(),
+        let outcome = refine_configured_dead_code_results(
+            session.config(),
             results,
             &options.projects,
             &entry_points,
@@ -75,8 +75,8 @@ pub fn refine_programmatic_dead_code(
     }
 
     let mut refined_results = results.clone();
-    let outcome = match refine_dead_code_results(
-        session.root(),
+    let outcome = match refine_configured_dead_code_results(
+        session.config(),
         &mut refined_results,
         &options.projects,
         &entry_points,
@@ -138,10 +138,10 @@ pub fn refine_programmatic_dead_code_in_session(
     .map(|entry| entry.path)
     .collect::<Vec<_>>();
     let mut refined_results = results.clone();
-    let outcome = match refine_dead_code_results_in_session(
+    let outcome = match refine_configured_dead_code_results_in_session(
         semantic_session,
         changes,
-        session.root(),
+        session.config(),
         &mut refined_results,
         &options.projects,
         &entry_points,
@@ -174,6 +174,66 @@ pub fn refine_programmatic_dead_code_in_session(
     }
     *results = refined_results;
     Ok(Some(meta))
+}
+
+/// Refine dead-code results and reapply project finding exclusions after the
+/// semantic stage has finished adding or updating findings.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "semantic refinement keeps requested capability families explicit"
+)]
+pub fn refine_configured_dead_code_results(
+    config: &fallow_config::ResolvedConfig,
+    results: &mut AnalysisResults,
+    projects: &[std::path::PathBuf],
+    entry_points: &[std::path::PathBuf],
+    include_symbol_use: bool,
+    include_private_type_leaks: bool,
+    include_type_coupling: bool,
+) -> Result<Option<SemanticDeadCodeOutcome>, TypeAwareError> {
+    let outcome = refine_dead_code_results(
+        &config.root,
+        results,
+        projects,
+        entry_points,
+        include_symbol_use,
+        include_private_type_leaks,
+        include_type_coupling,
+    )?;
+    fallow_engine::dead_code::filter_configured_ignored_findings(results, config);
+    Ok(outcome)
+}
+
+/// Refine dead-code results through a persistent semantic session and reapply
+/// project finding exclusions after reconciliation.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "semantic refinement keeps requested capability families explicit"
+)]
+pub fn refine_configured_dead_code_results_in_session(
+    semantic_session: &mut TypeAwareSession,
+    changes: Option<&TypeAwareFileChanges>,
+    config: &fallow_config::ResolvedConfig,
+    results: &mut AnalysisResults,
+    projects: &[std::path::PathBuf],
+    entry_points: &[std::path::PathBuf],
+    include_symbol_use: bool,
+    include_private_type_leaks: bool,
+    include_type_coupling: bool,
+) -> Result<Option<SemanticDeadCodeOutcome>, TypeAwareError> {
+    let outcome = refine_dead_code_results_in_session(
+        semantic_session,
+        changes,
+        &config.root,
+        results,
+        projects,
+        entry_points,
+        include_symbol_use,
+        include_private_type_leaks,
+        include_type_coupling,
+    )?;
+    fallow_engine::dead_code::filter_configured_ignored_findings(results, config);
+    Ok(outcome)
 }
 
 fn programmatic_semantic_error(error: &TypeAwareError) -> ProgrammaticError {

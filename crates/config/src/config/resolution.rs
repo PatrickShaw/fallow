@@ -18,8 +18,10 @@ use super::rules::{PartialRulesConfig, RulesConfig, Severity};
 use super::used_class_members::UsedClassMemberRule;
 use crate::external_plugin::{ExternalPluginDef, discover_external_plugins};
 
-use super::IgnoreExportsUsedInFileConfig;
-use super::{BoundaryConfig, FallowConfig, ProductionConfig, SecurityConfig, TypeAwareConfig};
+use super::{
+    BoundaryConfig, FallowConfig, FindingIgnoreMatcher, IgnoreExportsUsedInFileConfig,
+    ProductionConfig, SecurityConfig, TypeAwareConfig,
+};
 
 /// Process-local dedup state for inter-file rule warnings.
 static INTER_FILE_WARN_SEEN: OnceLock<Mutex<FxHashSet<u64>>> = OnceLock::new();
@@ -169,6 +171,7 @@ pub struct ResolvedConfig {
     pub root: PathBuf,
     pub entry_patterns: Vec<String>,
     pub ignore_patterns: GlobSet,
+    pub ignore_findings: FindingIgnoreMatcher,
     pub output: OutputFormat,
     pub cache_dir: PathBuf,
     pub threads: usize,
@@ -458,6 +461,7 @@ fn compile_ignore_dependency_override_rules(
 
 struct CompiledIgnoreSettings {
     patterns: GlobSet,
+    findings: FindingIgnoreMatcher,
     unresolved_imports: Vec<GlobMatcher>,
     exports: Vec<CompiledIgnoreExportRule>,
     catalog_references: Vec<CompiledIgnoreCatalogReferenceRule>,
@@ -467,6 +471,7 @@ struct CompiledIgnoreSettings {
 fn compile_ignore_settings(config: &FallowConfig) -> CompiledIgnoreSettings {
     CompiledIgnoreSettings {
         patterns: compile_ignore_patterns(&config.ignore_patterns),
+        findings: FindingIgnoreMatcher::compile(&config.ignore_findings),
         unresolved_imports: compile_ignore_unresolved_imports(&config.ignore_unresolved_imports),
         exports: compile_ignore_export_rules(&config.ignore_exports),
         catalog_references: compile_ignore_catalog_reference_rules(
@@ -633,6 +638,7 @@ impl FallowConfig {
             root,
             entry_patterns: self.entry,
             ignore_patterns: compiled_ignores.patterns,
+            ignore_findings: compiled_ignores.findings,
             output,
             cache_dir: cache.dir,
             threads,
@@ -736,6 +742,7 @@ mod tests {
             extends: vec![],
             entry: vec![],
             ignore_patterns: vec![],
+            ignore_findings: vec![],
             framework: vec![],
             workspaces: None,
             ignore_dependencies: vec![],
@@ -789,6 +796,7 @@ mod tests {
             extends: vec![],
             entry: vec![],
             ignore_patterns: vec![],
+            ignore_findings: vec![],
             framework: vec![],
             workspaces: None,
             ignore_dependencies: vec![],
@@ -853,6 +861,7 @@ mod tests {
             extends: vec![],
             entry: vec![],
             ignore_patterns: vec![],
+            ignore_findings: vec![],
             framework: vec![],
             workspaces: None,
             ignore_dependencies: vec![],
@@ -925,6 +934,7 @@ mod tests {
             extends: vec![],
             entry: vec![],
             ignore_patterns: vec![],
+            ignore_findings: vec![],
             framework: vec![],
             workspaces: None,
             ignore_dependencies: vec![],
@@ -1029,6 +1039,7 @@ mod tests {
             extends: vec![],
             entry: vec![],
             ignore_patterns: vec![],
+            ignore_findings: vec![],
             framework: vec![],
             workspaces: None,
             ignore_dependencies: vec![],
@@ -1092,6 +1103,7 @@ mod tests {
             extends: vec![],
             entry: vec![],
             ignore_patterns: vec![],
+            ignore_findings: vec![],
             framework: vec![],
             workspaces: None,
             ignore_dependencies: vec![],

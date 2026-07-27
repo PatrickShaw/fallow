@@ -1,6 +1,6 @@
 //! Analysis result types for all issue categories.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -866,6 +866,135 @@ macro_rules! counted_analysis_result_fields {
     };
 }
 
+trait FindingIgnorePolicy {
+    fn should_ignore(&self, predicate: &mut impl FnMut(&Path) -> bool) -> bool;
+}
+
+macro_rules! impl_single_source_dead_code {
+    ($($finding:ty => $($field:ident).+),+ $(,)?) => {
+        $(
+            impl FindingIgnorePolicy for $finding {
+                fn should_ignore(
+                    &self,
+                    predicate: &mut impl FnMut(&Path) -> bool,
+                ) -> bool {
+                    predicate(&self.$($field).+)
+                }
+            }
+        )+
+    };
+}
+
+impl_single_source_dead_code! {
+    UnusedFileFinding => file.path,
+    UnusedExportFinding => export.path,
+    UnusedTypeFinding => export.path,
+    PrivateTypeLeakFinding => leak.path,
+    UnusedEnumMemberFinding => member.path,
+    UnusedClassMemberFinding => member.path,
+    UnusedStoreMemberFinding => member.path,
+    UnresolvedImportFinding => import.path,
+    UnprovidedInjectFinding => inject.path,
+    UnrenderedComponentFinding => component.path,
+    UnusedComponentPropFinding => prop.path,
+    UnusedComponentEmitFinding => emit.path,
+    UnusedComponentInputFinding => input.path,
+    UnusedComponentOutputFinding => output.path,
+    UnusedSvelteEventFinding => event.path,
+    UnusedServerActionFinding => action.path,
+    UnusedLoadDataKeyFinding => key.path,
+}
+
+macro_rules! impl_never_ignored_finding {
+    ($($finding:ty),+ $(,)?) => {
+        $(
+            impl FindingIgnorePolicy for $finding {
+                fn should_ignore(
+                    &self,
+                    _predicate: &mut impl FnMut(&Path) -> bool,
+                ) -> bool {
+                    false
+                }
+            }
+        )+
+    };
+}
+
+impl_never_ignored_finding! {
+    UnusedDependencyFinding,
+    UnusedDevDependencyFinding,
+    UnusedOptionalDependencyFinding,
+    TypeOnlyDependencyFinding,
+    TestOnlyDependencyFinding,
+    DevDependencyInProductionFinding,
+    UnusedCatalogEntryFinding,
+    EmptyCatalogGroupFinding,
+    UnresolvedCatalogReferenceFinding,
+    UnusedDependencyOverrideFinding,
+    MisconfiguredDependencyOverrideFinding,
+    BoundaryViolationFinding,
+    BoundaryCoverageViolationFinding,
+    BoundaryCallViolationFinding,
+    PolicyViolationFinding,
+    StaleSuppression,
+    InvalidClientExportFinding,
+    MixedClientServerBarrelFinding,
+    MisplacedDirectiveFinding,
+    RouteCollisionFinding,
+    DynamicSegmentNameConflictFinding,
+}
+
+fn all_nonempty_paths_match<'a>(
+    mut paths: impl Iterator<Item = &'a PathBuf>,
+    predicate: &mut impl FnMut(&Path) -> bool,
+) -> bool {
+    let Some(first) = paths.next() else {
+        return false;
+    };
+    predicate(first) && paths.all(|path| predicate(path))
+}
+
+impl FindingIgnorePolicy for UnlistedDependencyFinding {
+    fn should_ignore(&self, predicate: &mut impl FnMut(&Path) -> bool) -> bool {
+        all_nonempty_paths_match(
+            self.dep.imported_from.iter().map(|site| &site.path),
+            predicate,
+        )
+    }
+}
+
+impl FindingIgnorePolicy for DuplicateExportFinding {
+    fn should_ignore(&self, predicate: &mut impl FnMut(&Path) -> bool) -> bool {
+        all_nonempty_paths_match(
+            self.export.locations.iter().map(|location| &location.path),
+            predicate,
+        )
+    }
+}
+
+impl FindingIgnorePolicy for CircularDependencyFinding {
+    fn should_ignore(&self, predicate: &mut impl FnMut(&Path) -> bool) -> bool {
+        all_nonempty_paths_match(self.cycle.files.iter(), predicate)
+    }
+}
+
+impl FindingIgnorePolicy for ReExportCycleFinding {
+    fn should_ignore(&self, predicate: &mut impl FnMut(&Path) -> bool) -> bool {
+        all_nonempty_paths_match(self.cycle.files.iter(), predicate)
+    }
+}
+
+macro_rules! remove_configured_ignored_findings {
+    ($state:expr, $($field:ident => $key:literal,)+) => {{
+        let (results, predicate) = $state;
+        $(
+            results.$field.retain(|issue| {
+                !issue.should_ignore(&mut *predicate)
+            });
+        )+
+    }};
+}
+
 macro_rules! counted_result_key_slice {
     ($($field:ident => $key:literal,)+) => {
         &[$($key),+]
@@ -883,6 +1012,20 @@ pub const TOTAL_ISSUE_RESULT_KEYS: &[&str] =
     counted_analysis_result_fields!(counted_result_key_slice);
 
 impl AnalysisResults {
+    /// Remove dead-code findings whose complete, non-empty source-owner set
+    /// matches `is_ignored`.
+    ///
+    /// Architecture, policy, suppression-hygiene, framework-correctness, and
+    /// package/project findings are retained. Context paths embedded in a
+    /// dead-code finding are not owners.
+    #[doc(hidden)]
+    pub fn remove_ignored_dead_code_findings(&mut self, mut is_ignored: impl FnMut(&Path) -> bool) {
+        counted_analysis_result_fields!(
+            remove_configured_ignored_findings,
+            (self, &mut is_ignored)
+        );
+    }
+
     /// Total number of issues found.
     ///
     /// Sums across all issue categories (unused files, exports, types,
@@ -4763,6 +4906,191 @@ mod tests {
             }));
         assert_eq!(r.total_issues(), 1);
         assert_eq!(cloned.total_issues(), 2);
+    }
+
+    fn protected_architecture_findings(path: &Path) -> AnalysisResults {
+        AnalysisResults {
+            boundary_violations: vec![BoundaryViolationFinding::with_actions(BoundaryViolation {
+                from_path: path.to_path_buf(),
+                to_path: PathBuf::from("src/target.ts"),
+                from_zone: "ui".to_string(),
+                to_zone: "data".to_string(),
+                import_specifier: "../target".to_string(),
+                line: 1,
+                col: 0,
+            })],
+            boundary_coverage_violations: vec![BoundaryCoverageViolationFinding::with_actions(
+                BoundaryCoverageViolation {
+                    path: path.to_path_buf(),
+                    line: 1,
+                    col: 0,
+                },
+            )],
+            boundary_call_violations: vec![BoundaryCallViolationFinding::with_actions(
+                BoundaryCallViolation {
+                    path: path.to_path_buf(),
+                    line: 1,
+                    col: 0,
+                    zone: "ui".to_string(),
+                    callee: "cp.exec".to_string(),
+                    pattern: "child_process.*".to_string(),
+                },
+            )],
+            policy_violations: vec![PolicyViolationFinding::with_actions(PolicyViolation {
+                path: path.to_path_buf(),
+                line: 1,
+                col: 0,
+                pack: "security".to_string(),
+                rule_id: "no-eval".to_string(),
+                kind: PolicyRuleKind::BannedCall,
+                matched: "eval".to_string(),
+                severity: PolicyViolationSeverity::Error,
+                message: None,
+            })],
+            stale_suppressions: vec![StaleSuppression {
+                path: path.to_path_buf(),
+                line: 1,
+                col: 0,
+                origin: SuppressionOrigin::Comment {
+                    issue_kind: Some("unused-file".to_string()),
+                    reason: None,
+                    is_file_level: false,
+                    kind_known: true,
+                },
+                missing_reason: false,
+                actions: StaleSuppression::actions_for(false),
+            }],
+            ..AnalysisResults::default()
+        }
+    }
+
+    fn protected_framework_findings() -> AnalysisResults {
+        AnalysisResults {
+            invalid_client_exports: vec![InvalidClientExportFinding::with_actions(
+                InvalidClientExport {
+                    path: PathBuf::from("ignored/client.ts"),
+                    export_name: "metadata".to_string(),
+                    directive: "use client".to_string(),
+                    line: 1,
+                    col: 0,
+                },
+            )],
+            mixed_client_server_barrels: vec![MixedClientServerBarrelFinding::with_actions(
+                MixedClientServerBarrel {
+                    path: PathBuf::from("ignored/barrel.ts"),
+                    client_origin: "./client".to_string(),
+                    server_origin: "./server".to_string(),
+                    line: 1,
+                    col: 0,
+                },
+            )],
+            misplaced_directives: vec![MisplacedDirectiveFinding::with_actions(
+                MisplacedDirective {
+                    path: PathBuf::from("ignored/directive.ts"),
+                    directive: "use client".to_string(),
+                    line: 2,
+                    col: 0,
+                },
+            )],
+            route_collisions: vec![RouteCollisionFinding::with_actions(RouteCollision {
+                path: PathBuf::from("ignored/app/about/page.tsx"),
+                url: "/about".to_string(),
+                conflicting_paths: vec![PathBuf::from("src/app/about/page.tsx")],
+                line: 1,
+                col: 0,
+            })],
+            dynamic_segment_name_conflicts: vec![DynamicSegmentNameConflictFinding::with_actions(
+                DynamicSegmentNameConflict {
+                    path: PathBuf::from("ignored/app/shop/[id]/page.tsx"),
+                    position: "/shop".to_string(),
+                    conflicting_segments: vec!["[id]".to_string(), "[slug]".to_string()],
+                    conflicting_paths: vec![PathBuf::from("src/app/shop/[slug]/page.tsx")],
+                    line: 1,
+                    col: 0,
+                },
+            )],
+            ..AnalysisResults::default()
+        }
+    }
+
+    #[test]
+    fn finding_ignore_hides_dead_code_but_retains_protected_findings() {
+        let ignored_path = PathBuf::from("ignored/dead.ts");
+        let mut results = protected_architecture_findings(&ignored_path);
+        results.merge_into(protected_framework_findings());
+        results.unused_files = vec![
+            UnusedFileFinding::with_actions(UnusedFile { path: ignored_path }),
+            UnusedFileFinding::with_actions(UnusedFile {
+                path: PathBuf::from("src/visible.ts"),
+            }),
+        ];
+
+        results.remove_ignored_dead_code_findings(|path| path.starts_with("ignored"));
+
+        assert_eq!(results.unused_files.len(), 1);
+        assert_eq!(
+            results.unused_files[0].file.path,
+            PathBuf::from("src/visible.ts")
+        );
+        assert_eq!(results.boundary_violations.len(), 1);
+        assert_eq!(results.boundary_coverage_violations.len(), 1);
+        assert_eq!(results.boundary_call_violations.len(), 1);
+        assert_eq!(results.policy_violations.len(), 1);
+        assert_eq!(results.stale_suppressions.len(), 1);
+        assert_eq!(results.invalid_client_exports.len(), 1);
+        assert_eq!(results.mixed_client_server_barrels.len(), 1);
+        assert_eq!(results.misplaced_directives.len(), 1);
+        assert_eq!(results.route_collisions.len(), 1);
+        assert_eq!(results.dynamic_segment_name_conflicts.len(), 1);
+    }
+
+    #[test]
+    fn finding_ignore_requires_every_source_owner_to_match() {
+        let duplicate = |paths: &[&str]| {
+            DuplicateExportFinding::with_actions(DuplicateExport {
+                export_name: "shared".to_string(),
+                locations: paths
+                    .iter()
+                    .map(|path| DuplicateLocation {
+                        path: PathBuf::from(path),
+                        line: 1,
+                        col: 0,
+                    })
+                    .collect(),
+            })
+        };
+        let mut results = AnalysisResults {
+            duplicate_exports: vec![
+                duplicate(&["ignored/a.ts", "ignored/b.ts"]),
+                duplicate(&["ignored/a.ts", "src/b.ts"]),
+                duplicate(&[]),
+            ],
+            ..AnalysisResults::default()
+        };
+
+        results.remove_ignored_dead_code_findings(|path| path.starts_with("ignored"));
+
+        assert_eq!(results.duplicate_exports.len(), 2);
+        assert_eq!(results.duplicate_exports[0].export.locations.len(), 2);
+        assert!(results.duplicate_exports[1].export.locations.is_empty());
+    }
+
+    #[test]
+    fn finding_ignore_retains_unowned_package_issues() {
+        let mut results = AnalysisResults {
+            unused_dependencies: vec![UnusedDependencyFinding::with_actions(UnusedDependency {
+                package_name: "unused-package".to_string(),
+                location: DependencyLocation::Dependencies,
+                path: PathBuf::from("ignored/package.json"),
+                line: 3,
+                used_in_workspaces: vec![],
+            })],
+            ..AnalysisResults::default()
+        };
+
+        results.remove_ignored_dead_code_findings(|path| path.starts_with("ignored"));
+
+        assert_eq!(results.unused_dependencies.len(), 1);
     }
 
     // ── export_usages not counted in total_issues ───────────────

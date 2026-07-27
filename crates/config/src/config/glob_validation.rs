@@ -1,7 +1,7 @@
 //! Validation of user-supplied glob patterns from the config file.
 //!
 //! Fallow accepts filesystem glob patterns in several config fields (`entry`,
-//! `ignorePatterns`, `dynamicallyLoaded`, `duplicates.ignore`, `health.ignore`,
+//! `ignorePatterns`, `ignoreFindings`, `dynamicallyLoaded`, `duplicates.ignore`, `health.ignore`,
 //! `health.thresholdOverrides[].files`, `boundaries.zones[].patterns`,
 //! `overrides[].files`, `ignoreExports[].file`, `ignoreCatalogReferences[].consumer`).
 //! All of these are matched against
@@ -22,7 +22,9 @@ use std::path::{Component, Path};
 
 use globset::Glob;
 
-/// Validation failure for a single user-supplied glob pattern.
+use super::finding_ignore::FindingIgnoreMatcher;
+
+/// Validation failure for user-supplied glob configuration.
 #[derive(Debug)]
 pub enum GlobValidationError {
     /// Pattern is an absolute path (`/foo`, `\foo`, `C:\foo`, `\\share`).
@@ -39,6 +41,16 @@ pub enum GlobValidationError {
     InvalidSyntax {
         field: &'static str,
         pattern: String,
+        source: globset::Error,
+    },
+    /// A finding-ignore exception contains `!` without a pattern body.
+    EmptyNegation {
+        field: &'static str,
+        pattern: String,
+    },
+    /// Individually valid patterns cannot be compiled into one matcher.
+    PatternSetCompilation {
+        field: &'static str,
         source: globset::Error,
     },
 }
@@ -76,6 +88,14 @@ impl fmt::Display for GlobValidationError {
                      fix the syntax (see https://docs.rs/globset for the supported grammar)"
                 )
             }
+            Self::EmptyNegation { field, pattern } => write!(
+                f,
+                "{field}: invalid glob '{pattern}': a negated pattern requires a pattern after '!'"
+            ),
+            Self::PatternSetCompilation { field, source } => write!(
+                f,
+                "{field}: glob patterns cannot be compiled together: {source}; simplify the pattern set"
+            ),
         }
     }
 }
@@ -83,8 +103,12 @@ impl fmt::Display for GlobValidationError {
 impl std::error::Error for GlobValidationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::InvalidSyntax { source, .. } => Some(source),
-            _ => None,
+            Self::InvalidSyntax { source, .. } | Self::PatternSetCompilation { source, .. } => {
+                Some(source)
+            }
+            Self::AbsolutePath { .. }
+            | Self::TraversalSegment { .. }
+            | Self::EmptyNegation { .. } => None,
         }
     }
 }
@@ -206,6 +230,34 @@ pub fn validate_user_globs(
     }
 }
 
+/// Validate finding-ignore patterns, treating a leading `!` as a report
+/// exception, validating each project-relative body, and proving both matcher
+/// sets can be compiled together.
+pub fn validate_user_finding_ignore_globs(
+    patterns: &[String],
+    field: &'static str,
+    errors: &mut Vec<GlobValidationError>,
+) {
+    let initial_error_count = errors.len();
+    for pattern in patterns {
+        let body = pattern.strip_prefix('!').unwrap_or(pattern);
+        if body.is_empty() {
+            errors.push(GlobValidationError::EmptyNegation {
+                field,
+                pattern: pattern.clone(),
+            });
+        } else if let Err(error) = compile_user_glob(body, field) {
+            errors.push(error);
+        }
+    }
+
+    if errors.len() == initial_error_count
+        && let Err(source) = FindingIgnoreMatcher::validate_compilation(patterns)
+    {
+        errors.push(GlobValidationError::PatternSetCompilation { field, source });
+    }
+}
+
 /// Validate a user-supplied DIRECTORY PATH (not a glob). Same absolute-path
 /// and traversal checks as `compile_user_glob`, but skips the glob-syntax
 /// check because the value is a literal path, not a pattern.
@@ -258,6 +310,44 @@ mod tests {
         assert!(compile_user_glob("./src/main.ts", "entry").is_ok());
         assert!(compile_user_glob("packages/*/src/index.ts", "entry").is_ok());
         assert!(compile_user_glob("**/{a,b}.ts", "entry").is_ok());
+    }
+
+    #[test]
+    fn finding_ignore_globs_validate_negated_pattern_bodies() {
+        let mut errors = Vec::new();
+        validate_user_finding_ignore_globs(
+            &["**/*.test.ts".to_string(), "!src/public/**".to_string()],
+            "ignoreFindings",
+            &mut errors,
+        );
+
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn finding_ignore_globs_reject_bare_negation() {
+        let mut errors = Vec::new();
+        validate_user_finding_ignore_globs(&["!".to_string()], "ignoreFindings", &mut errors);
+
+        assert!(matches!(
+            errors.as_slice(),
+            [GlobValidationError::EmptyNegation { .. }]
+        ));
+    }
+
+    #[test]
+    fn finding_ignore_globs_validate_negated_paths_and_syntax() {
+        let cases = ["!/absolute/**", "!../outside/**", "![unclosed"];
+
+        for pattern in cases {
+            let mut errors = Vec::new();
+            validate_user_finding_ignore_globs(
+                &[pattern.to_string()],
+                "ignoreFindings",
+                &mut errors,
+            );
+            assert_eq!(errors.len(), 1, "pattern: {pattern}");
+        }
     }
 
     #[test]

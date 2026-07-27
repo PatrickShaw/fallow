@@ -323,8 +323,8 @@ fn analyze_and_report(config: &fallow_config::ResolvedConfig, opts: &WatchOption
                 session.workspaces(),
             )
         });
-        match fallow_api::refine_type_aware_results(
-            &config.root,
+        match fallow_api::refine_type_aware_results_with_config(
+            config,
             &mut analysis.results,
             &projects,
             &entry_points,
@@ -1069,6 +1069,7 @@ mod tests {
             extends: vec![],
             entry: vec![],
             ignore_patterns,
+            ignore_findings: vec![],
             framework: vec![],
             workspaces: None,
             ignore_dependencies: vec![],

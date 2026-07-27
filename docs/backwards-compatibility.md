@@ -9,9 +9,10 @@ These interfaces are covered by semver , breaking changes only happen in major v
 ### Configuration format
 
 - **Config file names**: `.fallowrc.json`, `.fallowrc.jsonc`, `fallow.toml`, `.fallow.toml`
-- **All documented config fields**: `extends`, `ignorePatterns`, `rules`, `overrides`, `entry`, `ignoreDependencies`, `ignoreExports`, `ignoreExportsUsedInFile`, `ignoreDecorators`, `unusedComponentProps` (with `ignorePattern`), `includeEntryExports`, `autoImports`, `duplicates`, `audit`, `cache`, `fix`, `production` (boolean form `production: true` or per-analysis form `production: { deadCode, health, dupes }`), `framework`, `workspaces`, `plugins`, `rulePacks`, `boundaries` (including `boundaries.preset`, `boundaries.coverage`, and `boundaries.calls`)
+- **All documented config fields**: `extends`, `ignorePatterns`, `ignoreFindings`, `rules`, `overrides`, `entry`, `ignoreDependencies`, `ignoreExports`, `ignoreExportsUsedInFile`, `ignoreDecorators`, `unusedComponentProps` (with `ignorePattern`), `includeEntryExports`, `autoImports`, `duplicates`, `audit`, `cache`, `fix`, `production` (boolean form `production: true` or per-analysis form `production: { deadCode, health, dupes }`), `framework`, `workspaces`, `plugins`, `rulePacks`, `boundaries` (including `boundaries.preset`, `boundaries.coverage`, and `boundaries.calls`)
 - **Rule names and severity values**: `unused-files`, `unused-exports`, etc. with `error`/`warn`/`off`
 - **Extends and overrides semantics**: merge behavior, glob matching, override precedence, `npm:` prefix resolution, `https://` URL resolution
+- **`ignoreFindings` semantics**: patterns are validated as project-root-relative globs, leading `!` patterns keep reportable exceptions, source-owned dead-code findings with multiple owners are hidden only when every owner matches, and architecture, policy, suppression-hygiene, and framework-correctness findings remain visible, as do manifest-owned findings that no source file owns (unused dependencies, unused dev and optional dependencies, catalog entries, and dependency overrides). An unlisted dependency is source-owned by its import sites, so it is hidden only when every import site matches
 - **Inline suppression comment syntax**: `fallow-ignore-next-line`, `fallow-ignore-file`
 
 ### JSON output schema

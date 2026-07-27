@@ -109,7 +109,11 @@ fn empty_type_aware_candidate_set_starts_no_companion() {
         &[("FALLOW_TYPE_AWARE_BIN", &missing_companion_arg)],
     );
 
-    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+    assert_eq!(
+        output.code, 0,
+        "stdout: {}\nstderr: {}",
+        output.stdout, output.stderr
+    );
     let json = parse_json(&output);
     assert_eq!(json["total_issues"], 0);
     assert_eq!(json["_meta"]["type_aware"]["elapsed_ms"], 0);
@@ -187,7 +191,11 @@ fn type_aware_class_method_impact_uses_exact_owner_identity() {
         "--quiet",
     ]);
 
-    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+    assert_eq!(
+        output.code, 0,
+        "stdout: {}\nstderr: {}",
+        output.stdout, output.stderr
+    );
     let json = parse_json(&output);
     assert_eq!(json["target"]["owner"], serde_json::json!("UserRepository"));
     assert_eq!(json["target"]["local_name"], serde_json::json!("save"));
@@ -216,7 +224,11 @@ fn type_aware_class_method_impact_uses_exact_owner_identity() {
         "json",
         "--quiet",
     ]);
-    assert_eq!(preview.code, 0, "stderr: {}", preview.stderr);
+    assert_eq!(
+        preview.code, 0,
+        "stdout: {}\nstderr: {}",
+        preview.stdout, preview.stderr
+    );
     let preview = parse_json(&preview);
     let fixes = preview["fixes"].as_array().expect("fix preview");
     assert!(fixes.iter().any(|fix| {
@@ -276,7 +288,13 @@ fn type_aware_refines_ambiguous_unused_exports_without_unsafe_fixes() {
         "json",
         "--quiet",
     ];
-    let typed = parse_json(&run_fallow_raw_with_type_aware_sidecar(&type_aware_args));
+    let typed_output = run_fallow_raw_with_type_aware_sidecar(&type_aware_args);
+    assert_ne!(
+        typed_output.code, 2,
+        "stdout: {}\nstderr: {}",
+        typed_output.stdout, typed_output.stderr
+    );
+    let typed = parse_json(&typed_output);
     let typed_exports = typed["unused_exports"].as_array().expect("unused exports");
     let typed_types = typed["unused_types"].as_array().expect("unused types");
 
@@ -376,7 +394,11 @@ fn type_aware_framework_contract_requires_package_provenance() {
         "--quiet",
     ]);
 
-    assert_eq!(output.code, 1, "stderr: {}", output.stderr);
+    assert_eq!(
+        output.code, 1,
+        "stdout: {}\nstderr: {}",
+        output.stdout, output.stderr
+    );
     let json = parse_json(&output);
     let decisions = json["_meta"]["type_aware"]["candidate_decisions"]
         .as_array()

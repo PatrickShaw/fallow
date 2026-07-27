@@ -202,9 +202,12 @@ const fn drain_budget() -> Duration {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "test setup failures should fail at the exact setup operation"
+#[cfg_attr(
+    unix,
+    expect(
+        clippy::expect_used,
+        reason = "test setup failures should fail at the exact setup operation"
+    )
 )]
 mod tests {
     use super::*;

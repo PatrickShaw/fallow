@@ -26,6 +26,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Read-only, and required solely to read the repository's
+      # immutable-releases setting; `contents: read` alone returns HTTP 403.
+      # This job holds no publication credentials and produces no artifact.
+      administration: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

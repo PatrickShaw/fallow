@@ -345,6 +345,10 @@ test("release publication waits for the aggregate verification gate", () => {
   const vscodePublish = indentedBlock(workflow, "vscode-publish", 2);
 
   assert.match(context, /permissions:\n\s+contents: read/);
+  // `administration: read` is the only way to read the immutable-releases
+  // setting; the job must stay read-only everywhere else.
+  assert.match(context, /administration: read/);
+  assert.doesNotMatch(context, /^\s+\w+: write$/mu);
   assert.match(build, /needs: release-context/);
   assert.match(validate, /needs: release-context/);
   assert.match(gate, /needs: \[build, validate\]/);

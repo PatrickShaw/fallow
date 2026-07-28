@@ -391,6 +391,8 @@ test("release keeps the version tag last and requires curated public notes", () 
   assert.match(context, /GITHUB_REF.*refs\/heads\/main/su);
   assert.match(context, /Release tag must match vMAJOR\.MINOR\.PATCH/u);
   assert.match(context, /immutable-releases/u);
+  assert.match(context, /Release immutability is not enabled/u);
+  assert.doesNotMatch(context, /select\(\.enabled/u);
   assert.match(context, /Release tag .* already exists; tag creation must remain near the end/u);
   assert.match(releaseAssets, /Release tag .* appeared before publication completed/u);
   assert.match(releaseAssets, /No release assets were downloaded/u);
@@ -406,6 +408,9 @@ test("release keeps the version tag last and requires curated public notes", () 
   assert.match(skill, /Draft curated public GitHub release notes before starting the publication/u);
   assert.match(skill, /exact full-changelog comparison URL/u);
   assert.match(skill, /non-empty body/u);
+  assert.match(skill, /release title must be/u);
+  assert.match(skill, /release title or notes contain an em-dash/u);
+  assert.match(skill, /name no competing or upstream third-party project/u);
   assert.match(skill, /--name release-assets/u);
   assert.match(skill, /--verify-tag/u);
   assert.match(skill, /--notes-file "\$NOTES_FILE"/u);

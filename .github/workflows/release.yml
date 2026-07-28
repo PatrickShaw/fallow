@@ -59,10 +59,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh api \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "repos/${GITHUB_REPOSITORY}/immutable-releases" \
-            --jq 'select(.enabled == true) | .enabled' >/dev/null
+          # `--jq 'select(...)'` filters a disabled repository to empty output and
+          # still exits 0, so the flag value has to be compared explicitly.
+          enabled="$(
+            gh api \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/${GITHUB_REPOSITORY}/immutable-releases" \
+              --jq '.enabled'
+          )"
+          if [ "$enabled" != "true" ]; then
+            echo "::error::Release immutability is not enabled for ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
 
       - name: Verify release tag is absent
         shell: bash

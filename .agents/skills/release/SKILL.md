@@ -32,8 +32,13 @@ description: Prepare and publish a Fallow release with version, changelog, gener
    - explain user-visible value rather than repeat commit subjects;
    - cover every material changelog entry and any breaking or migration detail;
    - use only public, generic examples;
+   - name no competing or upstream third-party project;
+   - contain no em-dash characters in the title or the body;
    - verify contributor attribution;
    - end with the exact full-changelog comparison URL.
+
+   The published release is immutable, so every one of these is a
+   pre-publication gate, not something to repair afterwards.
 
    Store the notes outside the repository, for example
    `/tmp/fallow-release-vX.Y.Z.md`, and require the file to be non-empty.
@@ -59,6 +64,18 @@ description: Prepare and publish a Fallow release with version, changelog, gener
 
    test -s "$NOTES_FILE"
    grep -qF "https://github.com/fallow-rs/fallow/compare/${PREVIOUS_TAG}...${TAG}" "$NOTES_FILE"
+
+   # The workflow can no longer validate release metadata, because the release
+   # does not exist yet, and an immutable release cannot be repaired later.
+   case "$TITLE" in
+     "${TAG}: "?*) ;;
+     *) echo "release title must be '${TAG}: <summary>'" >&2; exit 1 ;;
+   esac
+   EM_DASH="$(printf '\xe2\x80\x94')"
+   if printf '%s' "$TITLE" | grep -qF "$EM_DASH" || grep -qF "$EM_DASH" "$NOTES_FILE"; then
+     echo "release title or notes contain an em-dash" >&2
+     exit 1
+   fi
 
    git push origin main
    git fetch origin main

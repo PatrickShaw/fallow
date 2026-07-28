@@ -53,9 +53,11 @@ globally with `--ignore-scripts`.
   `release-assets` bundle. GitHub CLI creates a draft, uploads every asset, and
   publishes only after upload, so release immutability is applied to a complete
   release.
-- Do not generate release notes. Require a non-empty title, a non-empty body,
-  the exact repository comparison URL, and the complete asset inventory before
-  creating the tag.
+- Do not generate release notes. Require a `vMAJOR.MINOR.PATCH: ` title prefix
+  with a non-empty summary, a non-empty body, the exact repository comparison
+  URL, and the complete asset inventory before creating the tag. The published
+  release is immutable, so these are pre-publication gates and the maintainer
+  flow owns them; the workflow cannot check a release that does not exist yet.
 - Push rolling Action tags and refresh Dockerfile binary pins from the
   maintainer release workflow after published assets exist, not from the
   credential-bearing GitHub workflow.

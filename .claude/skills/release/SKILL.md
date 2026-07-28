@@ -63,49 +63,49 @@ description: Prepare and publish a Fallow release with version, changelog, gener
 ## Publish
 
 10. Push the release commit to `main`. While the version tag is still absent,
-   dispatch the release workflow from `main` with the planned tag:
+    dispatch the release workflow from `main` with the planned tag:
 
-   ```bash
-   # Use the verified values established during release preparation.
-   TAG="v${VERSION}"
-   TITLE="${TAG}: ${SUMMARY}"
-   NOTES_FILE="/tmp/fallow-release-${TAG}.md"
-   RELEASE_COMMIT="$(git rev-parse HEAD)"
+    ```bash
+    # Use the verified values established during release preparation.
+    TAG="v${VERSION}"
+    TITLE="${TAG}: ${SUMMARY}"
+    NOTES_FILE="/tmp/fallow-release-${TAG}.md"
+    RELEASE_COMMIT="$(git rev-parse HEAD)"
 
-   test -s "$NOTES_FILE"
-   grep -qF "https://github.com/fallow-rs/fallow/compare/${PREVIOUS_TAG}...${TAG}" "$NOTES_FILE"
+    test -s "$NOTES_FILE"
+    grep -qF "https://github.com/fallow-rs/fallow/compare/${PREVIOUS_TAG}...${TAG}" "$NOTES_FILE"
 
-   # The workflow can no longer validate release metadata, because the release
-   # does not exist yet, and an immutable release cannot be repaired later.
-   case "$TITLE" in
+    # The workflow can no longer validate release metadata, because the release
+    # does not exist yet, and an immutable release cannot be repaired later.
+    case "$TITLE" in
      "${TAG}: "?*) ;;
      *) echo "release title must be '${TAG}: <summary>'" >&2; exit 1 ;;
-   esac
-   EM_DASH="$(printf '\xe2\x80\x94')"
-   if printf '%s' "$TITLE" | grep -qF "$EM_DASH" || grep -qF "$EM_DASH" "$NOTES_FILE"; then
+    esac
+    EM_DASH="$(printf '\xe2\x80\x94')"
+    if printf '%s' "$TITLE" | grep -qF "$EM_DASH" || grep -qF "$EM_DASH" "$NOTES_FILE"; then
      echo "release title or notes contain an em-dash" >&2
      exit 1
-   fi
+    fi
 
-   git push origin main
-   git fetch origin main
-   if [ "$(git rev-parse origin/main)" != "$RELEASE_COMMIT" ]; then
+    git push origin main
+    git fetch origin main
+    if [ "$(git rev-parse origin/main)" != "$RELEASE_COMMIT" ]; then
      echo "origin/main moved away from the prepared release commit" >&2
      exit 1
-   fi
-   if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+    fi
+    if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
      echo "release tag already exists: ${TAG}" >&2
      exit 1
-   fi
+    fi
 
-   gh workflow run release.yml --ref main \
+    gh workflow run release.yml --ref main \
      -f tag="$TAG"
-   ```
+    ```
 
-   The workflow deliberately has no tag trigger and never creates a tag or
-   GitHub Release. It validates and builds the release, stores the complete
-   flattened GitHub asset bundle as the `release-assets` Actions artifact, and
-   publishes registries while the tag remains absent.
+    The workflow deliberately has no tag trigger and never creates a tag or
+    GitHub Release. It validates and builds the release, stores the complete
+    flattened GitHub asset bundle as the `release-assets` Actions artifact, and
+    publishes registries while the tag remains absent.
 11. Monitor the specific workflow run through `status=completed` and
     `conclusion=success`; a successful watch command alone is not sufficient
     evidence. Require the `Release ready for signed tag` job to pass, then

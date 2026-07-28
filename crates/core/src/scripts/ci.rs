@@ -9,7 +9,7 @@ use std::path::Path;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{analyze_commands_with_context, could_be_file_path};
+use super::{ScriptCatalog, analyze_commands_with_context, could_be_file_path};
 
 /// Result of scanning CI config files: package names used by CI tooling AND
 /// project-relative file paths referenced as command-line arguments.
@@ -33,11 +33,14 @@ pub struct CiAnalysis {
 ///
 /// CI files always live at `.gitlab-ci.yml` or `.github/workflows/*.yml`
 /// relative to the project root, so no workspace-prefix transformation applies.
+/// The catalog spans the whole project, so a CI step that resolves to a script
+/// declared only by a workspace package credits that body's dependencies but
+/// contributes none of its file arguments, which are relative to that package.
 pub fn analyze_ci_files(
     root: &Path,
     bin_map: &FxHashMap<String, String>,
     declared_packages: &FxHashSet<String>,
-    script_names: &FxHashSet<String>,
+    scripts: &ScriptCatalog,
 ) -> CiAnalysis {
     let _span = tracing::info_span!("analyze_ci_files").entered();
     let mut analysis = CiAnalysis::default();
@@ -49,7 +52,7 @@ pub fn analyze_ci_files(
             root,
             bin_map,
             declared_packages,
-            script_names,
+            scripts,
             &mut analysis,
         );
     }
@@ -67,7 +70,7 @@ pub fn analyze_ci_files(
                     root,
                     bin_map,
                     declared_packages,
-                    script_names,
+                    scripts,
                     &mut analysis,
                 );
             }
@@ -92,12 +95,12 @@ fn extract_ci_signals(
     root: &Path,
     bin_map: &FxHashMap<String, String>,
     declared_packages: &FxHashSet<String>,
-    script_names: &FxHashSet<String>,
+    scripts: &ScriptCatalog,
     analysis: &mut CiAnalysis,
 ) {
     let commands = extract_ci_commands(content);
     let parsed =
-        analyze_commands_with_context(&commands, root, bin_map, declared_packages, script_names);
+        analyze_commands_with_context(&commands, root, bin_map, declared_packages, scripts);
     analysis.used_packages.extend(parsed.used_packages);
     analysis.entry_files.extend(
         parsed
@@ -265,6 +268,18 @@ mod tests {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
+    fn catalog(scripts: &[(&str, &str)]) -> ScriptCatalog {
+        #[expect(
+            clippy::disallowed_types,
+            reason = "ScriptCatalog is built from serde-deserialized HashMap"
+        )]
+        let scripts: std::collections::HashMap<String, String> = scripts
+            .iter()
+            .map(|(name, body)| ((*name).to_string(), (*body).to_string()))
+            .collect();
+        ScriptCatalog::from_scripts(&scripts)
+    }
+
     fn analyze_content(content: &str) -> CiAnalysis {
         let mut analysis = CiAnalysis::default();
         extract_ci_signals(
@@ -272,7 +287,7 @@ mod tests {
             Path::new("/nonexistent"),
             &FxHashMap::default(),
             &empty_set(),
-            &empty_set(),
+            &catalog(&[]),
             &mut analysis,
         );
         analysis
@@ -440,7 +455,7 @@ jobs:
             Path::new("/nonexistent"),
             &FxHashMap::default(),
             &set(&["envinfo"]),
-            &empty_set(),
+            &catalog(&[]),
             &mut analysis,
         );
         assert!(analysis.used_packages.contains("envinfo"));
@@ -460,10 +475,66 @@ jobs:
             Path::new("/nonexistent"),
             &FxHashMap::default(),
             &set(&["build"]),
-            &set(&["build"]),
+            &catalog(&[("build", "vite build")]),
             &mut analysis,
         );
         assert!(!analysis.used_packages.contains("build"));
+    }
+
+    /// The dominant real-world shape: CI never names the linter, it runs the
+    /// package.json script and adds the CI formatter flag (issue #2016).
+    #[test]
+    fn github_actions_npm_run_script_forwards_formatter_flag() {
+        let content = r"
+jobs:
+  lint:
+    steps:
+      - run: npm run lint -- --format gha
+";
+        let mut analysis = CiAnalysis::default();
+        extract_ci_signals(
+            content,
+            Path::new("/nonexistent"),
+            &FxHashMap::default(),
+            &set(&["eslint", "eslint-formatter-gha"]),
+            &catalog(&[("lint", "eslint .")]),
+            &mut analysis,
+        );
+        assert!(analysis.used_packages.contains("eslint"));
+        assert!(analysis.used_packages.contains("eslint-formatter-gha"));
+    }
+
+    /// A root CI step resolving to a workspace-only script must not turn that
+    /// body's file arguments into root-relative entry patterns (issue #2016).
+    #[test]
+    fn workspace_only_script_body_does_not_seed_root_entry_files() {
+        let content = r"
+jobs:
+  build:
+    steps:
+      - run: npm run build -- --mode ci
+";
+        #[expect(
+            clippy::disallowed_types,
+            reason = "ScriptCatalog is built from serde-deserialized HashMap"
+        )]
+        let ws_scripts: std::collections::HashMap<String, String> =
+            std::iter::once(("build".to_string(), "esbuild scripts/bundle.js".to_string()))
+                .collect();
+        let mut scripts = ScriptCatalog::default();
+        scripts.merge_workspace_scripts(&ws_scripts);
+
+        let mut analysis = CiAnalysis::default();
+        extract_ci_signals(
+            content,
+            Path::new("/nonexistent"),
+            &FxHashMap::default(),
+            &set(&["esbuild"]),
+            &scripts,
+            &mut analysis,
+        );
+        assert!(analysis.used_packages.contains("esbuild"));
+        assert!(analysis.entry_files.is_empty());
     }
 
     #[test]

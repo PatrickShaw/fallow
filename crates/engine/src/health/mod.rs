@@ -385,6 +385,11 @@ pub struct HealthExecutionOptions<'a> {
     pub changed_workspaces: Option<&'a str>,
     pub baseline: Option<&'a Path>,
     pub save_baseline: Option<&'a Path>,
+    /// Controls both halves of the baseline lifecycle: which buckets
+    /// `save_baseline` writes and how a loaded `baseline` is matched. An
+    /// identity save writes count and identity buckets, a count save writes
+    /// count buckets only.
+    pub baseline_mode: crate::baseline::HealthBaselineMode,
     pub complexity: bool,
     pub file_scores: bool,
     pub coverage_gaps: bool,
@@ -683,6 +688,7 @@ mod tests {
             changed_workspaces: None,
             baseline: Some(Path::new(".fallow/health-baseline.json")),
             save_baseline: None,
+            baseline_mode: crate::baseline::HealthBaselineMode::Count,
             complexity: true,
             file_scores: true,
             coverage_gaps: false,
@@ -786,6 +792,7 @@ mod tests {
                 changed_workspaces: None,
                 baseline: None,
                 save_baseline: None,
+                baseline_mode: crate::baseline::HealthBaselineMode::Count,
                 complexity: true,
                 file_scores: false,
                 coverage_gaps: false,

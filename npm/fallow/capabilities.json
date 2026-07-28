@@ -129,6 +129,17 @@
       "description": "Compare against a previously saved baseline file"
     },
     {
+      "name": "--baseline-mode",
+      "type": "string",
+      "required": false,
+      "description": "How `--baseline` matches health findings: per file and category (`count`, the default) or per function identity (`identity`, strict, and only against a baseline that was saved with `--baseline-mode identity`; such a baseline still reads in count mode)",
+      "default": "count",
+      "possible_values": [
+        "count",
+        "identity"
+      ]
+    },
+    {
       "name": "--parent-run",
       "type": "string",
       "required": false,

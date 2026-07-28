@@ -345,10 +345,10 @@ test("release publication waits for the aggregate verification gate", () => {
   const vscodePublish = indentedBlock(workflow, "vscode-publish", 2);
 
   assert.match(context, /permissions:\n\s+contents: read/);
-  // `administration: read` is the only way to read the immutable-releases
-  // setting; the job must stay read-only everywhere else.
-  assert.match(context, /administration: read/);
   assert.doesNotMatch(context, /^\s+\w+: write$/mu);
+  // `administration` is not a grantable GITHUB_TOKEN scope; declaring it makes
+  // the workflow unparseable and every dispatch fails with HTTP 422.
+  assert.doesNotMatch(workflow, /^\s+administration:/mu);
   assert.match(build, /needs: release-context/);
   assert.match(validate, /needs: release-context/);
   assert.match(gate, /needs: \[build, validate\]/);
@@ -394,9 +394,11 @@ test("release keeps the version tag last and requires curated public notes", () 
   assert.doesNotMatch(workflow, /github\.ref_name|refs\/tags\/v/mu);
   assert.match(context, /GITHUB_REF.*refs\/heads\/main/su);
   assert.match(context, /Release tag must match vMAJOR\.MINOR\.PATCH/u);
-  assert.match(context, /immutable-releases/u);
-  assert.match(context, /Release immutability is not enabled/u);
-  assert.doesNotMatch(context, /select\(\.enabled/u);
+  // The immutability gate lives in the maintainer flow: the endpoint is not
+  // readable with any grantable GITHUB_TOKEN scope.
+  assert.doesNotMatch(context, /\$\{GITHUB_REPOSITORY\}\/immutable-releases/u);
+  assert.match(skill, /immutable-releases/u);
+  assert.match(skill, /Release immutability is not enabled/u);
   assert.match(context, /Release tag .* already exists; tag creation must remain near the end/u);
   assert.match(releaseAssets, /Release tag .* appeared before publication completed/u);
   assert.match(releaseAssets, /No release assets were downloaded/u);

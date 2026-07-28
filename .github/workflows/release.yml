@@ -26,10 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Read-only, and required solely to read the repository's
-      # immutable-releases setting; `contents: read` alone returns HTTP 403.
-      # This job holds no publication credentials and produces no artifact.
-      administration: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,24 +53,14 @@ jobs:
             exit 1
           fi
 
-      - name: Verify release immutability is enabled
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # `--jq 'select(...)'` filters a disabled repository to empty output and
-          # still exits 0, so the flag value has to be compared explicitly.
-          enabled="$(
-            gh api \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "repos/${GITHUB_REPOSITORY}/immutable-releases" \
-              --jq '.enabled'
-          )"
-          if [ "$enabled" != "true" ]; then
-            echo "::error::Release immutability is not enabled for ${GITHUB_REPOSITORY}"
-            exit 1
-          fi
+      # Release immutability is verified in the maintainer release flow, not
+      # here. `repos/{owner}/{repo}/immutable-releases` requires the
+      # Administration read permission, which is not a grantable GITHUB_TOKEN
+      # scope: `administration: read` is rejected at workflow-parse time with
+      # HTTP 422, and `contents: read` gets HTTP 403 from the endpoint. The
+      # maintainer pre-flight reads it with personal credentials instead. Also
+      # note that `gh api --jq 'select(.enabled == true)'` is not a gate in any
+      # case: a disabled repository yields empty output and still exits 0.
 
       - name: Verify release tag is absent
         shell: bash

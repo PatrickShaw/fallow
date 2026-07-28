@@ -9,7 +9,7 @@ creates, moves, or publishes Git tags or GitHub Releases.
 
 | Job | Responsibility | Credentials |
 |---|---|---|
-| `release-context` | Bind the dispatch to `main`, the release version, release immutability, and an absent tag | Read only |
+| `release-context` | Bind the dispatch to `main`, the release version, and an absent tag | Read only |
 | `build` | Build and sign release artifacts | Artifact signing only |
 | `validate` | Reusable release validation | Read only |
 | `release-verified` | Join build and validation | None |
@@ -40,7 +40,12 @@ globally with `--ignore-scripts`.
   release publish-list test.
 - Keep artifact inventory and package-name constants aligned with the build
   matrix.
-- Require repository release immutability before publication.
+- Require repository release immutability before publication. Verify it in the
+  maintainer pre-flight, not in the workflow: reading
+  `repos/{owner}/{repo}/immutable-releases` needs the Administration read
+  permission, and `administration` is not a grantable workflow token scope, so
+  declaring it makes the workflow unparseable while `contents: read` gets HTTP
+  403 from the endpoint.
 - Dispatch the release workflow from `main` with the strict semantic-version
   tag. Reject a mismatched version or existing remote tag before expensive work
   starts, then reconfirm tag absence before staging the final asset bundle.

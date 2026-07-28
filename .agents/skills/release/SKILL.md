@@ -11,22 +11,31 @@ description: Prepare and publish a Fallow release with version, changelog, gener
    `docs/development/task-context-map.md`, and
    `docs/development/release-security.md`.
 2. Confirm `main` is clean, current with `origin/main`, reviewed, and green.
-   Require repository release immutability to be enabled. Check that the
-   planned version tag is absent remotely and that no unresolved draft release
-   or concurrent release is in progress.
-3. Derive the semantic-version bump from every commit since the prior release
+   Check that the planned version tag is absent remotely and that no
+   unresolved draft release or concurrent release is in progress.
+3. Require repository release immutability to be enabled. The release workflow
+   cannot check this: the endpoint needs the Administration read permission,
+   which is not a grantable workflow token scope. Verify it here, with
+   maintainer credentials, as the only gate:
+
+   ```bash
+   enabled="$(gh api -H "X-GitHub-Api-Version: 2026-03-10" \
+     repos/fallow-rs/fallow/immutable-releases --jq '.enabled')"
+   [ "$enabled" = "true" ] || { echo "Release immutability is not enabled" >&2; exit 1; }
+   ```
+4. Derive the semantic-version bump from every commit since the prior release
    unless the user supplied an explicit bump. Confirm a major bump before
    mutating versions unless the user explicitly requested it.
-4. Dispatch the reusable release-validation workflow against `main` and require
+5. Dispatch the reusable release-validation workflow against `main` and require
    a completed successful result before changing versions or creating a tag.
 
 ## Prepare
 
-5. Verify the complete `[Unreleased]` changelog against the commit range,
+6. Verify the complete `[Unreleased]` changelog against the commit range,
    issues, discussions, and external contributors since the prior tag. Ground
    public names, flags, rule IDs, and contributor handles in source or GitHub,
    not memory.
-6. Draft curated public GitHub release notes before starting the publication
+7. Draft curated public GitHub release notes before starting the publication
    workflow. They must:
 
    - explain user-visible value rather than repeat commit subjects;
@@ -42,17 +51,17 @@ description: Prepare and publish a Fallow release with version, changelog, gener
 
    Store the notes outside the repository, for example
    `/tmp/fallow-release-vX.Y.Z.md`, and require the file to be non-empty.
-7. Apply version changes transactionally. Regenerate every public contract,
+8. Apply version changes transactionally. Regenerate every public contract,
    adapter, packaged skill, and version-bearing artifact. Synchronize
    `fallow-docs` and `fallow-skills` from their canonical sources.
-8. Run package dry-runs, generated-contract checks, companion-repository
+9. Run package dry-runs, generated-contract checks, companion-repository
    checks, and the repository's full release gates. Review the exact staged
    paths before creating a signed release commit. Do not create the version tag
    yet.
 
 ## Publish
 
-9. Push the release commit to `main`. While the version tag is still absent,
+10. Push the release commit to `main`. While the version tag is still absent,
    dispatch the release workflow from `main` with the planned tag:
 
    ```bash
@@ -96,7 +105,7 @@ description: Prepare and publish a Fallow release with version, changelog, gener
    GitHub Release. It validates and builds the release, stores the complete
    flattened GitHub asset bundle as the `release-assets` Actions artifact, and
    publishes registries while the tag remains absent.
-10. Monitor the specific workflow run through `status=completed` and
+11. Monitor the specific workflow run through `status=completed` and
     `conclusion=success`; a successful watch command alone is not sufficient
     evidence. Require the `Release ready for signed tag` job to pass, then
     verify every registry and marketplace publication is live.
@@ -137,13 +146,13 @@ description: Prepare and publish a Fallow release with version, changelog, gener
 
 ## Verify and close
 
-11. Query the GitHub Release and require a non-draft, non-prerelease release
+12. Query the GitHub Release and require a non-draft, non-prerelease release
     marked immutable, with the expected title, a non-empty body, the exact
     comparison link, the signed tag at `RELEASE_COMMIT`, and uploaded assets.
     Then verify every published crate, npm package, editor package, binary,
     schema, documentation deployment, and companion contract from its real
     public endpoint.
-12. Complete the required post-publication NAPI, Docker, rolling-tag, issue,
+13. Complete the required post-publication NAPI, Docker, rolling-tag, issue,
     discussion, and companion-repository follow-ups. Require their resulting
     `main` workflows to finish green and every touched worktree to be clean.
 

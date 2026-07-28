@@ -329,7 +329,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.windows-rust == 'true'
     runs-on: windows-latest
-    timeout-minutes: 15
+    # The suite plus the platform clippy pass takes around 14 minutes of real
+    # work on a warm cache, so a 15-minute budget cancels the job during
+    # cache-save cleanup even though every step succeeded.
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:

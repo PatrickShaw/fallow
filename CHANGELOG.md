@@ -41,6 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI scanning keeps the continuation lines of plain multi-line `run:`
+  scalars.** A GitHub Actions step such as `run: npx eslint .` followed by
+  indented continuation lines, the shape of GitHub's own ESLint starter
+  workflow, dropped every continuation, so flags and file arguments on those
+  lines never reached dependency and entry-file analysis. Continuations now
+  fold into the same command, anchored at the `run` key column so sibling step
+  keys like `env:` and `with:` still terminate the scalar and their values do
+  not leak into entry files. (Closes
+  [#2016](https://github.com/fallow-rs/fallow/issues/2016).)
+
 - **Importing a Server Action from a client component is no longer flagged as
   a server-only import.** The `server-only-import` category of the
   `client-server-leak` rule treated a `"use server"` directive as a server-only

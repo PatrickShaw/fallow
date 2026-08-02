@@ -127,7 +127,7 @@ Rust structs; for example:
 Introspect the shape against any real fixture with:
 
 ```bash
-fallow check --format json --root path/to/project | jq '.unused_exports[0]'
+fallow dead-code --format json --root path/to/project | jq '.unused_exports[0]'
 ```
 
 `ProgrammaticError` carries the same exit-code ladder as the CLI

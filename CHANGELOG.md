@@ -7,7 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.0] - 2026-08-02
+
 ### Added
+
+- **Deno workspaces are discovered and analyzed natively.** A root `deno.json`
+  or `deno.jsonc` now drives workspace discovery: member globs, member names
+  and `exports` are read like their `package.json` equivalents, scoped import
+  maps resolve per package with exact-then-longest-prefix matching, Deno
+  workspace names count as listed dependencies, and pure Deno roots no longer
+  warn about a missing `node_modules`. A malformed root manifest fails
+  analysis explicitly instead of degrading to an empty workspace list. Thanks
+  [@shanepadgett](https://github.com/shanepadgett) for the contribution in
+  [#2080](https://github.com/fallow-rs/fallow/pull/2080).
+
+- **Config-value dependency credits are catalogue-driven.** The hardcoded
+  rules that credited packages named by a config value (jsdom's optional
+  `canvas` peer, vitest's `edge-runtime` peer, vite's `lightningcss`) now
+  live in an embedded data catalogue, so covering a new tool is a one-entry
+  data change and malformed rows fail the parse loudly. Behavior for the
+  migrated cases is unchanged. (Closes
+  [#2018](https://github.com/fallow-rs/fallow/issues/2018).)
+
+- **Package-manager indirection in scripts is followed into script bodies.**
+  `npm run <script> -- --flag` and `yarn <script> --flag` now resolve to the
+  script's body and are rescanned for flag-value dependency credits, bounded
+  by a depth limit and an expansion budget. A script name declared with
+  different bodies across packages is never followed, and workspace script
+  bodies no longer seed root-relative entry patterns. (Refs
+  [#2016](https://github.com/fallow-rs/fallow/issues/2016).)
+
+- **`ignoreFindings` covers the remaining source-owned result families and
+  reports patterns that match nothing.** Prop-drilling chains, thin wrappers,
+  and duplicate prop shapes now honour `ignoreFindings` (security findings
+  stay visible regardless), and human output prints a note listing patterns
+  that matched no finding so a typo is no longer a silent no-op. (Refs
+  [#2017](https://github.com/fallow-rs/fallow/issues/2017).)
 
 - **Deno workspaces accept the object form of the `workspace` key.** A root
   `deno.json` using `"workspace": {"members": [...]}` now discovers its members
@@ -34,12 +69,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`ignoreFindings` hides source-owned dead-code findings without removing
   matching files from analysis.** Project-root-relative globs support `!`
-  exceptions with Knip-compatible set semantics. Matching files remain in
+  exceptions with gitignore-style set semantics. Matching files remain in
   discovery, parsing, resolution, and the module graph, so their imports and
   exports still contribute to analysis. Findings with multiple source owners
-  stay visible unless every owner matches, a conservative extension of Knip's
-  single-owner filtering. `fallow migrate` now maps root Knip `ignore`
-  patterns to this field, preserves negation, and warns rather than guessing
+  stay visible unless every owner matches, a conservative extension of the
+  single-owner filtering found in migrated configs. `fallow migrate` now maps
+  root `ignore` patterns to this field, preserves negation, and warns rather
+  than guessing
   for workspace-relative ignores. Use `ignorePatterns` only when a file must
   be excluded from analysis entirely. (Closes
   [#1991](https://github.com/fallow-rs/fallow/issues/1991).)
@@ -53,20 +89,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could not be parsed, while `dead-code` exited with an error. All commands now
   exit 2 with the same malformed-root message, so a broken manifest can no
   longer produce silently empty results.
-
-- **Playwright fixtures typed with an indexed access over a class getter no
-  longer produce `unused-class-members` false positives.** A fixture whose
-  declared type is `Factory["getter"]` (for example
-  `assert: TaskAsserterFactory["taskAsserter"]`) now resolves through the
-  factory's public getter to the getter's declared return-type class, so
-  members called on the fixture in tests are credited to that class.
-  Resolution is conservative: only literal string indices over a plain named
-  type participate, the index must match a public instance binding on the
-  resolved class, and the terminal type must resolve to a class with members;
-  computed keys and other shapes abstain, and genuinely unused members on the
-  same class are still reported. Warm caches are invalidated once to pick up
-  the new extraction data. (Closes
-  [#2070](https://github.com/fallow-rs/fallow/issues/2070).)
 
 - **Playwright fixtures typed with an indexed access over a class getter no
   longer produce `unused-class-members` false positives.** A fixture whose
@@ -5115,7 +5137,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.10.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.11.0...HEAD
+[3.11.0]: https://github.com/fallow-rs/fallow/compare/v3.10.0...v3.11.0
 [3.10.0]: https://github.com/fallow-rs/fallow/compare/v3.9.1...v3.10.0
 [3.9.1]: https://github.com/fallow-rs/fallow/compare/v3.8.1...v3.9.1
 [3.8.1]: https://github.com/fallow-rs/fallow/compare/v3.8.0...v3.8.1

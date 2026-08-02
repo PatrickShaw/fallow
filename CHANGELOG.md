@@ -41,6 +41,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Playwright fixtures typed with an indexed access over a class getter no
+  longer produce `unused-class-members` false positives.** A fixture whose
+  declared type is `Factory["getter"]` (for example
+  `assert: TaskAsserterFactory["taskAsserter"]`) now resolves through the
+  factory's public getter to the getter's declared return-type class, so
+  members called on the fixture in tests are credited to that class.
+  Resolution is conservative: only literal string indices over a plain named
+  type participate, the index must match a public instance binding on the
+  resolved class, and the terminal type must resolve to a class with members;
+  computed keys and other shapes abstain, and genuinely unused members on the
+  same class are still reported. Warm caches are invalidated once to pick up
+  the new extraction data. (Closes
+  [#2070](https://github.com/fallow-rs/fallow/issues/2070).)
+
 - **React Native platform-extension siblings are no longer reported as unused
   files.** With the `react-native` or `expo` plugin active, an import such as
   `./UserMenu` resolved only to the first platform variant in Metro's

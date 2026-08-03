@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.12.0] - 2026-08-03
+
 ### Fixed
 
 - **`fallow audit` with `typeAware.enabled` no longer degrades to syntactic
@@ -5287,7 +5289,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.11.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.12.0...HEAD
+[3.12.0]: https://github.com/fallow-rs/fallow/compare/v3.11.0...v3.12.0
 [3.11.0]: https://github.com/fallow-rs/fallow/compare/v3.10.0...v3.11.0
 [3.10.0]: https://github.com/fallow-rs/fallow/compare/v3.9.1...v3.10.0
 [3.9.1]: https://github.com/fallow-rs/fallow/compare/v3.8.1...v3.9.1

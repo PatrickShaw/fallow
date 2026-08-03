@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A partially stale health baseline now says so instead of rotting
+  silently.** When a quarter or more of a loaded baseline's complexity and
+  CRAP entries match no current finding, human output prints a warning naming
+  how many of the saved entries went stale and how to re-save, instead of only
+  warning at zero overlap. JSON output gains a `summary.baseline_staleness`
+  object (`baseline_entries`, `matched_entries`, `stale_entries`,
+  `moved_entries`, `change_scoped`, `stale`) whenever a baseline is loaded, so
+  CI can watch a baseline degrade without parsing stderr. The `stale` bool
+  mirrors the human warning exactly: change-scoped runs (`--changed-since`,
+  diff, or workspace scoping) and runs with no current findings report their
+  counts with `stale: false` and print no re-save advice, since re-saving from
+  a scoped run would gut the gate. Entries matched through a followed file
+  move are reported in `moved_entries` and noted on stderr. Exit codes are
+  unchanged. (Closes
+  [#2065](https://github.com/fallow-rs/fallow/issues/2065).)
+
+### Fixed
+
+- **Identity-mode health baselines now survive file moves.** A baseline
+  entry whose saved path no longer exists on disk follows its function name to
+  the new path when exactly one unclaimed current finding carries that name,
+  so moving or renaming a file no longer reports every finding it carried as
+  new. The match is deliberately conservative: ambiguous candidates, anonymous
+  functions, and files that still exist at their saved path are never
+  remapped, and count-mode baselines are unchanged because a per-file count
+  bucket has no identity component left to re-match once its path is gone.
+  (Closes [#2066](https://github.com/fallow-rs/fallow/issues/2066).)
+
 ### Fixed
 
 - **Test-reachability profiles are capped to keep huge monorepos fast.** When

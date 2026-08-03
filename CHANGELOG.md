@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MCP agents can set and preserve the health baseline mode.** The
+  `check_health` tool accepts `baseline_mode` ("count" or "identity") and the
+  `audit` tool accepts `health_baseline_mode`, both forwarded to the CLI's
+  `--baseline-mode` flag, so an agent can refresh an identity baseline
+  without downgrading it and run strict identity comparisons. (Closes
+  [#2062](https://github.com/fallow-rs/fallow/issues/2062).)
+
+### Fixed
+
+- **A defaulted count save no longer clobbers an identity health baseline.**
+  `--save-baseline` without `--baseline-mode` now refuses to overwrite a
+  baseline file that carries per-function identity buckets, because the
+  count-mode rewrite would silently drop them and only fail later, in CI, on
+  the next `--baseline-mode identity` run. Re-save with `--baseline-mode
+  identity` to keep the buckets, or pass `--baseline-mode count` explicitly
+  to downgrade the baseline on purpose. (Closes
+  [#2062](https://github.com/fallow-rs/fallow/issues/2062).)
+
+### Added
+
 - **A partially stale health baseline now says so instead of rotting
   silently.** When a quarter or more of a loaded baseline's complexity and
   CRAP entries match no current finding, human output prints a warning naming

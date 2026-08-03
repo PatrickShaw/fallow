@@ -684,7 +684,10 @@ jobs:
               pkg.version = version;
               if (pkg.optionalDependencies) {
                 for (const key of Object.keys(pkg.optionalDependencies)) {
-                  if (key.startsWith("@fallow-cli/")) {
+                  // fallow-type-aware must bump in lockstep: the launcher
+                  // requires an exact version match, so a stale pin leaves the
+                  // sidecar unwired for every npm install (issue #2103).
+                  if (key.startsWith("@fallow-cli/") || key === "fallow-type-aware") {
                     pkg.optionalDependencies[key] = version;
                   }
                 }

@@ -45,7 +45,13 @@ pub use store::GraphCacheStore;
 /// Bumped to 18 for issue #2083: reference provenance moved out of
 /// `SymbolReference` into the per-export `reference_paths` side table, changing
 /// the persisted layout of every export's reference list.
-pub const GRAPH_CACHE_VERSION: u32 = 18;
+///
+/// Bumped to 19 for issue #2084 (PR #2096): profiled test-reachability masking
+/// now falls back to the legacy fail-open classification when a graph would
+/// need more than the mask-profile cap, so caches written by the unbounded
+/// profiling code must not replay their old profiled results on large
+/// monorepos where the cap now engages.
+pub const GRAPH_CACHE_VERSION: u32 = 19;
 
 /// Cached form of a resolved target.
 ///

@@ -247,26 +247,36 @@ mod tests {
         command
             .args([
                 "-c",
-                "sleep 30 & child=$!; printf '%s' \"$child\" > child.pid; wait \"$child\"",
+                "sleep 600 & child=$!; printf '%s' \"$child\" > child.pid; wait \"$child\"",
             ])
             .current_dir(root.path());
         crate::process_tree::configure_std_command(&mut command);
         let mut leader = command.spawn().expect("spawn process tree");
         let process_tree = Arc::new(ProcessTree::for_std_child(&leader).expect("own process tree"));
         let pid_path = root.path().join("child.pid");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !pid_path.is_file() && Instant::now() < deadline {
+        // Loaded CI runners can take multi-second pauses before the shell
+        // writes the pid file; poll with generous headroom and require
+        // non-empty content so a mid-write read cannot race the parse
+        // (issue #2112 family, Linux leg).
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut pid_text = String::new();
+        while Instant::now() < deadline {
+            if let Ok(contents) = fs::read_to_string(&pid_path)
+                && !contents.trim().is_empty()
+            {
+                pid_text = contents;
+                break;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let child_pid = fs::read_to_string(&pid_path)
-            .expect("descendant pid")
+        let child_pid = pid_text
             .trim()
             .parse::<u32>()
             .expect("numeric descendant pid");
 
         kill_target(&KillTarget::ProcessTree(process_tree));
         let _ = leader.wait();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while pid_is_alive(child_pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }

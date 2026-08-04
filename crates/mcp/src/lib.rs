@@ -24,8 +24,7 @@ pub(crate) mod test_support {
     /// multiplies process-spawn latency past the fixture timeouts and they
     /// contend on the shared kill-target registry (issue #2112). A tokio mutex
     /// is used so async tests can hold the guard across await points.
-    pub(crate) static PROCESS_TREE_TEST_LOCK: tokio::sync::Mutex<()> =
-        tokio::sync::Mutex::const_new(());
+    pub static PROCESS_TREE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 }
 
 /// Run the MCP stdio server and return the process exit code.

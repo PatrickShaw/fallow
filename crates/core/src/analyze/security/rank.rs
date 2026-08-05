@@ -20,16 +20,15 @@ use fallow_types::output_dead_code::{UnusedExportFinding, UnusedFileFinding};
 use fallow_types::results::{
     SecurityAttackSurfaceEntry, SecurityCandidateBoundary, SecurityDeadCodeContext,
     SecurityDeadCodeKind, SecurityDefensiveBoundary, SecurityDefensiveControl, SecurityFinding,
-    SecurityFindingKind, SecurityReachability, SecurityRuntimeState, SecuritySeverity,
-    SecurityTaintFlow, SecurityZoneCrossing, TaintConfidence, TaintEndpoint, TaintPath, TraceHop,
-    TraceHopRole,
+    SecurityFindingKind, SecurityReachability, SecurityTaintFlow, SecurityZoneCrossing,
+    TaintConfidence, TaintEndpoint, TaintPath, TraceHop, TraceHopRole,
 };
 
 use crate::discover::FileId;
 use crate::graph::ModuleGraph;
 
 use super::{LineOffsetsMap, byte_offset_to_line_col};
-use fallow_security::catalogue;
+use fallow_security::{catalogue, derive_security_severity};
 
 const UNUSED_FILE_GUIDANCE: &str = "This sink sits in a file fallow also reports as unused. Verify the dead-code finding, then delete the file instead of hardening the sink.";
 const UNUSED_EXPORT_GUIDANCE: &str = "This sink sits on an export fallow also reports as unused. Verify the dead-code finding, then remove the export instead of hardening the sink.";
@@ -337,45 +336,6 @@ fn compare_ranked_findings(a: &SecurityFinding, b: &SecurityFinding) -> std::cmp
         .then_with(|| a.line.cmp(&b.line))
         .then_with(|| a.col.cmp(&b.col))
         .then_with(|| a.category.cmp(&b.category))
-}
-
-/// Derive the verification-priority tier from existing security signals. This is
-/// ranking only, not a vulnerability verdict.
-#[must_use]
-pub fn derive_security_severity(finding: &SecurityFinding) -> SecuritySeverity {
-    if finding
-        .runtime
-        .as_ref()
-        .is_some_and(|runtime| runtime.state == SecurityRuntimeState::RuntimeHot)
-        || finding.candidate.boundary.client_server
-        || finding
-            .candidate
-            .boundary
-            .architecture_zone
-            .as_ref()
-            .is_some()
-        || finding
-            .reachability
-            .as_ref()
-            .is_some_and(|reach| reach.crosses_boundary)
-        || finding
-            .reachability
-            .as_ref()
-            .is_some_and(|reach| reach.reachable_from_entry && finding.source_backed)
-    {
-        return SecuritySeverity::High;
-    }
-
-    if finding.source_backed
-        || finding
-            .reachability
-            .as_ref()
-            .is_some_and(|reach| reach.reachable_from_untrusted_source)
-    {
-        return SecuritySeverity::Medium;
-    }
-
-    SecuritySeverity::Low
 }
 
 /// Compute the reachability signal for a single anchor module.
@@ -795,7 +755,7 @@ mod tests {
     use fallow_types::output::{FixActionType, IssueAction};
     use fallow_types::output_dead_code::{UnusedExportFinding, UnusedFileFinding};
     use fallow_types::results::{
-        SecurityDeadCodeKind, SecurityFindingKind, SecurityRuntimeContext, TraceHop, TraceHopRole,
+        SecurityDeadCodeKind, SecurityFindingKind, SecuritySeverity, TraceHop, TraceHopRole,
         UnusedExport, UnusedFile,
     };
 
@@ -934,84 +894,7 @@ mod tests {
     }
 
     fn module(file_id: u32) -> ModuleInfo {
-        ModuleInfo {
-            file_id: FileId(file_id),
-            exports: vec![],
-            imports: vec![],
-            re_exports: vec![],
-            dynamic_imports: vec![],
-            dynamic_import_patterns: vec![],
-            require_calls: vec![],
-            package_path_references: Box::default(),
-            member_accesses: vec![],
-            semantic_facts: Box::default(),
-            whole_object_uses: Box::default(),
-            has_cjs_exports: false,
-            has_angular_component_template_url: false,
-            content_hash: 0,
-            suppressions: vec![],
-            unknown_suppression_kinds: vec![],
-            unused_import_bindings: vec![],
-            type_referenced_import_bindings: vec![],
-            value_referenced_import_bindings: vec![],
-            line_offsets: vec![],
-            complexity: vec![],
-            flag_uses: vec![],
-            class_heritage: vec![],
-            exported_factory_returns: Box::default(),
-            exported_factory_return_object_shapes: Box::default(),
-            type_member_types: Box::default(),
-            injection_tokens: vec![],
-            local_type_declarations: vec![],
-            public_signature_type_references: vec![],
-            namespace_object_aliases: vec![],
-            iconify_prefixes: vec![],
-            iconify_icon_names: vec![],
-            auto_import_candidates: vec![],
-            directives: vec![],
-            client_only_dynamic_import_spans: vec![],
-            security_sinks: vec![],
-            security_sinks_skipped: 0,
-            security_unresolved_callee_sites: Vec::new(),
-            tainted_bindings: vec![],
-            sanitized_sink_args: vec![],
-            security_control_sites: vec![],
-            callee_uses: vec![],
-            misplaced_directives: vec![],
-            inline_server_action_exports: Vec::new(),
-            di_key_sites: Vec::new(),
-            has_dynamic_provide: false,
-            referenced_import_bindings: Vec::new(),
-            component_props: Vec::new(),
-            has_props_attrs_fallthrough: false,
-            has_define_expose: false,
-            has_define_model: false,
-            has_unharvestable_props: false,
-            component_emits: Vec::new(),
-            angular_inputs: Vec::new(),
-            angular_outputs: Vec::new(),
-            has_unharvestable_emits: false,
-            has_dynamic_emit: false,
-            has_emit_whole_object_use: false,
-            load_return_keys: Vec::new(),
-            has_unharvestable_load: false,
-            has_load_data_whole_use: false,
-            has_page_data_store_whole_use: false,
-            has_route_loader_data_whole_use: false,
-            component_functions: Vec::new(),
-            react_props: Vec::new(),
-            hook_uses: Vec::new(),
-            render_edges: Vec::new(),
-            svelte_dispatched_events: Vec::new(),
-            svelte_listened_events: Vec::new(),
-            angular_component_selectors: Vec::new(),
-            registered_custom_elements: Vec::new(),
-            used_custom_element_tags: Vec::new(),
-            angular_used_selectors: Vec::new(),
-            angular_entry_component_refs: Vec::new(),
-            has_dynamic_component_render: false,
-            has_dynamic_dispatch: false,
-        }
+        ModuleInfo::empty(FileId(file_id))
     }
 
     fn member_source_module(file_id: u32) -> ModuleInfo {
@@ -1085,87 +968,6 @@ mod tests {
             taint_flow: None,
             runtime: None,
             attack_surface: None,
-        }
-    }
-
-    fn reachability(
-        reachable_from_entry: bool,
-        reachable_from_untrusted_source: bool,
-        crosses_boundary: bool,
-    ) -> SecurityReachability {
-        SecurityReachability {
-            reachable_from_entry,
-            reachable_from_untrusted_source,
-            taint_confidence: None,
-            untrusted_source_hop_count: None,
-            untrusted_source_trace: vec![],
-            blast_radius: 1,
-            crosses_boundary,
-        }
-    }
-
-    #[test]
-    fn derives_low_severity_for_baseline_candidate() {
-        assert_eq!(
-            derive_security_severity(&finding("sink.ts")),
-            SecuritySeverity::Low
-        );
-    }
-
-    #[test]
-    fn derives_medium_severity_for_source_signals() {
-        let mut source_backed = finding("source-backed.ts");
-        source_backed.source_backed = true;
-
-        let mut source_reachable = finding("source-reachable.ts");
-        source_reachable.reachability = Some(reachability(false, true, false));
-
-        assert_eq!(
-            derive_security_severity(&source_backed),
-            SecuritySeverity::Medium
-        );
-        assert_eq!(
-            derive_security_severity(&source_reachable),
-            SecuritySeverity::Medium
-        );
-    }
-
-    #[test]
-    fn derives_high_severity_for_boundary_entry_and_runtime_signals() {
-        let mut client_boundary = finding("client-boundary.ts");
-        client_boundary.candidate.boundary.client_server = true;
-
-        let mut architecture_boundary = finding("architecture-boundary.ts");
-        architecture_boundary.candidate.boundary.architecture_zone = Some(SecurityZoneCrossing {
-            from: "web".to_string(),
-            to: "server".to_string(),
-        });
-
-        let mut crossed_boundary = finding("crossed-boundary.ts");
-        crossed_boundary.reachability = Some(reachability(false, false, true));
-
-        let mut source_backed_entry = finding("source-backed-entry.ts");
-        source_backed_entry.source_backed = true;
-        source_backed_entry.reachability = Some(reachability(true, false, false));
-
-        let mut runtime_hot = finding("runtime-hot.ts");
-        runtime_hot.runtime = Some(SecurityRuntimeContext {
-            state: SecurityRuntimeState::RuntimeHot,
-            function: "handler".to_string(),
-            line: 1,
-            invocations: Some(500),
-            stable_id: Some("fallow:fn:test".to_string()),
-            evidence: Some("runtime hot path".to_string()),
-        });
-
-        for finding in [
-            client_boundary,
-            architecture_boundary,
-            crossed_boundary,
-            source_backed_entry,
-            runtime_hot,
-        ] {
-            assert_eq!(derive_security_severity(&finding), SecuritySeverity::High);
         }
     }
 

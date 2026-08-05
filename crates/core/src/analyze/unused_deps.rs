@@ -1623,11 +1623,17 @@ fn unresolved_spec_is_silenced(
     {
         return true;
     }
+    // Config compilation strips a single leading "./" from
+    // ignoreUnresolvedImports globs (see #1385), so the specifier must be
+    // stripped the same way or exact-path entries like "./generated/x.js"
+    // never match. The raw form is still tried so wildcard patterns that
+    // count the "./" segment keep matching.
+    let normalized_spec = spec.strip_prefix("./").unwrap_or(spec);
     filters
         .config
         .ignore_unresolved_imports
         .iter()
-        .any(|matcher| matcher.is_match(spec))
+        .any(|matcher| matcher.is_match(spec) || matcher.is_match(normalized_spec))
 }
 
 /// Resolve the declaration `(line, col)` plus the specifier column for an edge.
@@ -1672,10 +1678,18 @@ pub fn find_unresolved_imports(
     let mut unresolved = Vec::new();
 
     for module in resolved_modules {
+        // A multi-binding re-export statement yields one edge per binding, all
+        // with the same unresolvable specifier. Report each specifier once per
+        // module (the first non-suppressed edge, keeping source order) instead
+        // of once per binding.
+        let mut reported_specs: FxHashSet<String> = FxHashSet::default();
         for edge in module.all_resolved_source_edges() {
             let crate::resolve::ResolveResult::Unresolvable(spec) = edge.target() else {
                 continue;
             };
+            if reported_specs.contains(spec.as_str()) {
+                continue;
+            }
             if unresolved_spec_is_silenced(spec, edge.is_type_only(), &filters) {
                 continue;
             }
@@ -1684,6 +1698,7 @@ pub fn find_unresolved_imports(
             if suppressions.is_suppressed(module.file_id, line, IssueKind::UnresolvedImport) {
                 continue;
             }
+            reported_specs.insert(spec.clone());
             unresolved.push(UnresolvedImport {
                 path: module.path.clone(),
                 specifier: spec.clone(),

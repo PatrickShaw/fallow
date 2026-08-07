@@ -101,6 +101,7 @@ vi.mock("../src/config.js", () => ({
   getDuplicationMinOccurrencesOverride: () => undefined,
   getDuplicationMinTokensOverride: () => undefined,
   getDuplicationModeOverride: () => undefined,
+  getDuplicationNearOverride: () => undefined,
   getDuplicationSkipLocalOverride: () => undefined,
   getDuplicationThresholdOverride: () => undefined,
   getHealthHotspots: () => true,
@@ -177,7 +178,7 @@ beforeEach(() => {
 });
 
 const emptyCheck = {
-  schema_version: 7,
+  schema_version: 8,
   version: "0.0.0-test",
   elapsed_ms: 0,
   total_issues: 0,

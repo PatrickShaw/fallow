@@ -6,6 +6,7 @@
 //! expose owned engine runners, typed result structs, or narrowly scoped aliases
 //! instead of broad core re-exports.
 
+#![warn(missing_docs)]
 #![cfg_attr(not(test), deny(clippy::disallowed_methods))]
 #![cfg_attr(
     test,
@@ -20,6 +21,8 @@ use std::fmt;
 #[cfg(test)]
 use std::path::Path;
 
+/// Finding-count and finding-identity baselines for suppressing known issues
+/// across runs.
 pub mod baseline;
 pub mod changed_files;
 pub mod churn;
@@ -29,7 +32,6 @@ pub mod cross_reference;
 mod css;
 pub mod dead_code;
 pub mod discover;
-mod discover_walk;
 pub mod duplicates;
 mod entry_points;
 mod feature_flags;
@@ -75,6 +77,8 @@ mod suppress;
 pub mod thread_pool;
 pub mod trace;
 pub mod trace_chain;
+/// Input validation shared by CLI-facing entry points: git refs, root paths,
+/// and control-character rejection.
 pub mod validate;
 pub mod vital_signs;
 pub mod viz;

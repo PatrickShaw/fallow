@@ -1115,7 +1115,9 @@ fn file_score_triage_concern(score: &FileHealthScore) -> f64 {
 /// one because its MI is the worse signal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileScoreConcern {
+    /// Ranked by structural quality: a low maintainability index.
     Structural,
+    /// Ranked by untested complexity: a high CRAP score.
     Risk,
 }
 
@@ -2514,7 +2516,8 @@ mod tests {
                 members: vec![],
                 is_side_effect_used: false,
                 super_class: None,
-            }],
+            }]
+            .into(),
             ..Default::default()
         }];
 
@@ -2845,7 +2848,8 @@ mod tests {
                 members: vec![],
                 is_side_effect_used: false,
                 super_class: None,
-            }],
+            }]
+            .into(),
             ..Default::default()
         }];
 
@@ -3189,7 +3193,8 @@ mod tests {
                     is_side_effect_used: false,
                     super_class: None,
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         }];
 
@@ -3236,7 +3241,8 @@ mod tests {
                 is_side_effect_used: false,
                 super_class: None,
             },
-        ];
+        ]
+        .into();
         let modules = vec![module];
 
         let mut file_paths: rustc_hash::FxHashMap<crate::discover::FileId, &std::path::PathBuf> =
@@ -3357,7 +3363,8 @@ mod tests {
                     is_side_effect_used: false,
                     super_class: None,
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         }];
 
@@ -3404,7 +3411,8 @@ mod tests {
                 is_side_effect_used: false,
                 super_class: None,
             },
-        ];
+        ]
+        .into();
         let modules = vec![module];
 
         let mut file_paths: rustc_hash::FxHashMap<crate::discover::FileId, &std::path::PathBuf> =
@@ -3622,7 +3630,8 @@ mod tests {
                     is_side_effect_used: false,
                     super_class: None,
                 },
-            ],
+            ]
+            .into(),
             ..Default::default()
         }];
 

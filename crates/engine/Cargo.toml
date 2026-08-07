@@ -26,7 +26,6 @@ fallow-types = { workspace = true }
 bitcode = { workspace = true }
 colored = { workspace = true }
 dunce = { workspace = true }
-glob = { workspace = true }
 globset = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
@@ -36,7 +35,6 @@ oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
 oxc_coverage_instrument = { workspace = true }
 rayon = { workspace = true }
-regex = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

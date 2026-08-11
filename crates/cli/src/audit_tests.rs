@@ -24,6 +24,7 @@ fn completeness_gate_uses_effective_metadata_requirement() {
 }
 use crate::base_worktree::{
     canonical_root_hash, legacy_reusable_audit_worktree_path, remove_reusable_audit_caches,
+    sweep_old_reusable_caches_in,
 };
 use std::{fs, process::Command};
 
@@ -506,6 +507,28 @@ fn create_unregistered_reusable_cache(repo: &Path) -> PathBuf {
     path
 }
 
+/// Materialize an unregistered reusable cache for `repo` under `scan_root`
+/// instead of the shared temp dir. The cross-repo GC pass only sees entries
+/// under its injected scan root, so foreign-entry fixtures built here are
+/// visible ONLY to this test's own sweep, never to a concurrently running
+/// test's or developer process's sweep (and vice versa).
+fn create_unregistered_foreign_cache(repo: &Path, scan_root: &Path) -> PathBuf {
+    let name = reusable_audit_worktree_path(repo)
+        .file_name()
+        .expect("cache path should have a file name")
+        .to_os_string();
+    let path = scan_root.join(name);
+    fs::create_dir_all(&path).expect("reusable cache dir should be created");
+    fs::write(path.join(".git"), "gitdir: fallow-audit-unregistered\n")
+        .expect("stub .git should be written");
+    fs::write(
+        reusable_worktree_sha_path(&path),
+        format!("{TEST_BASE_SHA}\n"),
+    )
+    .expect(".sha sidecar should be written");
+    path
+}
+
 /// Register a worktree with the parent repo at `path` checked out at HEAD.
 /// Simulates a pre-#1815 cache entry (left registered) for the legacy
 /// migration / GC deregistration tests.
@@ -631,7 +654,7 @@ fn reusable_cache_gc_removes_old_entry_with_backdated_sidecar() {
     let worktree_path = create_unregistered_reusable_cache(&repo);
     write_sidecar_with_age(&worktree_path, Duration::from_hours(31 * 24));
 
-    sweep_old_reusable_caches(&repo, Some(Duration::from_hours(30 * 24)), true);
+    sweep_old_reusable_caches_in(&repo, Some(Duration::from_hours(30 * 24)), true, tmp.path());
 
     assert!(
         !worktree_path.exists(),
@@ -660,7 +683,7 @@ fn reusable_cache_gc_keeps_fresh_entry() {
     let worktree_path = create_unregistered_reusable_cache(&repo);
     write_sidecar_with_age(&worktree_path, Duration::from_mins(1));
 
-    sweep_old_reusable_caches(&repo, Some(Duration::from_hours(30 * 24)), true);
+    sweep_old_reusable_caches_in(&repo, Some(Duration::from_hours(30 * 24)), true, tmp.path());
 
     assert!(
         worktree_path.is_dir(),
@@ -674,12 +697,14 @@ fn reusable_cache_gc_skips_locked_entry() {
     let tmp = tempfile::TempDir::new().expect("temp dir should be created");
     let repo = init_throwaway_repo(tmp.path(), "repo-gc-locked");
     let worktree_path = create_unregistered_reusable_cache(&repo);
-    write_sidecar_with_age(&worktree_path, Duration::from_hours(31 * 24));
-
+    // Lock BEFORE aging the sidecar: the fixture lives in the shared temp
+    // dir, and an aged ownerless entry is fair game for any concurrent
+    // process's cross-repo GC pass in the window before the lock is held.
     let lock = ReusableWorktreeLock::try_acquire(&worktree_path)
         .expect("test should acquire the lock first");
+    write_sidecar_with_age(&worktree_path, Duration::from_hours(31 * 24));
 
-    sweep_old_reusable_caches(&repo, Some(Duration::from_hours(30 * 24)), true);
+    sweep_old_reusable_caches_in(&repo, Some(Duration::from_hours(30 * 24)), true, tmp.path());
 
     assert!(
         worktree_path.is_dir(),
@@ -703,7 +728,7 @@ fn reusable_cache_gc_grace_when_sidecar_absent() {
         "test pre-condition: sidecar should not exist",
     );
 
-    sweep_old_reusable_caches(&repo, Some(Duration::from_hours(30 * 24)), true);
+    sweep_old_reusable_caches_in(&repo, Some(Duration::from_hours(30 * 24)), true, tmp.path());
 
     assert!(
         worktree_path.is_dir(),
@@ -749,7 +774,7 @@ fn reusable_cache_gc_reclaims_sidecar_orphan_when_dir_missing() {
         "test pre-condition: sidecars survive a dir-only reaper",
     );
 
-    sweep_old_reusable_caches(&repo, Some(Duration::from_hours(30 * 24)), true);
+    sweep_old_reusable_caches_in(&repo, Some(Duration::from_hours(30 * 24)), true, tmp.path());
 
     assert!(
         !last_used.exists(),
@@ -778,7 +803,7 @@ fn reusable_cache_gc_reclaims_sidecar_orphan_even_when_age_gc_disabled() {
 
     // `None` = age-based GC disabled (`cacheMaxAgeDays = 0`). Sidecar-orphan
     // reclaim must still run so dead sidecars do not accumulate forever.
-    sweep_old_reusable_caches(&repo, None, true);
+    sweep_old_reusable_caches_in(&repo, None, true, tmp.path());
 
     assert!(
         !last_used.exists(),
@@ -804,7 +829,7 @@ fn reusable_cache_gc_preserves_lock_file_after_removal() {
         "test pre-condition: lock file should exist before sweep",
     );
 
-    sweep_old_reusable_caches(&repo, Some(Duration::from_hours(30 * 24)), true);
+    sweep_old_reusable_caches_in(&repo, Some(Duration::from_hours(30 * 24)), true, tmp.path());
 
     assert!(
         !worktree_path.exists(),
@@ -819,21 +844,97 @@ fn reusable_cache_gc_preserves_lock_file_after_removal() {
 }
 
 #[test]
-fn reusable_cache_gc_ignores_other_repo_hash_entries() {
+fn reusable_cache_gc_keeps_foreign_entry_with_live_owner() {
     let tmp = tempfile::TempDir::new().expect("temp dir should be created");
     let repo = init_throwaway_repo(tmp.path(), "repo-gc-scope-self");
     let other_repo = init_throwaway_repo(tmp.path(), "repo-gc-scope-other");
-    // An aged-out cache belonging to a DIFFERENT repo. `repo`'s sweep is
-    // scoped to `repo`'s hash prefix, so it must not touch this entry (which
-    // would let one repo defeat another's `cacheMaxAgeDays = 0`).
-    let other_path = create_unregistered_reusable_cache(&other_repo);
+    // An aged-out cache belonging to a DIFFERENT repo whose root still
+    // exists. `repo`'s cross-repo pass must leave it to `other_repo`'s own
+    // sweep (which would otherwise let one repo defeat another's
+    // `cacheMaxAgeDays = 0`).
+    let other_path = create_unregistered_foreign_cache(&other_repo, tmp.path());
+    record_last_used(&other_path, &other_repo);
     write_sidecar_with_age(&other_path, Duration::from_hours(31 * 24));
 
-    sweep_old_reusable_caches(&repo, Some(Duration::from_hours(30 * 24)), true);
+    sweep_old_reusable_caches_in(&repo, Some(Duration::from_hours(30 * 24)), true, tmp.path());
 
     assert!(
         other_path.is_dir(),
-        "a repo's sweep must not reclaim another repo's aged cache entry",
+        "a repo's sweep must not reclaim another repo's aged cache entry while its owner root exists",
+    );
+    cleanup_reusable_worktree(&other_repo, &other_path);
+}
+
+#[test]
+fn reusable_cache_gc_reclaims_abandoned_foreign_entry() {
+    let tmp = tempfile::TempDir::new().expect("temp dir should be created");
+    let repo = init_throwaway_repo(tmp.path(), "repo-gc-abandoned-self");
+    let other_repo = init_throwaway_repo(tmp.path(), "repo-gc-abandoned-other");
+    let other_path = create_unregistered_foreign_cache(&other_repo, tmp.path());
+    record_last_used(&other_path, &other_repo);
+    write_sidecar_with_age(&other_path, Duration::from_hours(31 * 24));
+    // Delete the owning repo: nothing will ever sweep this hash again, which
+    // is exactly the multi-worktree / deleted-repo leak from issue #2169.
+    fs::remove_dir_all(&other_repo).expect("owner repo should be removable");
+
+    sweep_old_reusable_caches_in(&repo, Some(Duration::from_hours(30 * 24)), true, tmp.path());
+
+    assert!(
+        !other_path.exists(),
+        "an aged cache whose owner root is gone must be reclaimed by any repo's sweep",
+    );
+    assert!(
+        !reusable_worktree_last_used_path(&other_path).exists(),
+        "the abandoned entry's `.last-used` sidecar must be reclaimed with it",
+    );
+    assert!(
+        !reusable_worktree_sha_path(&other_path).exists(),
+        "the abandoned entry's `.sha` sidecar must be reclaimed with it",
+    );
+    cleanup_reusable_worktree(&repo, &other_path);
+}
+
+#[test]
+fn reusable_cache_gc_reclaims_aged_foreign_entry_without_recorded_owner() {
+    let tmp = tempfile::TempDir::new().expect("temp dir should be created");
+    let repo = init_throwaway_repo(tmp.path(), "repo-gc-ownerless-self");
+    let other_repo = init_throwaway_repo(tmp.path(), "repo-gc-ownerless-other");
+    // Pre-#2169 sidecars are empty (mtime-only), so the owner is unknown.
+    // Aged ownerless entries must still age out: they are indistinguishable
+    // from abandoned ones and are the reporter's 19-month accumulation.
+    let other_path = create_unregistered_foreign_cache(&other_repo, tmp.path());
+    write_sidecar_with_age(&other_path, Duration::from_hours(31 * 24));
+
+    sweep_old_reusable_caches_in(&repo, Some(Duration::from_hours(30 * 24)), true, tmp.path());
+
+    assert!(
+        !other_path.exists(),
+        "an aged cache with no recorded owner must be reclaimed by the cross-repo pass",
+    );
+    cleanup_reusable_worktree(&other_repo, &other_path);
+}
+
+#[test]
+fn reusable_cache_gc_grace_seeds_foreign_entry_without_sidecar() {
+    let tmp = tempfile::TempDir::new().expect("temp dir should be created");
+    let repo = init_throwaway_repo(tmp.path(), "repo-gc-foreign-grace-self");
+    let other_repo = init_throwaway_repo(tmp.path(), "repo-gc-foreign-grace-other");
+    let other_path = create_unregistered_foreign_cache(&other_repo, tmp.path());
+    let sidecar = reusable_worktree_last_used_path(&other_path);
+    assert!(
+        !sidecar.exists(),
+        "test pre-condition: sidecar should not exist",
+    );
+
+    sweep_old_reusable_caches_in(&repo, Some(Duration::from_hours(30 * 24)), true, tmp.path());
+
+    assert!(
+        other_path.is_dir(),
+        "a sidecar-less foreign entry must get the pre-upgrade grace, not removal",
+    );
+    assert!(
+        sidecar.exists(),
+        "the cross-repo pass must seed a sidecar so the entry can age from now on",
     );
     cleanup_reusable_worktree(&other_repo, &other_path);
 }
@@ -1498,7 +1599,7 @@ fn released_sha_keyed_registered_cache_is_deregistered_and_removed() {
         .expect("released legacy cache should materialize");
     assert!(worktree_is_registered_with_git(&repo, &legacy_path));
 
-    sweep_old_reusable_caches(&repo, None, true);
+    sweep_old_reusable_caches_in(&repo, None, true, tmp.path());
 
     assert!(
         !legacy_path.exists(),

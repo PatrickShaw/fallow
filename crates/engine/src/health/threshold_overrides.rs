@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use fallow_output::ThresholdOverrideDimension;
 use rustc_hash::FxHashSet;
 
 #[derive(Debug, Clone, Copy)]
@@ -150,12 +151,6 @@ impl ThresholdOverrideResolver {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum ThresholdOverrideDimension {
-    Complexity,
-    Crap,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ThresholdOverrideStateKey {
     status: &'static str,
@@ -177,6 +172,29 @@ pub(super) struct ThresholdOverrideStateTracker {
     matched_indexes: FxHashSet<usize>,
     seen: FxHashSet<ThresholdOverrideStateKey>,
     states: Vec<fallow_output::ThresholdOverrideState>,
+}
+
+/// Dimensions a configured entry participates in, in serialization order.
+///
+/// `complexity` covers the structural ceilings (cyclomatic, cognitive, unit
+/// size) and `crap` covers CRAP alone, matching the enum's own contract. Used
+/// only by the `no_match` path, where there is no measured function to derive a
+/// dimension from. `HealthConfig::validate` rejects an entry that configures no
+/// ceiling at all, so this never yields an empty list for a real entry.
+fn configured_dimensions(
+    configured: fallow_output::HealthConfiguredThresholds,
+) -> Vec<ThresholdOverrideDimension> {
+    let mut dimensions = Vec::new();
+    if configured.max_cyclomatic.is_some()
+        || configured.max_cognitive.is_some()
+        || configured.max_unit_size.is_some()
+    {
+        dimensions.push(ThresholdOverrideDimension::Complexity);
+    }
+    if configured.max_crap.is_some() {
+        dimensions.push(ThresholdOverrideDimension::Crap);
+    }
+    dimensions
 }
 
 impl ThresholdOverrideStateTracker {
@@ -217,7 +235,7 @@ impl ThresholdOverrideStateTracker {
             } else if !global_exceeded {
                 fallow_output::ThresholdOverrideStatus::Stale
             } else {
-                continue;
+                fallow_output::ThresholdOverrideStatus::Insufficient
             };
             self.push_state(ThresholdOverrideStateInput {
                 status,
@@ -255,7 +273,7 @@ impl ThresholdOverrideStateTracker {
             } else if metrics.crap < global.crap {
                 fallow_output::ThresholdOverrideStatus::Stale
             } else {
-                continue;
+                fallow_output::ThresholdOverrideStatus::Insufficient
             };
             self.push_state(ThresholdOverrideStateInput {
                 status,
@@ -287,32 +305,43 @@ impl ThresholdOverrideStateTracker {
             if self.matched_indexes.contains(&entry.index) {
                 continue;
             }
-            self.push_state(ThresholdOverrideStateInput {
-                status: fallow_output::ThresholdOverrideStatus::NoMatch,
-                override_index: entry.index,
-                path: None,
-                function: None,
-                configured_thresholds: entry.configured,
-                effective_thresholds: fallow_output::HealthEffectiveThresholds {
-                    max_cyclomatic: entry
-                        .configured
-                        .max_cyclomatic
-                        .unwrap_or(resolver.global.cyclomatic),
-                    max_cognitive: entry
-                        .configured
-                        .max_cognitive
-                        .unwrap_or(resolver.global.cognitive),
-                    max_crap: entry.configured.max_crap.unwrap_or(resolver.global.crap),
-                    max_unit_size: entry
-                        .configured
-                        .max_unit_size
-                        .unwrap_or(resolver.global.unit_size),
-                },
-                metrics: None,
-                reason: entry.reason.clone(),
-                dimension: ThresholdOverrideDimension::Complexity,
-            });
+            let effective = fallow_output::HealthEffectiveThresholds {
+                max_cyclomatic: entry
+                    .configured
+                    .max_cyclomatic
+                    .unwrap_or(resolver.global.cyclomatic),
+                max_cognitive: entry
+                    .configured
+                    .max_cognitive
+                    .unwrap_or(resolver.global.cognitive),
+                max_crap: entry.configured.max_crap.unwrap_or(resolver.global.crap),
+                max_unit_size: entry
+                    .configured
+                    .max_unit_size
+                    .unwrap_or(resolver.global.unit_size),
+            };
+            for dimension in configured_dimensions(entry.configured) {
+                self.push_state(ThresholdOverrideStateInput {
+                    status: fallow_output::ThresholdOverrideStatus::NoMatch,
+                    override_index: entry.index,
+                    path: None,
+                    function: None,
+                    configured_thresholds: entry.configured,
+                    effective_thresholds: effective,
+                    metrics: None,
+                    reason: entry.reason.clone(),
+                    dimension,
+                });
+            }
         }
+    }
+
+    /// Mutable access to the accumulated rows so the findings pipeline can
+    /// annotate `outstanding` once every finding has been collected and merged.
+    /// The tracker itself records during collection, before the CRAP merge, so
+    /// it cannot know which dimension ultimately kept a finding alive.
+    pub(super) fn states_mut(&mut self) -> &mut [fallow_output::ThresholdOverrideState] {
+        &mut self.states
     }
 
     pub(super) fn into_states(mut self) -> Vec<fallow_output::ThresholdOverrideState> {
@@ -321,6 +350,7 @@ impl ThresholdOverrideStateTracker {
                 .cmp(&b.override_index)
                 .then(a.path.cmp(&b.path))
                 .then(a.function.cmp(&b.function))
+                .then(a.dimension.cmp(&b.dimension))
         });
         self.states
     }
@@ -329,6 +359,7 @@ impl ThresholdOverrideStateTracker {
         let status_key = match input.status {
             fallow_output::ThresholdOverrideStatus::Active => "active",
             fallow_output::ThresholdOverrideStatus::Stale => "stale",
+            fallow_output::ThresholdOverrideStatus::Insufficient => "insufficient",
             fallow_output::ThresholdOverrideStatus::NoMatch => "no_match",
         };
         let key = ThresholdOverrideStateKey {
@@ -344,6 +375,8 @@ impl ThresholdOverrideStateTracker {
         self.states.push(fallow_output::ThresholdOverrideState {
             status: input.status,
             override_index: input.override_index,
+            dimension: input.dimension,
+            outstanding: Vec::new(),
             path: input.path,
             function: input.function,
             configured_thresholds: input.configured_thresholds,

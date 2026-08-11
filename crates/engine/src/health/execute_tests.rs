@@ -7,13 +7,15 @@ use super::super::findings::{
     CollectFindingsInput, CrapFindingMergeInput, collect_findings, collect_findings_with_resolver,
     merge_crap_findings,
 };
+use super::super::findings_pipeline::annotate_outstanding_dimensions;
 use super::super::ignore::build_ignore_set;
 use super::super::large_functions::{LargeFunctionInput, collect_large_functions};
 use super::super::runtime_filter::{RuntimeCoverageFilterContext, apply_runtime_coverage_filters};
 use super::super::scoring;
 use super::super::sort_findings;
 use super::super::threshold_overrides::{
-    GlobalHealthThresholds, ThresholdOverrideResolver, ThresholdOverrideStateTracker,
+    ComplexityFunctionContext, GlobalHealthThresholds, MeasuredThresholdMetrics,
+    ThresholdOverrideResolver, ThresholdOverrideStateTracker,
 };
 use crate::baseline::HealthBaselineData;
 use crate::source::ModuleInfo;
@@ -282,6 +284,135 @@ fn threshold_override_tracker_reports_no_match_only_when_requested() {
         states[0].status,
         fallow_output::ThresholdOverrideStatus::NoMatch
     ));
+}
+
+/// Every renderer decides whether to highlight CRAP from `exceeded`, never from
+/// the presence of `crap`. That is only safe because the merge gate attaches a
+/// CRAP value exactly when the CRAP bit is set; a future change that attached it
+/// unconditionally would silently restore the issue-2163 red-on-benign-CRAP bug.
+#[test]
+fn an_attached_crap_value_always_carries_the_crap_bit_in_exceeded() {
+    let positioned = |name: &str, line: u32, col: u32, cyclomatic: u16| FunctionComplexity {
+        line,
+        col,
+        ..make_fc(name, cyclomatic, 0, 20)
+    };
+    let path = PathBuf::from("/project/src/mixed.ts");
+    let functions = vec![
+        positioned("cyclomaticOnly", 1, 0, 25),
+        positioned("crapOnly", 20, 0, 5),
+        positioned("both", 40, 0, 25),
+        positioned("clean", 60, 0, 2),
+    ];
+    let crap_by_line = [(1u32, 5.0), (20, 90.0), (40, 90.0), (60, 1.0)];
+
+    let modules = vec![make_module(FileId(0), functions)];
+    let mut file_paths: FxHashMap<FileId, &PathBuf> = FxHashMap::default();
+    file_paths.insert(FileId(0), &path);
+    let resolver = threshold_resolver(&[]);
+    let mut tracker = ThresholdOverrideStateTracker::default();
+    let mut collect_input = CollectFindingsInput {
+        modules: &modules,
+        file_paths: &file_paths,
+        config_root: Path::new("/project"),
+        ignore_set: &globset::GlobSet::empty(),
+        changed_files: None,
+        ws_roots: None,
+        threshold_resolver: &resolver,
+        threshold_state_tracker: &mut tracker,
+        complexity_breakdown: false,
+    };
+    let (mut findings, _, _) = collect_findings_with_resolver(&mut collect_input);
+
+    let mut per_function_crap: FxHashMap<PathBuf, Vec<scoring::PerFunctionCrap>> =
+        FxHashMap::default();
+    per_function_crap.insert(
+        path.clone(),
+        crap_by_line
+            .iter()
+            .map(|&(line, crap)| scoring::PerFunctionCrap {
+                line,
+                col: 0,
+                crap,
+                coverage_pct: None,
+                coverage_tier: fallow_output::CoverageTier::None,
+                coverage_source: fallow_output::CoverageSource::Estimated,
+            })
+            .collect(),
+    );
+    let mut merge_input = CrapFindingMergeInput {
+        modules: &modules,
+        file_paths: &file_paths,
+        config_root: Path::new("/project"),
+        ignore_set: &globset::GlobSet::empty(),
+        changed_files: None,
+        ws_roots: None,
+        per_function_crap: &per_function_crap,
+        template_inherit_provenance: &FxHashMap::default(),
+        complexity_breakdown: false,
+        threshold_resolver: &resolver,
+        threshold_state_tracker: &mut tracker,
+    };
+    merge_crap_findings(&mut findings, &mut merge_input);
+
+    let mut names: Vec<&str> = findings.iter().map(|f| f.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["both", "crapOnly", "cyclomaticOnly"],
+        "the fixture must cover a CRAP-only, a complexity-only and a combined finding"
+    );
+    for finding in &findings {
+        assert_eq!(
+            finding.crap.is_some(),
+            finding.exceeded.includes_crap(),
+            "{}: an attached crap value and the CRAP bit must agree: {finding:#?}",
+            finding.name
+        );
+    }
+}
+
+/// A `no_match` row has no measured function to derive a dimension from, so it
+/// has to be labelled from the ceilings the entry configures. Hardcoding
+/// `complexity` shipped a definitionally wrong value on a required schema field
+/// for crap-only entries (issue #2163 follow-up).
+#[test]
+fn no_match_rows_name_the_dimensions_the_entry_configures() {
+    let entry = |max_cyclomatic, max_crap, max_unit_size| fallow_config::HealthThresholdOverride {
+        files: vec!["src/missing.ts".to_string()],
+        functions: Vec::new(),
+        max_cyclomatic,
+        max_cognitive: None,
+        max_crap,
+        max_unit_size,
+        reason: None,
+    };
+    let dimensions = |overrides: &[fallow_config::HealthThresholdOverride]| {
+        let resolver = threshold_resolver(overrides);
+        let mut tracker = ThresholdOverrideStateTracker::default();
+        tracker.record_no_match_entries(&resolver, true);
+        tracker
+            .into_states()
+            .iter()
+            .map(|state| state.dimension)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        dimensions(&[entry(None, Some(500.0), None)]),
+        vec![fallow_output::ThresholdOverrideDimension::Crap]
+    );
+    assert_eq!(
+        dimensions(&[entry(Some(500), Some(500.0), None)]),
+        vec![
+            fallow_output::ThresholdOverrideDimension::Complexity,
+            fallow_output::ThresholdOverrideDimension::Crap
+        ]
+    );
+    assert_eq!(
+        dimensions(&[entry(None, None, Some(500))]),
+        vec![fallow_output::ThresholdOverrideDimension::Complexity]
+    );
 }
 
 #[test]
@@ -2072,4 +2203,261 @@ fn rollup_external_template_skipped_when_lookup_missing() {
     let before = findings.len();
     append_component_rollup_findings(&mut findings, None, 30, 25);
     assert_eq!(findings.len(), before);
+}
+
+fn issue_2163_globals() -> GlobalHealthThresholds {
+    GlobalHealthThresholds {
+        cyclomatic: 20,
+        cognitive: 15,
+        crap: 30.0,
+        unit_size: 60,
+    }
+}
+
+fn svelte_template_finding(exceeded: ExceededThreshold) -> ComplexityViolation {
+    let mut finding = make_finding("<template>", exceeded);
+    finding.path = PathBuf::from("/project/src/Widget.svelte");
+    finding.cyclomatic = 9;
+    finding.cognitive = 21;
+    finding.crap = Some(90.0);
+    finding
+}
+
+#[test]
+fn override_row_names_crap_as_the_outstanding_dimension() {
+    let resolver = threshold_resolver(&[fallow_config::HealthThresholdOverride {
+        files: vec!["src/Widget.svelte".to_string()],
+        functions: Vec::new(),
+        max_cyclomatic: Some(500),
+        max_cognitive: Some(500),
+        max_crap: None,
+        max_unit_size: None,
+        reason: None,
+    }]);
+    let relative = Path::new("src/Widget.svelte");
+    let absolute = Path::new("/project/src/Widget.svelte");
+    let (_, matches) = resolver.resolve(relative, "<template>");
+    let mut tracker = ThresholdOverrideStateTracker::default();
+    tracker.record_complexity(
+        ComplexityFunctionContext {
+            path: absolute,
+            function: "<template>",
+            cyclomatic: 9,
+            cognitive: 21,
+        },
+        &matches,
+        issue_2163_globals(),
+    );
+
+    let findings = vec![svelte_template_finding(ExceededThreshold::Crap)];
+    annotate_outstanding_dimensions(&mut tracker, &findings);
+
+    let states = tracker.into_states();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].override_index, 0);
+    assert_eq!(
+        states[0].dimension,
+        fallow_output::ThresholdOverrideDimension::Complexity
+    );
+    assert!(matches!(
+        states[0].status,
+        fallow_output::ThresholdOverrideStatus::Active
+    ));
+    assert_eq!(
+        states[0].outstanding,
+        vec![fallow_output::ThresholdOverrideDimension::Crap]
+    );
+}
+
+#[test]
+fn crap_only_override_row_names_complexity_as_outstanding() {
+    let resolver = threshold_resolver(&[fallow_config::HealthThresholdOverride {
+        files: vec!["src/Widget.svelte".to_string()],
+        functions: Vec::new(),
+        max_cyclomatic: None,
+        max_cognitive: None,
+        max_crap: Some(500.0),
+        max_unit_size: None,
+        reason: None,
+    }]);
+    let relative = Path::new("src/Widget.svelte");
+    let absolute = Path::new("/project/src/Widget.svelte");
+    let (_, matches) = resolver.resolve(relative, "<template>");
+    let mut tracker = ThresholdOverrideStateTracker::default();
+    tracker.record_crap(
+        absolute,
+        "<template>",
+        MeasuredThresholdMetrics {
+            cyclomatic: 25,
+            cognitive: 21,
+            crap: 90.0,
+        },
+        &matches,
+        issue_2163_globals(),
+    );
+
+    let mut finding = svelte_template_finding(ExceededThreshold::Cyclomatic);
+    finding.cyclomatic = 25;
+    annotate_outstanding_dimensions(&mut tracker, &[finding]);
+
+    let states = tracker.into_states();
+    assert_eq!(states.len(), 1);
+    assert_eq!(
+        states[0].dimension,
+        fallow_output::ThresholdOverrideDimension::Crap
+    );
+    assert_eq!(
+        states[0].outstanding,
+        vec![fallow_output::ThresholdOverrideDimension::Complexity]
+    );
+}
+
+#[test]
+fn override_configuring_every_ceiling_reports_nothing_outstanding() {
+    let resolver = threshold_resolver(&[fallow_config::HealthThresholdOverride {
+        files: vec!["src/Widget.svelte".to_string()],
+        functions: Vec::new(),
+        max_cyclomatic: Some(500),
+        max_cognitive: Some(500),
+        max_crap: Some(500.0),
+        max_unit_size: None,
+        reason: None,
+    }]);
+    let relative = Path::new("src/Widget.svelte");
+    let absolute = Path::new("/project/src/Widget.svelte");
+    let (_, matches) = resolver.resolve(relative, "<template>");
+    let mut tracker = ThresholdOverrideStateTracker::default();
+    tracker.record_complexity(
+        ComplexityFunctionContext {
+            path: absolute,
+            function: "<template>",
+            cyclomatic: 9,
+            cognitive: 21,
+        },
+        &matches,
+        issue_2163_globals(),
+    );
+    tracker.record_crap(
+        absolute,
+        "<template>",
+        MeasuredThresholdMetrics {
+            cyclomatic: 9,
+            cognitive: 21,
+            crap: 90.0,
+        },
+        &matches,
+        issue_2163_globals(),
+    );
+
+    // The override cleared the finding, so nothing survives to be outstanding.
+    annotate_outstanding_dimensions(&mut tracker, &[]);
+
+    let states = tracker.into_states();
+    assert_eq!(states.len(), 2);
+    assert_eq!(
+        states[0].dimension,
+        fallow_output::ThresholdOverrideDimension::Complexity
+    );
+    assert_eq!(
+        states[1].dimension,
+        fallow_output::ThresholdOverrideDimension::Crap
+    );
+    assert!(states.iter().all(|state| state.outstanding.is_empty()));
+    assert!(
+        states
+            .iter()
+            .all(|state| matches!(state.status, fallow_output::ThresholdOverrideStatus::Active))
+    );
+}
+
+#[test]
+fn a_configured_ceiling_that_is_still_breached_reports_insufficient_and_outstanding() {
+    let resolver = threshold_resolver(&[fallow_config::HealthThresholdOverride {
+        files: vec!["src/Widget.svelte".to_string()],
+        functions: Vec::new(),
+        max_cyclomatic: Some(500),
+        max_cognitive: Some(500),
+        max_crap: Some(40.0),
+        max_unit_size: None,
+        reason: None,
+    }]);
+    let relative = Path::new("src/Widget.svelte");
+    let absolute = Path::new("/project/src/Widget.svelte");
+    let (_, matches) = resolver.resolve(relative, "<template>");
+    let mut tracker = ThresholdOverrideStateTracker::default();
+    tracker.record_crap(
+        absolute,
+        "<template>",
+        MeasuredThresholdMetrics {
+            cyclomatic: 9,
+            cognitive: 21,
+            crap: 90.0,
+        },
+        &matches,
+        issue_2163_globals(),
+    );
+
+    let findings = vec![svelte_template_finding(ExceededThreshold::Crap)];
+    annotate_outstanding_dimensions(&mut tracker, &findings);
+
+    let states = tracker.into_states();
+    assert_eq!(states.len(), 1);
+    assert!(matches!(
+        states[0].status,
+        fallow_output::ThresholdOverrideStatus::Insufficient
+    ));
+    assert_eq!(
+        states[0].outstanding,
+        vec![fallow_output::ThresholdOverrideDimension::Crap]
+    );
+}
+
+#[test]
+fn a_partly_configured_complexity_override_still_reports_the_surviving_dimension() {
+    let resolver = threshold_resolver(&[fallow_config::HealthThresholdOverride {
+        files: vec!["src/Widget.svelte".to_string()],
+        functions: Vec::new(),
+        max_cyclomatic: Some(500),
+        max_cognitive: None,
+        max_crap: Some(5000.0),
+        max_unit_size: None,
+        reason: None,
+    }]);
+    let relative = Path::new("src/Widget.svelte");
+    let absolute = Path::new("/project/src/Widget.svelte");
+    let (_, matches) = resolver.resolve(relative, "<template>");
+    let mut tracker = ThresholdOverrideStateTracker::default();
+    tracker.record_complexity(
+        ComplexityFunctionContext {
+            path: absolute,
+            function: "<template>",
+            cyclomatic: 25,
+            cognitive: 21,
+        },
+        &matches,
+        issue_2163_globals(),
+    );
+    tracker.record_crap(
+        absolute,
+        "<template>",
+        MeasuredThresholdMetrics {
+            cyclomatic: 25,
+            cognitive: 21,
+            crap: 90.0,
+        },
+        &matches,
+        issue_2163_globals(),
+    );
+
+    // Cognitive is the un-raised ceiling, so the finding survives on it even
+    // though the entry configures the other complexity ceiling.
+    let findings = vec![svelte_template_finding(ExceededThreshold::Cognitive)];
+    annotate_outstanding_dimensions(&mut tracker, &findings);
+
+    let states = tracker.into_states();
+    assert_eq!(states.len(), 2);
+    assert!(
+        states.iter().all(|state| state.outstanding
+            == vec![fallow_output::ThresholdOverrideDimension::Complexity])
+    );
 }

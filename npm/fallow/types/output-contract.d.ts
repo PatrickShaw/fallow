@@ -508,7 +508,16 @@ export type CoverageSourceConsistency = ("uniform" | "mixed")
 /**
  * Lifecycle state for a configured threshold override.
  */
-export type ThresholdOverrideStatus = ("active" | "stale" | "no_match")
+export type ThresholdOverrideStatus = ("active" | "stale" | "insufficient" | "no_match")
+/**
+ * Which threshold dimension a `thresholdOverrides` state row describes.
+ *
+ * One configured override produces one row per dimension it participates in,
+ * because the complexity ceilings and the CRAP ceiling are evaluated
+ * independently: raising `maxCyclomatic` says nothing about whether the unit
+ * still breaches `maxCrap`.
+ */
+export type ThresholdOverrideDimension = ("complexity" | "crap")
 /**
  * Discriminant for [`UntestedFileAction::kind`]. Mirrors the action types
  * emitted by `build_untested_file_actions`.
@@ -809,7 +818,7 @@ export type LogicalGroupStatus = ("ok" | "empty" | "invalid_path")
 /**
  * Exact schema version for [`HealthOutput`].
  */
-export type HealthSchemaVersion = 9
+export type HealthSchemaVersion = 10
 /**
  * Resolver mode label for grouped envelopes (dead-code, dupes, health).
  *
@@ -934,7 +943,7 @@ export type SecurityBlindSpotsSchemaVersion = "1"
 /**
  * Schema projection for the combined envelope's exact version.
  */
-export type CombinedSchemaVersion = 9
+export type CombinedSchemaVersion = 10
 /**
  * Schema projection for the feature-flags envelope's exact version.
  */
@@ -5519,8 +5528,13 @@ comment?: (string | null)
 /**
  * Where to insert the suppress comment
  * (e.g., `above-function-declaration`, `above-angular-decorator`,
- * `above-component-worst-method`, or `top-of-template`). Present on
- * `suppress-line` and `suppress-file` action variants.
+ * `above-template-anchor-line`, `above-component-worst-method`, or
+ * `top-of-template`). Present on `suppress-line` and `suppress-file`
+ * action variants. `above-template-anchor-line` is used for
+ * single-file-component markup (`.svelte`, `.vue`, `.astro`), where the
+ * synthetic `<template>` unit is anchored at its first contributing
+ * construct rather than at the top of the file, so the comment belongs on
+ * the line immediately preceding the reported line.
  */
 placement?: (string | null)
 /**
@@ -5664,8 +5678,18 @@ export interface ThresholdOverrideState {
 status: ThresholdOverrideStatus
 /**
  * Index of the entry in the configured `thresholdOverrides` array.
+ * Several rows can share one index when the override participates in more
+ * than one dimension; group on this to count configured overrides.
  */
 override_index: number
+dimension: ThresholdOverrideDimension
+/**
+ * Dimensions on which the matched unit still produces a finding despite
+ * this override. Non-empty means a finding survived; the listed dimensions
+ * are the ones that breached, whether or not this override configures
+ * their ceilings.
+ */
+outstanding?: ThresholdOverrideDimension[]
 /**
  * Matched file path, when the override matched one.
  */

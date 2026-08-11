@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.15.0] - 2026-08-11
+
+### Added
+
+- **Near-miss clone detection, spread-aware ranking, and a reviewed-clones
+  ignore list** (Closes [#2155](https://github.com/fallow-rs/fallow/issues/2155)).
+  `fallow dupes --near` (config `duplicates.near`) additionally detects
+  function-scoped clones with small structural edits; near matching always
+  uses semantic shingles while exact matching keeps the selected mode, and
+  near groups carry a `similarity` score. Every clone-group finding now
+  includes a `spread` field, and `--top` ranking multiplies token count and
+  occurrences with a capped spread boost, so clones scattered across distant
+  files rank above local ones. A new `duplicates.ignoredClones` config list
+  (`"dup:<fingerprint>:<instance_count>"` entries) silences clone groups a
+  reviewer has accepted; fingerprints hash the normalized token sequence, so
+  formatting-only edits keep a reviewed clone recognized.
+
 ### Changed
 
 - **The complexity contribution kind is now non-exhaustive.** Rust workspace
@@ -58,6 +75,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An explicit `"private-type-leaks": "off"` now survives enabling type-aware
+  analysis** (Closes [#2170](https://github.com/fallow-rs/fallow/issues/2170)).
+  Type-aware analysis force-enabled the opt-in `private-type-leaks` rule
+  regardless of config, which also made the api-surface sidecar capability
+  mandatory. The config layer now records whether the rule was configured
+  explicitly (JSON, JSONC, TOML, the singular alias, and `extends` chains all
+  count), and the type-aware default applies only when it was not. Unset
+  configs keep the default-on behavior.
+- **`cacheMaxAgeDays` and `FALLOW_AUDIT_CACHE_MAX_AGE_DAYS` now actually
+  reclaim audit base-snapshot caches**
+  (Closes [#2169](https://github.com/fallow-rs/fallow/issues/2169)). The
+  cache GC only visited entries under the current repo's hash prefix, while
+  every linked git worktree hashes to its own prefix, so abandoned caches
+  accumulated forever. The GC now ages out abandoned entries from other repo
+  identities, skips entries whose recorded owner root still exists (a repo's
+  own `0` = never-reclaim cannot be defeated from outside), and logs a warning
+  for invalid env values instead of silently falling back.
+- **`--gate new-only` no longer fails a clone-removal refactor**
+  (Closes [#2164](https://github.com/fallow-rs/fallow/issues/2164)). The
+  duplication attribution key changes whenever a clone group's membership or
+  extent shifts, so extracting a shared helper and deleting instances made the
+  surviving group look introduced. Clone groups whose instance ranges contain
+  no added line from the diff are now demoted to inherited; a genuinely pasted
+  clone still gates with `duplication_introduced >= 1` and a failing verdict.
+- **Windows: added-line attribution now sees untracked files.** The
+  untracked-file diff passed native backslash paths to
+  `git diff --no-index`, so the resulting diff keys never matched the
+  forward-slashed lookup paths and every added-line check on an untracked
+  file silently missed on Windows, including the new-only duplication gate
+  above.
 - **Svelte await-block complexity labels now match the source.** `{#await}`
   and `{:then}` contributions previously appeared as `if` in health JSON and
   the VS Code inline breakdown. They now use the explicit `await` and `then`
@@ -105,7 +152,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry point, so a typo in an override path produced silence rather than a
   row saying it matched nothing.
 - **Complexity findings in framework templates now show which conditions
-  caused them.** A `<template>` finding in Vue, Angular, Svelte, or Astro
+  caused them** (Closes [#2150](https://github.com/fallow-rs/fallow/issues/2150)).
+  A `<template>` finding in Vue, Angular, Svelte, or Astro
   reported a cyclomatic and cognitive number with nothing behind it, so the
   VS Code inline breakdown and `health --complexity-breakdown` had nothing to
   display, while the same finding in a script block listed its contributing
@@ -5623,7 +5671,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.14.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.15.0...HEAD
+[3.15.0]: https://github.com/fallow-rs/fallow/compare/v3.14.0...v3.15.0
 [3.14.0]: https://github.com/fallow-rs/fallow/compare/v3.13.0...v3.14.0
 [3.13.0]: https://github.com/fallow-rs/fallow/compare/v3.12.0...v3.13.0
 [3.12.0]: https://github.com/fallow-rs/fallow/compare/v3.11.0...v3.12.0

@@ -177,13 +177,11 @@ impl Visitor<'_> for ValueCollector {
     }
 }
 
-#[cfg(test)]
 #[derive(Default)]
 struct FirstRgbColorCollector {
     rgb: Option<(f64, f64, f64)>,
 }
 
-#[cfg(test)]
 impl Visitor<'_> for FirstRgbColorCollector {
     type Error = std::convert::Infallible;
 
@@ -209,9 +207,16 @@ impl Visitor<'_> for FirstRgbColorCollector {
 /// normalize it to RGB. Supports hex, named colors, rgb(), hsl(), and hwb().
 #[must_use]
 pub fn parse_css_color_rgb(value: &str) -> Option<(f64, f64, f64)> {
-    let color = CssColor::parse_string(value)
-        .ok()
-        .or_else(|| parse_declaration_color(value))?;
+    if let Ok(color) = CssColor::parse_string(value) {
+        return concrete_rgb(&color);
+    }
+    if let Some(color) = parse_declaration_color(value) {
+        return concrete_rgb(&color);
+    }
+    parse_css_color_rgb_via_stylesheet(value)
+}
+
+fn concrete_rgb(color: &CssColor) -> Option<(f64, f64, f64)> {
     let CssColor::RGBA(rgba) = color else {
         return None;
     };
@@ -241,7 +246,6 @@ fn parse_declaration_color(value: &str) -> Option<CssColor> {
     Some(color)
 }
 
-#[cfg(test)]
 fn parse_css_color_rgb_via_stylesheet(value: &str) -> Option<(f64, f64, f64)> {
     let source = format!(".x{{color:{value};}}");
     let options = ParserOptions {
@@ -915,6 +919,11 @@ mod tests {
             "red; color: blue",
             "red; --custom: value",
             "red; :junk",
+            // Error-recovery syntax that requires the stylesheet fallback.
+            "not-a-color; color: blue",
+            "var(--x); color: blue",
+            "red; @media {}",
+            "red; --x: }",
         ];
 
         let mismatches = values

@@ -207,11 +207,15 @@ impl Visitor<'_> for FirstRgbColorCollector {
 /// normalize it to RGB. Supports hex, named colors, rgb(), hsl(), and hwb().
 #[must_use]
 pub fn parse_css_color_rgb(value: &str) -> Option<(f64, f64, f64)> {
-    if let Ok(color) = CssColor::parse_string(value) {
-        return concrete_rgb(&color);
+    if let Ok(color) = CssColor::parse_string(value)
+        && let Some(rgb) = concrete_rgb(&color)
+    {
+        return Some(rgb);
     }
-    if let Some(color) = parse_declaration_color(value) {
-        return concrete_rgb(&color);
+    if let Some(color) = parse_declaration_color(value)
+        && let Some(rgb) = concrete_rgb(&color)
+    {
+        return Some(rgb);
     }
     parse_css_color_rgb_via_stylesheet(value)
 }
@@ -924,6 +928,10 @@ mod tests {
             "var(--x); color: blue",
             "red; @media {}",
             "red; --x: }",
+            "currentColor; color: blue",
+            "CanvasText; color: blue",
+            "lab(50% 40 30); color: blue",
+            "color(display-p3 1 0 0); color: blue",
         ];
 
         let mismatches = values

@@ -380,11 +380,22 @@ pub fn command_title(command: &str) -> &'static str {
 /// Escape a string for inclusion in a Markdown table cell.
 #[must_use]
 pub fn escape_md(value: &str) -> String {
-    // CRLF collapses first so Windows line endings become one space; a bare CR
-    // is a CommonMark line ending and would otherwise split the table row.
-    let collapsed = value.replace("\r\n", " ").replace(['\n', '\r'], " ");
-    let mut out = String::with_capacity(collapsed.len());
-    for ch in collapsed.chars() {
+    let value = value.trim();
+    // Collapse CRLF to one space; a bare CR is a CommonMark line ending and
+    // would otherwise split the table row.
+    let mut chars = value.chars().peekable();
+    let mut out = String::with_capacity(value.len());
+    while let Some(ch) = chars.next() {
+        let ch = match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                ' '
+            }
+            '\n' => ' ',
+            _ => ch,
+        };
         if matches!(
             ch,
             '\\' | '`'
@@ -406,7 +417,7 @@ pub fn escape_md(value: &str) -> String {
         }
         out.push(ch);
     }
-    out.trim().to_owned()
+    out
 }
 
 /// Render a complete CommonMark code span around an untrusted value. The
@@ -863,6 +874,34 @@ mod tests {
     use super::*;
     use crate::{CodeClimateIssueKind, CodeClimateLines, CodeClimateLocation};
 
+    fn escape_md_legacy(value: &str) -> String {
+        let collapsed = value.replace("\r\n", " ").replace(['\n', '\r'], " ");
+        let mut out = String::with_capacity(collapsed.len());
+        for ch in collapsed.chars() {
+            if matches!(
+                ch,
+                '\\' | '`'
+                    | '*'
+                    | '_'
+                    | '['
+                    | ']'
+                    | '('
+                    | ')'
+                    | '!'
+                    | '<'
+                    | '>'
+                    | '#'
+                    | '|'
+                    | '~'
+                    | '&'
+            ) {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
+        out.trim().to_owned()
+    }
+
     fn category_for_rule(rule_id: &str) -> &'static str {
         match rule_id {
             "fallow/code-duplication" => "Duplication",
@@ -1000,6 +1039,29 @@ mod tests {
     #[test]
     fn escape_md_collapses_carriage_returns_to_spaces() {
         assert_eq!(escape_md("first\r\nsecond\rthird"), "first second third");
+    }
+
+    #[test]
+    fn escape_md_matches_legacy_contract_corpus() {
+        const ALPHABET: [char; 12] = [
+            'a', ' ', '\t', '\r', '\n', '\\', '|', '`', '&', '\u{2003}', 'é', '🦀',
+        ];
+
+        for length in 0..=4 {
+            let case_count = ALPHABET.len().pow(length);
+            for mut encoded in 0..case_count {
+                let mut value = String::new();
+                for _ in 0..length {
+                    value.push(ALPHABET[encoded % ALPHABET.len()]);
+                    encoded /= ALPHABET.len();
+                }
+                assert_eq!(
+                    escape_md(&value),
+                    escape_md_legacy(&value),
+                    "contract mismatch for {value:?}"
+                );
+            }
+        }
     }
 
     #[test]

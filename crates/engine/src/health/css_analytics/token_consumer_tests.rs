@@ -425,6 +425,100 @@ fn cva_duplicate_variant_blocks_surface_as_css_copy_paste() {
     assert_eq!(blocks[0].occurrences[0].path, "src/button.ts");
 }
 
+#[test]
+fn lazy_styling_candidates_preserve_raw_style_annotations() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"dependencies":{"tailwindcss":"4.0.0"}}"#,
+    )
+    .unwrap();
+    let styles = write_file(
+        root,
+        0,
+        "src/styles.css",
+        "@theme { --color-brand: #f05a28; }\n.card { color: #f05a29; }\n",
+    );
+
+    let computation = css_computation(root, &[styles]).expect("raw CSS keeps report");
+    let raw = computation
+        .report
+        .raw_style_values
+        .iter()
+        .find(|raw| raw.value == "#f05a29")
+        .expect("raw style value is reported");
+    assert_eq!(
+        raw.nearest_token.as_ref().map(|token| token.name.as_str()),
+        Some("--color-brand")
+    );
+}
+
+#[test]
+fn lazy_styling_candidates_preserve_cva_variant_drift() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"dependencies":{"class-variance-authority":"0.7.0","tailwindcss":"4.0.0"}}"#,
+    )
+    .unwrap();
+    let theme = write_file(
+        root,
+        0,
+        "src/theme.css",
+        "@theme {\n  --color-brand: #f05a28;\n}\n",
+    );
+    let button = write_file(
+        root,
+        1,
+        "src/button.ts",
+        "import { cva } from 'class-variance-authority';\n\
+         export const button = cva('inline-flex', {\n\
+           variants: {\n\
+             tone: {\n\
+               primary: 'px-3 py-2 text-sm font-medium bg-[#f05a28]',\n\
+               secondary: 'px-3 py-2 text-sm font-medium bg-[#f05a28]',\n\
+             },\n\
+           },\n\
+         });\n",
+    );
+
+    let computation = css_computation(root, &[theme, button]).expect("CVA drift keeps report");
+    let drift = computation
+        .report
+        .cva_variant_token_drifts
+        .first()
+        .expect("CVA arbitrary value points at a theme token");
+    assert_eq!(drift.class_token, "bg-[#f05a28]");
+    assert_eq!(drift.nearest_token.name, "--color-brand");
+}
+
+#[test]
+fn lazy_styling_candidates_preserve_css_deep_near_duplicates() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"dependencies":{"tailwindcss":"4.0.0"}}"#,
+    )
+    .unwrap();
+    let theme = write_file(
+        root,
+        0,
+        "src/theme.css",
+        "@theme {\n  --color-zbrand: #f05a28;\n  --color-abrand: rgb(240 90 41);\n}\n",
+    );
+    let mut changed = rustc_hash::FxHashSet::default();
+    changed.insert(theme.path.clone());
+
+    let computation = css_computation_3d_with_output_changed_files(root, &[theme], Some(&changed));
+    let near_duplicates = &computation.report.near_duplicate_theme_tokens;
+    assert!(near_duplicates.iter().any(|candidate| {
+        candidate.token == "--color-abrand" && candidate.nearest_token.name == "--color-zbrand"
+    }));
+}
+
 // --- CSS program Phase 3d: CSS-in-JS design-token blast-radius ---
 
 /// Like [`css_computation`] but parses each file into a `ModuleInfo` so the

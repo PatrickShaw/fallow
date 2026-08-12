@@ -45,7 +45,7 @@ pub(super) struct MarkupCssCandidateInput<'a> {
     pub(super) css_deep: bool,
     pub(super) ws_roots: Option<&'a [std::path::PathBuf]>,
     pub(super) styling_artifacts: Option<&'a StylingAnalysisArtifacts>,
-    pub(super) token_candidates: &'a [ComparableThemeTokenCandidate],
+    pub(super) token_candidates: &'a StylingTokenCandidateCache<'a>,
     pub(super) summary: &'a mut fallow_output::CssAnalyticsSummary,
 }
 

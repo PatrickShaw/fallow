@@ -3,7 +3,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use fallow_config::{
     AutoImportRule, EntryPointRole, ExternalPluginDef, PackageJson, UsedClassMemberRule,
@@ -63,19 +63,10 @@ fn must_parse_workspace_config_when_root_active(plugin_name: &str) -> bool {
 fn compile_config_matchers<'a>(
     active: &[&'a dyn Plugin],
 ) -> Vec<(&'a dyn Plugin, Vec<globset::GlobMatcher>)> {
-    let cached = builtin_config_matchers();
     active
         .iter()
         .filter(|plugin| !plugin.config_patterns().is_empty())
-        .map(|plugin| {
-            (
-                *plugin,
-                cached
-                    .get(plugin.name())
-                    .cloned()
-                    .unwrap_or_else(|| compile_plugin_config_matchers(*plugin)),
-            )
-        })
+        .map(|plugin| (*plugin, cached_plugin_config_matchers(*plugin)))
         .collect()
 }
 
@@ -92,18 +83,59 @@ fn compile_plugin_config_matchers(plugin: &dyn Plugin) -> Vec<globset::GlobMatch
         .collect()
 }
 
-fn builtin_config_matchers() -> &'static FxHashMap<&'static str, Vec<globset::GlobMatcher>> {
-    static MATCHERS: OnceLock<FxHashMap<&'static str, Vec<globset::GlobMatcher>>> = OnceLock::new();
-    MATCHERS.get_or_init(|| {
-        builtin::create_builtin_plugins()
-            .into_iter()
-            .filter(|plugin| !plugin.config_patterns().is_empty())
-            .map(|plugin| {
-                let matchers = compile_plugin_config_matchers(plugin.as_ref());
-                (plugin.name(), matchers)
-            })
-            .collect()
-    })
+struct CachedPluginConfigMatchers {
+    patterns: &'static [&'static str],
+    matchers: Vec<globset::GlobMatcher>,
+}
+
+#[derive(Default)]
+struct PluginConfigMatcherCache {
+    by_name: RwLock<FxHashMap<&'static str, Vec<CachedPluginConfigMatchers>>>,
+}
+
+impl PluginConfigMatcherCache {
+    fn get_or_compile(&self, plugin: &dyn Plugin) -> Vec<globset::GlobMatcher> {
+        let patterns = plugin.config_patterns();
+        let cached = self
+            .by_name
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(plugin.name())
+            .and_then(|variants| {
+                variants
+                    .iter()
+                    .find(|entry| entry.patterns == patterns)
+                    .map(|entry| entry.matchers.clone())
+            });
+        if let Some(matchers) = cached {
+            return matchers;
+        }
+
+        let matchers = compile_plugin_config_matchers(plugin);
+        {
+            let mut by_name = self
+                .by_name
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let variants = by_name.entry(plugin.name()).or_default();
+            if let Some(entry) = variants.iter().find(|entry| entry.patterns == patterns) {
+                return entry.matchers.clone();
+            }
+            variants.push(CachedPluginConfigMatchers {
+                patterns,
+                matchers: matchers.clone(),
+            });
+            drop(by_name);
+        }
+        matchers
+    }
+}
+
+fn cached_plugin_config_matchers(plugin: &dyn Plugin) -> Vec<globset::GlobMatcher> {
+    static MATCHERS: OnceLock<PluginConfigMatcherCache> = OnceLock::new();
+    MATCHERS
+        .get_or_init(PluginConfigMatcherCache::default)
+        .get_or_compile(plugin)
 }
 
 /// Emit one info-level line naming every active plugin.
@@ -663,19 +695,10 @@ impl PluginRegistry {
     pub(crate) fn precompile_config_matchers(
         &self,
     ) -> Vec<(&dyn Plugin, Vec<globset::GlobMatcher>)> {
-        let cached = builtin_config_matchers();
         self.plugins
             .iter()
             .filter(|p| !p.config_patterns().is_empty())
-            .map(|p| {
-                (
-                    p.as_ref(),
-                    cached
-                        .get(p.name())
-                        .cloned()
-                        .unwrap_or_else(|| compile_plugin_config_matchers(p.as_ref())),
-                )
-            })
+            .map(|p| (p.as_ref(), cached_plugin_config_matchers(p.as_ref())))
             .collect()
     }
 }

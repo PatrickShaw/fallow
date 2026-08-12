@@ -2968,6 +2968,69 @@ fn precompile_config_matchers_match_nested_source_ext_configs() {
     );
 }
 
+struct ConfigPatternPlugin {
+    name: &'static str,
+    patterns: &'static [&'static str],
+}
+
+impl Plugin for ConfigPatternPlugin {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn config_patterns(&self) -> &'static [&'static str] {
+        self.patterns
+    }
+}
+
+#[test]
+fn config_matcher_cache_compiles_plugins_lazily_and_keeps_pattern_variants_distinct() {
+    let cache = PluginConfigMatcherCache::default();
+    let first = ConfigPatternPlugin {
+        name: "test-config-cache",
+        patterns: &["first.config.ts"],
+    };
+    let other = ConfigPatternPlugin {
+        name: "other-config-cache",
+        patterns: &["other.config.ts"],
+    };
+
+    let first_matchers = cache.get_or_compile(&first);
+    assert!(
+        first_matchers
+            .iter()
+            .any(|matcher| matcher.is_match("first.config.ts"))
+    );
+    let cached = cache
+        .by_name
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        cached.len(),
+        1,
+        "only the requested plugin should be cached"
+    );
+    assert!(!cached.contains_key(other.name()));
+    drop(cached);
+
+    let same_name_other_patterns = ConfigPatternPlugin {
+        name: first.name(),
+        patterns: &["second.config.ts"],
+    };
+    let second_matchers = cache.get_or_compile(&same_name_other_patterns);
+    assert!(
+        second_matchers
+            .iter()
+            .any(|matcher| matcher.is_match("second.config.ts"))
+    );
+    assert!(
+        second_matchers
+            .iter()
+            .all(|matcher| !matcher.is_match("first.config.ts")),
+        "a same-name plugin with different patterns must not reuse stale matchers"
+    );
+}
+
 #[test]
 fn run_with_jest_config_extracts_setup_and_transform() {
     let tmp = tempfile::tempdir().unwrap();

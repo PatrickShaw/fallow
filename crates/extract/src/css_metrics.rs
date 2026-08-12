@@ -10,7 +10,6 @@
 //! A hard parse failure yields `None`.
 
 use cssparser::{Delimiter, Parser, ParserInput, parse_important};
-use lightningcss::declaration::DeclarationBlock;
 use lightningcss::printer::PrinterOptions;
 use lightningcss::properties::Property;
 use lightningcss::properties::animation::AnimationName;
@@ -244,7 +243,6 @@ fn parse_declaration_color(value: &str) -> Option<CssColor> {
         .ok()?;
     if !parser.is_exhausted() {
         parser.expect_semicolon().ok()?;
-        DeclarationBlock::parse(&mut parser, &ParserOptions::default()).ok()?;
         parser.expect_exhausted().ok()?;
     }
     Some(color)
@@ -932,6 +930,8 @@ mod tests {
             "CanvasText; color: blue",
             "lab(50% 40 30); color: blue",
             "color(display-p3 1 0 0); color: blue",
+            "red; color: blue !important",
+            "rgb(1 2 3); color: blue !important",
         ];
 
         let mismatches = values

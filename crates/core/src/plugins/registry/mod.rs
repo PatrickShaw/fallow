@@ -1,8 +1,9 @@
 //! Plugin registry: discovers active plugins, collects patterns, parses configs.
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use fallow_config::{
     AutoImportRule, EntryPointRole, ExternalPluginDef, PackageJson, UsedClassMemberRule,
@@ -62,23 +63,47 @@ fn must_parse_workspace_config_when_root_active(plugin_name: &str) -> bool {
 fn compile_config_matchers<'a>(
     active: &[&'a dyn Plugin],
 ) -> Vec<(&'a dyn Plugin, Vec<globset::GlobMatcher>)> {
+    let cached = builtin_config_matchers();
     active
         .iter()
         .filter(|plugin| !plugin.config_patterns().is_empty())
         .map(|plugin| {
-            let matchers = plugin
-                .config_patterns()
-                .iter()
-                .filter_map(|pattern| {
-                    let prepared = prepare_config_pattern(pattern);
-                    globset::Glob::new(&prepared)
-                        .ok()
-                        .map(|glob| glob.compile_matcher())
-                })
-                .collect();
-            (*plugin, matchers)
+            (
+                *plugin,
+                cached
+                    .get(plugin.name())
+                    .cloned()
+                    .unwrap_or_else(|| compile_plugin_config_matchers(*plugin)),
+            )
         })
         .collect()
+}
+
+fn compile_plugin_config_matchers(plugin: &dyn Plugin) -> Vec<globset::GlobMatcher> {
+    plugin
+        .config_patterns()
+        .iter()
+        .filter_map(|pattern| {
+            let prepared = prepare_config_pattern(pattern);
+            globset::Glob::new(&prepared)
+                .ok()
+                .map(|glob| glob.compile_matcher())
+        })
+        .collect()
+}
+
+fn builtin_config_matchers() -> &'static FxHashMap<&'static str, Vec<globset::GlobMatcher>> {
+    static MATCHERS: OnceLock<FxHashMap<&'static str, Vec<globset::GlobMatcher>>> = OnceLock::new();
+    MATCHERS.get_or_init(|| {
+        builtin::create_builtin_plugins()
+            .into_iter()
+            .filter(|plugin| !plugin.config_patterns().is_empty())
+            .map(|plugin| {
+                let matchers = compile_plugin_config_matchers(plugin.as_ref());
+                (plugin.name(), matchers)
+            })
+            .collect()
+    })
 }
 
 /// Emit one info-level line naming every active plugin.
@@ -638,21 +663,18 @@ impl PluginRegistry {
     pub(crate) fn precompile_config_matchers(
         &self,
     ) -> Vec<(&dyn Plugin, Vec<globset::GlobMatcher>)> {
+        let cached = builtin_config_matchers();
         self.plugins
             .iter()
             .filter(|p| !p.config_patterns().is_empty())
             .map(|p| {
-                let matchers: Vec<globset::GlobMatcher> = p
-                    .config_patterns()
-                    .iter()
-                    .filter_map(|pat| {
-                        let prepared = prepare_config_pattern(pat);
-                        globset::Glob::new(&prepared)
-                            .ok()
-                            .map(|g| g.compile_matcher())
-                    })
-                    .collect();
-                (p.as_ref(), matchers)
+                (
+                    p.as_ref(),
+                    cached
+                        .get(p.name())
+                        .cloned()
+                        .unwrap_or_else(|| compile_plugin_config_matchers(p.as_ref())),
+                )
             })
             .collect()
     }

@@ -276,6 +276,123 @@ fn css_computation(root: &Path, files: &[DiscoveredFile]) -> Option<CssAnalytics
     )
 }
 
+/// Compare the uncached and session-artifact CSS paths for one project. The
+/// complete serialized reports must stay identical because the artifact cache
+/// is an execution detail, not an analysis-mode switch.
+fn assert_cached_css_report_parity(
+    root: &Path,
+    files: &[DiscoveredFile],
+    health_ignore: &[&str],
+) -> CssAnalyticsComputation {
+    let mut config = config_at(root);
+    config.health.ignore = health_ignore
+        .iter()
+        .map(|pattern| (*pattern).to_owned())
+        .collect();
+    let ignore_set = super::super::ignore::build_ignore_set(&config.health.ignore);
+    let ctx = HealthScanCtx {
+        config: &config,
+        ignore_set: &ignore_set,
+        changed_files: None,
+        output_changed_files: None,
+        ws_roots: None,
+    };
+    let fresh = compute_css_analytics_report_with_artifacts(files, &[], ctx, None)
+        .expect("fresh CSS report is present");
+    let artifacts = build_styling_analysis_artifacts(files, &config);
+    let cached = compute_css_analytics_report_with_artifacts(files, &[], ctx, Some(&artifacts))
+        .expect("cached CSS report is present");
+
+    assert_eq!(
+        serde_json::to_value(&cached.report).unwrap(),
+        serde_json::to_value(&fresh.report).unwrap(),
+        "cached class inventory must preserve the complete CSS report"
+    );
+    cached
+}
+
+#[test]
+fn cached_class_inventory_preserves_vue_style_typo_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("package.json"), r#"{"name":"vue-classes"}"#).unwrap();
+    let component = write_file(
+        root,
+        0,
+        "src/Card.vue",
+        "<template><section class=\"panel-tile exact-card\" /></template>\n\
+         <style scoped>\n.panel-title { color: red; }\n.exact-card { display: block; }\n</style>\n",
+    );
+
+    let computation = assert_cached_css_report_parity(root, &[component], &[]);
+    let unresolved = &computation.report.unresolved_class_references;
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].class, "panel-tile");
+    assert_eq!(unresolved[0].suggestion, "panel-title");
+}
+
+#[test]
+fn cached_class_inventory_preserves_health_ignore_for_typo_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("package.json"), r#"{"name":"ignored-classes"}"#).unwrap();
+    let ignored = write_file(
+        root,
+        0,
+        "ignored/legacy.css",
+        ".ignored-card { color: red; }\n",
+    );
+    let visible = write_file(root, 1, "src/app.css", ".visible-card { color: blue; }\n");
+    let markup = write_file(
+        root,
+        2,
+        "src/App.tsx",
+        "export const App = () => <div className=\"ignored-cord visible-card\" />;\n",
+    );
+
+    let computation =
+        assert_cached_css_report_parity(root, &[ignored, visible, markup], &["ignored/**"]);
+    assert!(
+        computation.report.unresolved_class_references.is_empty(),
+        "an ignored stylesheet must not contribute typo targets"
+    );
+}
+
+#[test]
+fn cached_class_inventory_preserves_preprocessor_abstention_and_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"preprocessor-classes"}"#,
+    )
+    .unwrap();
+    let css = write_file(root, 0, "src/app.css", ".sidebar-nav { color: red; }\n");
+    let scss = write_file(root, 1, "src/theme.scss", ".theme-card { color: blue; }\n");
+    let less = write_file(
+        root,
+        2,
+        "src/legacy.less",
+        ".legacy-card { color: gray; }\n",
+    );
+    let markup = write_file(
+        root,
+        3,
+        "src/App.tsx",
+        "export const App = () => <nav className=\"sidebar-nev\" />;\n",
+    );
+
+    let computation = assert_cached_css_report_parity(root, &[css, scss, less, markup], &[]);
+    assert!(computation.report.unresolved_class_references.is_empty());
+    assert_eq!(computation.report.summary.preprocessor_stylesheets, 2);
+    assert!(
+        computation
+            .report
+            .summary
+            .preprocessor_reachability_abstained
+    );
+}
+
 #[test]
 fn cva_duplicate_variant_blocks_surface_as_css_copy_paste() {
     let dir = tempfile::tempdir().unwrap();

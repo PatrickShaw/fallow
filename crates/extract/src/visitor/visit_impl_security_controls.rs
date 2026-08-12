@@ -161,16 +161,16 @@ impl ModuleInfoExtractor {
         let Some(callee_path) = flatten_callee_path(&expr.callee) else {
             return;
         };
-        if self.has_package_evidence("@nestjs/common")
-            && callee_path.rsplit('.').next() == Some("ValidationPipe")
+        if callee_path.rsplit('.').next() == Some("ValidationPipe")
+            && self.has_package_evidence("@nestjs/common")
         {
             self.record_validation_control_site("nestjs.validation-pipe", expr.span);
         }
     }
 
     fn is_elysia_validation_route(&self, callee_path: &str, expr: &CallExpression<'_>) -> bool {
-        self.has_package_evidence("elysia")
-            && route_method_leaf(callee_path).is_some()
+        route_method_leaf(callee_path).is_some()
+            && self.has_package_evidence("elysia")
             && expr
                 .arguments
                 .iter()
@@ -180,8 +180,8 @@ impl ModuleInfoExtractor {
     }
 
     fn is_fastify_validation_route(&self, callee_path: &str, expr: &CallExpression<'_>) -> bool {
-        self.has_package_evidence("fastify")
-            && route_method_leaf(callee_path).is_some()
+        route_method_leaf(callee_path).is_some()
+            && self.has_package_evidence("fastify")
             && expr
                 .arguments
                 .iter()
@@ -190,39 +190,40 @@ impl ModuleInfoExtractor {
     }
 
     fn is_trpc_input_control(&self, callee_path: &str, expr: &CallExpression<'_>) -> bool {
-        let lower = callee_path.to_ascii_lowercase();
-        self.has_package_evidence("@trpc/server")
-            && callee_path
+        if expr.arguments.is_empty()
+            || !callee_path
                 .rsplit('.')
                 .next()
                 .is_some_and(|leaf| leaf.eq_ignore_ascii_case("input"))
-            && lower.contains("procedure")
-            && !expr.arguments.is_empty()
+        {
+            return false;
+        }
+
+        callee_path.to_ascii_lowercase().contains("procedure")
+            && self.has_package_evidence("@trpc/server")
     }
 
     fn is_hono_validation_middleware(&self, callee_path: &str, expr: &CallExpression<'_>) -> bool {
-        (self.has_package_evidence("hono") || self.has_package_evidence("@hono/zod-validator"))
-            && matches!(
-                callee_path.rsplit('.').next(),
-                Some("validator" | "zValidator")
-            )
-            && !expr.arguments.is_empty()
+        matches!(
+            callee_path.rsplit('.').next(),
+            Some("validator" | "zValidator")
+        ) && !expr.arguments.is_empty()
+            && (self.has_package_evidence("hono")
+                || self.has_package_evidence("@hono/zod-validator"))
     }
 
     fn is_nest_validation_pipe_call(&self, callee_path: &str) -> bool {
-        self.has_package_evidence("@nestjs/common")
-            && matches!(
-                callee_path.rsplit('.').next(),
-                Some("UsePipes" | "ValidationPipe")
-            )
+        matches!(
+            callee_path.rsplit('.').next(),
+            Some("UsePipes" | "ValidationPipe")
+        ) && self.has_package_evidence("@nestjs/common")
     }
 
     fn is_express_validator_control(&self, callee_path: &str, expr: &CallExpression<'_>) -> bool {
-        self.has_package_evidence("express-validator")
-            && matches!(
-                callee_path.rsplit('.').next(),
-                Some("body" | "param" | "query" | "check")
-            )
-            && !expr.arguments.is_empty()
+        matches!(
+            callee_path.rsplit('.').next(),
+            Some("body" | "param" | "query" | "check")
+        ) && !expr.arguments.is_empty()
+            && self.has_package_evidence("express-validator")
     }
 }

@@ -53,6 +53,21 @@ jobs:
             echo "::error::Release tag ${TAG_NAME} does not match workspace version ${workspace_version}"
             exit 1
           fi
+          # The type-aware sidecar must ship in lockstep: the CLI refuses a
+          # companion whose version differs, so a stale sidecar version fails
+          # the Windows validation job only AFTER the full build matrix ran.
+          # Fail the dispatch up front instead.
+          sidecar_version="$(jq -r '.version' tools/type-aware-sidecar/package.json)"
+          sidecar_lock_version="$(jq -r '.version' tools/type-aware-sidecar/package-lock.json)"
+          if [ "$TAG_NAME" != "v${sidecar_version}" ] || [ "$TAG_NAME" != "v${sidecar_lock_version}" ]; then
+            echo "::error::type-aware sidecar version (${sidecar_version}, lock ${sidecar_lock_version}) does not match release tag ${TAG_NAME}"
+            exit 1
+          fi
+          wrapper_version="$(jq -r '.version' npm/fallow/package.json)"
+          if [ "$TAG_NAME" != "v${wrapper_version}" ]; then
+            echo "::error::npm wrapper version ${wrapper_version} does not match release tag ${TAG_NAME}"
+            exit 1
+          fi
 
           # The type-aware companion is version-locked to the binary at runtime:
           # the CLI refuses a companion whose version differs, so a release

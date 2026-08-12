@@ -1,8 +1,9 @@
 //! Plugin registry: discovers active plugins, collects patterns, parses configs.
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 
 use fallow_config::{
     AutoImportRule, EntryPointRole, ExternalPluginDef, PackageJson, UsedClassMemberRule,
@@ -65,20 +66,76 @@ fn compile_config_matchers<'a>(
     active
         .iter()
         .filter(|plugin| !plugin.config_patterns().is_empty())
-        .map(|plugin| {
-            let matchers = plugin
-                .config_patterns()
-                .iter()
-                .filter_map(|pattern| {
-                    let prepared = prepare_config_pattern(pattern);
-                    globset::Glob::new(&prepared)
-                        .ok()
-                        .map(|glob| glob.compile_matcher())
-                })
-                .collect();
-            (*plugin, matchers)
+        .map(|plugin| (*plugin, cached_plugin_config_matchers(*plugin)))
+        .collect()
+}
+
+fn compile_plugin_config_matchers(plugin: &dyn Plugin) -> Vec<globset::GlobMatcher> {
+    plugin
+        .config_patterns()
+        .iter()
+        .filter_map(|pattern| {
+            let prepared = prepare_config_pattern(pattern);
+            globset::Glob::new(&prepared)
+                .ok()
+                .map(|glob| glob.compile_matcher())
         })
         .collect()
+}
+
+struct CachedPluginConfigMatchers {
+    patterns: &'static [&'static str],
+    matchers: Vec<globset::GlobMatcher>,
+}
+
+#[derive(Default)]
+struct PluginConfigMatcherCache {
+    by_name: RwLock<FxHashMap<&'static str, Vec<CachedPluginConfigMatchers>>>,
+}
+
+impl PluginConfigMatcherCache {
+    fn get_or_compile(&self, plugin: &dyn Plugin) -> Vec<globset::GlobMatcher> {
+        let patterns = plugin.config_patterns();
+        let cached = self
+            .by_name
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(plugin.name())
+            .and_then(|variants| {
+                variants
+                    .iter()
+                    .find(|entry| entry.patterns == patterns)
+                    .map(|entry| entry.matchers.clone())
+            });
+        if let Some(matchers) = cached {
+            return matchers;
+        }
+
+        let matchers = compile_plugin_config_matchers(plugin);
+        {
+            let mut by_name = self
+                .by_name
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let variants = by_name.entry(plugin.name()).or_default();
+            if let Some(entry) = variants.iter().find(|entry| entry.patterns == patterns) {
+                return entry.matchers.clone();
+            }
+            variants.push(CachedPluginConfigMatchers {
+                patterns,
+                matchers: matchers.clone(),
+            });
+            drop(by_name);
+        }
+        matchers
+    }
+}
+
+fn cached_plugin_config_matchers(plugin: &dyn Plugin) -> Vec<globset::GlobMatcher> {
+    static MATCHERS: OnceLock<PluginConfigMatcherCache> = OnceLock::new();
+    MATCHERS
+        .get_or_init(PluginConfigMatcherCache::default)
+        .get_or_compile(plugin)
 }
 
 /// Emit one info-level line naming every active plugin.
@@ -641,19 +698,7 @@ impl PluginRegistry {
         self.plugins
             .iter()
             .filter(|p| !p.config_patterns().is_empty())
-            .map(|p| {
-                let matchers: Vec<globset::GlobMatcher> = p
-                    .config_patterns()
-                    .iter()
-                    .filter_map(|pat| {
-                        let prepared = prepare_config_pattern(pat);
-                        globset::Glob::new(&prepared)
-                            .ok()
-                            .map(|g| g.compile_matcher())
-                    })
-                    .collect();
-                (p.as_ref(), matchers)
-            })
+            .map(|p| (p.as_ref(), cached_plugin_config_matchers(p.as_ref())))
             .collect()
     }
 }

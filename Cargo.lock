@@ -1185,6 +1185,7 @@ name = "fallow-extract"
 version = "3.15.0"
 dependencies = [
  "bitcode",
+ "cssparser",
  "fallow-cov-protocol",
  "fallow-types",
  "lightningcss",

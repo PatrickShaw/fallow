@@ -3266,12 +3266,8 @@ fn assert_reshaped_demotion_observability(result: &AuditResult) {
         })
         .collect();
     let base_duplicate_export_keys: Option<Vec<String>> = result.base_snapshot.as_ref().map(|s| {
-        let mut keys: Vec<String> = s
-            .dead_code
-            .iter()
-            .filter(|key| key.starts_with("duplicate-export"))
-            .cloned()
-            .collect();
+        let mut keys: Vec<String> = s.dead_code.iter().cloned().collect();
+        keys.extend(s.dupes.iter().cloned());
         keys.sort();
         keys
     });

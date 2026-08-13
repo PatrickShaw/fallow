@@ -293,16 +293,26 @@ fn backdate_days(path: &Path, days: u64) {
 
 /// Deterministic snapshot of a directory's entry names, sizes, and mtimes,
 /// for byte-level "dry run must not mutate" assertions.
-fn snapshot_dir_entries(dir: &Path) -> Vec<(String, u64, std::time::SystemTime)> {
-    let mut entries: Vec<(String, u64, std::time::SystemTime)> = fs::read_dir(dir)
+/// Name, size, and file mtime per entry. Directory mtimes are deliberately
+/// excluded: NTFS updates a directory's timestamp lazily, so it can still move
+/// after the last write to that directory has returned, which makes an
+/// unchanged tree compare unequal. Seeding and lock files remain visible
+/// through the file set, the sizes, and the file mtimes.
+fn snapshot_dir_entries(dir: &Path) -> Vec<(String, u64, Option<std::time::SystemTime>)> {
+    let mut entries: Vec<(String, u64, Option<std::time::SystemTime>)> = fs::read_dir(dir)
         .expect("directory should be readable")
         .flatten()
         .map(|entry| {
             let metadata = entry.metadata().expect("entry metadata should be readable");
+            let mtime = if metadata.is_dir() {
+                None
+            } else {
+                Some(metadata.modified().expect("entry mtime should be readable"))
+            };
             (
                 entry.file_name().to_string_lossy().into_owned(),
                 metadata.len(),
-                metadata.modified().expect("entry mtime should be readable"),
+                mtime,
             )
         })
         .collect();

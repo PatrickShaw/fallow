@@ -3253,10 +3253,25 @@ fn assert_reshaped_demotion_observability(result: &AuditResult) {
         ),
         "without an opt-in shared diff the merge-base worktree diff decides"
     );
+    let introduced_dead_code: Vec<String> = comparison
+        .dead_code
+        .records()
+        .iter()
+        .filter(|record| record.introduced)
+        .map(|record| {
+            let collection = record.collection;
+            let key = &record.stable_key;
+            let severity = record.effective_severity;
+            format!("{collection}#{key} ({severity:?})")
+        })
+        .collect();
     assert_eq!(
         result.verdict,
         AuditVerdict::Pass,
-        "demotion observability must not change the verdict"
+        "demotion observability must not change the verdict; attribution={:?} \
+         introduced_dead_code={introduced_dead_code:?} health_introduced={}",
+        result.attribution,
+        comparison.health.introduced_count(),
     );
     assert_eq!(
         crate::audit::print_audit_result(result, true, false),

@@ -82,9 +82,8 @@ impl DiffSource {
 }
 
 /// Result of `load_diff_index_for_findings`. Carries the parsed
-/// `DiffIndex` plus the raw unified-diff text it was parsed from; the source
-/// breadcrumb is consumed by the function during load to compose warning
-/// messages and is not retained beyond that. The raw text is retained so the
+/// `DiffIndex`, the raw unified-diff text it was parsed from, and the
+/// user-facing source label. The raw text is retained so the
 /// walkthrough guide can derive per-hunk `change_anchors` from the SAME diff
 /// source the finding filter used (a `--diff-stdin` staged diff, not the
 /// committed `base...HEAD`), keeping emission and validation anchored to one
@@ -93,6 +92,10 @@ impl DiffSource {
 pub struct LoadedDiff {
     index: DiffIndex,
     raw: String,
+    /// User-facing label of the source the diff was loaded from (for example
+    /// `--diff-file pr.diff`), retained so downstream consumers can name the
+    /// diff that decided a filtering or demotion outcome (issue #2220).
+    source_label: String,
 }
 
 /// Resolve a diff source from CLI input.
@@ -259,7 +262,11 @@ fn load_diff_index_from_reader(
              deletion-only diffs also produce empty indices."
         );
     }
-    Some(LoadedDiff { index, raw: text })
+    Some(LoadedDiff {
+        index,
+        raw: text,
+        source_label: label.to_owned(),
+    })
 }
 
 /// Process-wide cache for the diff index resolved at startup, so combined
@@ -330,6 +337,7 @@ pub(crate) fn init_shared_diff(
                     Some(LoadedDiff {
                         index: loaded.index.with_base(chosen.base).with_root_offset(offset),
                         raw: loaded.raw,
+                        source_label: loaded.source_label,
                     })
                 }
             }
@@ -459,6 +467,17 @@ pub(crate) fn shared_diff_raw() -> Option<&'static str> {
         .get()
         .and_then(|v| v.as_ref())
         .map(|l| l.raw.as_str())
+}
+
+/// User-facing label of the source backing the shared diff index (for example
+/// `--diff-file pr.diff` or `--diff-stdin`). `None` when no shared diff was
+/// loaded.
+#[must_use]
+pub(crate) fn shared_diff_source_label() -> Option<&'static str> {
+    SHARED_DIFF
+        .get()
+        .and_then(|v| v.as_ref())
+        .map(|l| l.source_label.as_str())
 }
 
 fn context_radius_from_env() -> u64 {

@@ -3253,32 +3253,11 @@ fn assert_reshaped_demotion_observability(result: &AuditResult) {
         ),
         "without an opt-in shared diff the merge-base worktree diff decides"
     );
-    let introduced_dead_code: Vec<String> = comparison
-        .dead_code
-        .records()
-        .iter()
-        .filter(|record| record.introduced)
-        .map(|record| {
-            let collection = record.collection;
-            let key = &record.stable_key;
-            let severity = record.effective_severity;
-            format!("{collection}#{key} ({severity:?})")
-        })
-        .collect();
-    let base_duplicate_export_keys: Option<Vec<String>> = result.base_snapshot.as_ref().map(|s| {
-        let mut keys: Vec<String> = s.dead_code.iter().cloned().collect();
-        keys.extend(s.dupes.iter().cloned());
-        keys.sort();
-        keys
-    });
     assert_eq!(
         result.verdict,
         AuditVerdict::Pass,
-        "demotion observability must not change the verdict; attribution={:?} \
-         introduced_dead_code={introduced_dead_code:?} health_introduced={} \
-         base_duplicate_export_keys={base_duplicate_export_keys:?}",
+        "demotion observability must not change the verdict; attribution={:?}",
         result.attribution,
-        comparison.health.introduced_count(),
     );
     assert_eq!(
         crate::audit::print_audit_result(result, true, false),
@@ -3584,6 +3563,35 @@ fn remap_focus_files_returns_none_when_no_paths_map() {
     assert!(
         remapped.is_none(),
         "remap should return None when no paths can be mapped, falling caller back to full corpus"
+    );
+}
+
+/// The changed-file set is built from `git rev-parse --show-toplevel`, whose
+/// spelling can differ from the caller's canonicalized root (Windows 8.3
+/// components and drive-letter case; a symlinked root on unix). Those paths must
+/// still map: an unmappable set leaves the base snapshot unfiltered, and
+/// filtering it against the resulting empty set erased every base finding, so
+/// each inherited head finding looked introduced under the new-only gate.
+#[cfg(unix)]
+#[test]
+fn remap_focus_files_maps_paths_spelled_against_an_uncanonical_root() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let real = tmp.path().join("real");
+    let link = tmp.path().join("link");
+    fs::create_dir_all(real.join("src")).expect("real src dir");
+    fs::write(real.join("src/foo.ts"), "export const foo = 1;\n").expect("source file");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    let mut focus = FxHashSet::default();
+    focus.insert(real.join("src/foo.ts"));
+
+    let to_root = PathBuf::from("/wt");
+    let remapped = remap_focus_files(&focus, &link, &to_root)
+        .expect("paths spelled against an uncanonical root must still map");
+
+    assert!(
+        remapped.contains(&to_root.join("src/foo.ts")),
+        "expected the focus path to map through the canonicalized root; got {remapped:?}"
     );
 }
 

@@ -327,8 +327,11 @@ fn compute_base_snapshot(
     let check_production = opts.production_dead_code.unwrap_or(opts.production);
     let health_production = opts.production_health.unwrap_or(opts.production);
     let share_dead_code_parse_with_health = check_production == health_production;
-    let empty_changed_files = FxHashSet::default();
-    let base_changed_files_ref = base_changed_files.as_ref().unwrap_or(&empty_changed_files);
+    // A failed remap means the focus set could not be expressed against the base
+    // worktree, not that nothing changed. Filtering the base results against an
+    // empty set would erase every base finding and make each inherited head
+    // finding look introduced, so leave the base results unfiltered instead.
+    let base_changed_files_ref = base_changed_files.as_ref();
 
     let (check_res, dupes_res) = rayon::join(
         || {
@@ -842,9 +845,29 @@ fn remap_focus_files(
     from_root: &Path,
     to_root: &Path,
 ) -> Option<FxHashSet<PathBuf>> {
+    // The focus set is built from `git rev-parse --show-toplevel`, whose spelling
+    // can differ from the caller's canonicalized root (Windows 8.3 components,
+    // drive-letter case, verbatim `\\?\` prefixes), so a literal strip_prefix can
+    // miss every entry. Compare simplified and canonicalized forms before giving
+    // up on a path.
+    let simple_from = dunce::simplified(from_root).to_path_buf();
+    let canonical_from = dunce::canonicalize(from_root).unwrap_or_else(|_| simple_from.clone());
     let mut remapped = FxHashSet::default();
     for file in files {
-        if let Ok(relative) = file.strip_prefix(from_root) {
+        let simple_file = dunce::simplified(file);
+        let relative = simple_file
+            .strip_prefix(&simple_from)
+            .or_else(|_| simple_file.strip_prefix(&canonical_from))
+            .map(Path::to_path_buf)
+            .ok()
+            .or_else(|| {
+                let canonical_file = dunce::canonicalize(file).ok()?;
+                canonical_file
+                    .strip_prefix(&canonical_from)
+                    .map(Path::to_path_buf)
+                    .ok()
+            });
+        if let Some(relative) = relative {
             remapped.insert(to_root.join(relative));
         }
     }
@@ -1046,7 +1069,7 @@ fn run_audit_head_analyses(
         opts,
         type_aware,
         changed_since,
-        changed_files,
+        Some(changed_files),
         share_dead_code_parse_with_health,
         fallow_config::AnalysisSnapshot::Current,
     )?;
@@ -2294,11 +2317,14 @@ fn empty_audit_result(
 }
 
 /// Run dead code analysis for the audit pipeline.
+/// `changed_files` is `None` when the caller could not express a focus set for
+/// this analysis root; results are then left unfiltered rather than filtered
+/// against an empty set, which would drop every finding.
 fn run_audit_check<'a>(
     opts: &'a AuditOptions<'a>,
     type_aware: AuditTypeAwareOptions<'a>,
     changed_since: Option<&'a str>,
-    changed_files: &FxHashSet<PathBuf>,
+    changed_files: Option<&FxHashSet<PathBuf>>,
     retain_modules_for_health: bool,
     analysis_snapshot: fallow_config::AnalysisSnapshot,
 ) -> Result<Option<CheckResult>, ExitCode> {
@@ -2363,10 +2389,12 @@ fn run_audit_check<'a>(
         analysis_snapshot,
     }) {
         Ok(mut result) => {
-            fallow_engine::changed_files::filter_results_by_changed_files(
-                &mut result.results,
-                changed_files,
-            );
+            if let Some(changed_files) = changed_files {
+                fallow_engine::changed_files::filter_results_by_changed_files(
+                    &mut result.results,
+                    changed_files,
+                );
+            }
             Ok(Some(result))
         }
         Err(code) => Err(code),

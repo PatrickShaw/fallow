@@ -269,7 +269,7 @@ pub(super) struct CrapCeilingLookup<'a> {
 /// value the findings pipeline compares against the effective ceiling, so a
 /// boundary function cannot produce a finding without being counted here, or
 /// be counted here without producing a finding.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct CrapThresholdSignals {
     /// Functions whose rounded CRAP meets or exceeds their effective ceiling.
     above: usize,
@@ -369,6 +369,7 @@ pub struct PerFunctionCrap {
 }
 
 /// Istanbul CRAP result: CRAP scores plus match statistics.
+#[derive(Debug)]
 struct IstanbulCrapResult {
     pub max_crap: f64,
     /// Threshold-relative counts and the lowest effective ceiling.
@@ -409,8 +410,17 @@ fn compute_crap_scores_istanbul(
     let mut max = 0.0_f64;
     let mut signals = CrapThresholdSignals::default();
     let mut matched = 0usize;
+    let mut total = 0usize;
     let mut per_function = Vec::with_capacity(complexity.len());
     for f in complexity {
+        // Synthetic template-family units carry no measurable coverage (an
+        // Istanbul fnMap can never contain them), so they are excluded from
+        // the CRAP dimension entirely: no per-function entry, no max /
+        // above-threshold contribution, no match-statistics slot.
+        if fallow_types::extract::is_synthetic_template_unit(&f.name) {
+            continue;
+        }
+        total += 1;
         let (crap, coverage_pct, tier, source) =
             crap_for_function(f, file_coverage, is_test_reachable, &mut matched);
         let crap_rounded = (crap * 10.0).round() / 10.0;
@@ -429,7 +439,7 @@ fn compute_crap_scores_istanbul(
         max_crap: (max * 10.0).round() / 10.0,
         signals,
         matched,
-        total: complexity.len(),
+        total,
         per_function,
     }
 }
@@ -499,6 +509,7 @@ const MAX_DIRECT_CALLER_EVIDENCE: usize = 5;
 /// Applies the canonical CRAP formula with these estimates.
 /// Returns `(max_crap, count_above_threshold)`.
 /// Estimated CRAP result: score aggregates plus per-function data.
+#[derive(Debug)]
 struct EstimatedCrapResult {
     pub max_crap: f64,
     /// Threshold-relative counts and the lowest effective ceiling.
@@ -524,6 +535,12 @@ fn compute_crap_scores_estimated(
     let mut signals = CrapThresholdSignals::default();
     let mut per_function = Vec::with_capacity(complexity.len());
     for f in complexity {
+        // Template-family units leave the CRAP dimension: their name never
+        // appears in `test_referenced_exports`, so the estimate could only
+        // ever restate the file's reachability as a disguised cyclomatic gate.
+        if fallow_types::extract::is_synthetic_template_unit(&f.name) {
+            continue;
+        }
         let cc = f64::from(f.cyclomatic);
         let estimated_coverage = if test_referenced_exports.contains(f.name.as_str()) {
             DIRECT_TEST_COVERAGE_ESTIMATE
@@ -4442,6 +4459,59 @@ mod tests {
     fn crap_formula_high_coverage_low_complexity() {
         let result = crap_formula(2.0, 90.0);
         assert!((result - 2.004).abs() < 0.001);
+    }
+
+    /// Pin the exact cyclomatic value at which the default CRAP gate (30.0)
+    /// trips for each estimated-coverage tier. These numbers back the
+    /// changelog and docs wording: 5 at the 0% tier, 10 at the 40% indirect
+    /// tier, 28 at the 85% direct tier.
+    #[test]
+    fn crap_default_gate_cyclomatic_boundaries_per_estimate_tier() {
+        for (coverage_pct, gate_cc) in [(0.0, 5.0), (40.0, 10.0), (85.0, 28.0)] {
+            assert!(
+                crap_formula(gate_cc, coverage_pct) >= CRAP_THRESHOLD,
+                "cyclomatic {gate_cc} at {coverage_pct}% must reach the gate"
+            );
+            assert!(
+                crap_formula(gate_cc - 1.0, coverage_pct) < CRAP_THRESHOLD,
+                "cyclomatic {} at {coverage_pct}% must stay under the gate",
+                gate_cc - 1.0
+            );
+        }
+    }
+
+    #[test]
+    fn istanbul_crap_excludes_synthetic_template_units() {
+        let funcs = vec![
+            make_named_fn_complexity("<template>", 1, 21),
+            make_named_fn_complexity("<snippet:rowBody>", 1, 16),
+            make_fn_complexity(6),
+        ];
+        let result = istanbul_crap_default(&funcs, None, false);
+        assert!((result.max_crap - 42.0).abs() < f64::EPSILON, "{result:#?}");
+        assert_eq!(result.signals.above, 1);
+        assert_eq!(
+            result.total, 1,
+            "template units must not count as unmatched"
+        );
+        assert_eq!(result.per_function.len(), 1);
+    }
+
+    #[test]
+    fn estimated_crap_excludes_synthetic_template_units() {
+        let funcs = vec![
+            make_named_fn_complexity("<template>", 1, 21),
+            make_named_fn_complexity("<snippet:rowBody>", 1, 16),
+        ];
+        let result = estimated_crap_default(
+            &funcs,
+            &rustc_hash::FxHashSet::default(),
+            false,
+            fallow_output::CoverageSource::Estimated,
+        );
+        assert!(result.max_crap.abs() < f64::EPSILON, "{result:#?}");
+        assert_eq!(result.signals.above, 0);
+        assert!(result.per_function.is_empty());
     }
 
     #[test]

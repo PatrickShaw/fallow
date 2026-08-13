@@ -3265,11 +3265,22 @@ fn assert_reshaped_demotion_observability(result: &AuditResult) {
             format!("{collection}#{key} ({severity:?})")
         })
         .collect();
+    let base_duplicate_export_keys: Option<Vec<String>> = result.base_snapshot.as_ref().map(|s| {
+        let mut keys: Vec<String> = s
+            .dead_code
+            .iter()
+            .filter(|key| key.starts_with("duplicate-export"))
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    });
     assert_eq!(
         result.verdict,
         AuditVerdict::Pass,
         "demotion observability must not change the verdict; attribution={:?} \
-         introduced_dead_code={introduced_dead_code:?} health_introduced={}",
+         introduced_dead_code={introduced_dead_code:?} health_introduced={} \
+         base_duplicate_export_keys={base_duplicate_export_keys:?}",
         result.attribution,
         comparison.health.introduced_count(),
     );

@@ -16,13 +16,17 @@ Rust walltime retain gates run through the separate, manual
 cover core analysis, stable programmatic sessions, and engine components
 without accepting arbitrary commands. Keeping it manual avoids adding
 release-LTO builds to every pull request while preserving comparable Linux
-base/head evidence:
+base/head evidence on CodSpeed's dedicated macro runners:
 
 ```bash
 gh workflow run bench-rust-walltime.yml \
   --ref <commit-or-branch> \
   -f workload=analysis
 ```
+
+The Rust benchmark crates use CodSpeed's official Criterion compatibility
+layer. Keep its major version aligned with `cargo-codspeed` so both simulation
+and walltime result collection remain available.
 
 Use the same workload on the exact base and head refs, then compare those two
 walltime runs in CodSpeed. Do not compare values across workload choices.

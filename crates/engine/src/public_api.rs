@@ -40,6 +40,7 @@ pub fn public_api_package_entry_points(
         graph,
         &path_to_file_id,
         workspaces,
+        &config.public_packages,
         &canonical_project_root,
     );
 
@@ -120,9 +121,13 @@ fn add_workspace_public_api_entry_points(
     graph: &fallow_graph::graph::ModuleGraph,
     path_to_file_id: &FxHashMap<PathBuf, FileId>,
     workspaces: &[WorkspaceInfo],
+    public_packages: &[String],
     canonical_project_root: &Path,
 ) {
-    for workspace in workspaces {
+    for workspace in workspaces
+        .iter()
+        .filter(|workspace| fallow_config::workspace_is_public(&workspace.name, public_packages))
+    {
         let Some(pkg) = fallow_config::load_dir_package_json(&workspace.root) else {
             continue;
         };
@@ -397,4 +402,43 @@ fn is_source_index_under_package(path: &Path, package_root: &Path) -> bool {
     path.file_stem()
         .and_then(|stem| stem.to_str())
         .is_some_and(|stem| stem == "index")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::AnalysisSession;
+
+    fn fixture_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/public-package-members")
+    }
+
+    fn public_entry_paths(session: &AnalysisSession) -> Vec<PathBuf> {
+        let artifacts = session
+            .analyze_dead_code_with_artifacts(false, true)
+            .expect("analysis succeeds");
+        let graph = artifacts.graph.expect("retained graph");
+        public_api_entry_paths_for_graph(&graph, session.config(), session.workspaces())
+    }
+
+    #[test]
+    fn workspace_public_entries_require_public_packages_selection() {
+        let root = fixture_root();
+        let unselected = AnalysisSession::load_with_config(&root, None, |config| {
+            config.public_packages.clear();
+        })
+        .expect("unselected session loads");
+
+        assert!(public_entry_paths(&unselected).is_empty());
+
+        let selected = AnalysisSession::load_with_config(&root, None, |config| {
+            config.public_packages = vec!["@workspace/public-lib".to_string()];
+        })
+        .expect("selected session loads");
+        let selected_paths = public_entry_paths(&selected);
+
+        assert_eq!(selected_paths.len(), 1);
+        assert!(selected_paths[0].ends_with("packages/public-lib/src/index.ts"));
+    }
 }

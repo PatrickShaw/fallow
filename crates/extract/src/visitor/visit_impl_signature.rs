@@ -2,8 +2,184 @@
 
 use super::visit_helpers::*;
 use super::*;
+use crate::{SemanticFact, TypeAliasSurfaceTargetFact};
 
 impl ModuleInfoExtractor {
+    fn collect_type_alias_surface_targets(
+        ty: &TSType<'_>,
+        type_parameters: &FxHashSet<&str>,
+        targets: &mut Vec<String>,
+    ) {
+        match ty {
+            TSType::TSTypeReference(reference) => {
+                let Some((name, _)) = type_name_root(&reference.type_name) else {
+                    return;
+                };
+                if matches!(
+                    name.as_str(),
+                    "Pick" | "Omit" | "Partial" | "Required" | "Readonly" | "NonNullable"
+                ) {
+                    if let Some(first) = reference
+                        .type_arguments
+                        .as_deref()
+                        .and_then(|arguments| arguments.params.first())
+                    {
+                        Self::collect_type_alias_surface_targets(first, type_parameters, targets);
+                    }
+                } else if !type_parameters.contains(name.as_str()) {
+                    targets.push(name);
+                }
+            }
+            TSType::TSUnionType(union) => {
+                for branch in &union.types {
+                    Self::collect_type_alias_surface_targets(branch, type_parameters, targets);
+                }
+            }
+            TSType::TSIntersectionType(intersection) => {
+                for branch in &intersection.types {
+                    Self::collect_type_alias_surface_targets(branch, type_parameters, targets);
+                }
+            }
+            TSType::TSParenthesizedType(parenthesized) => {
+                Self::collect_type_alias_surface_targets(
+                    &parenthesized.type_annotation,
+                    type_parameters,
+                    targets,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_literal_type_strings(ty: &TSType<'_>, values: &mut Vec<String>) {
+        match ty {
+            TSType::TSLiteralType(literal) => {
+                if let TSLiteral::StringLiteral(value) = &literal.literal {
+                    values.push(value.value.to_string());
+                }
+            }
+            TSType::TSUnionType(union) => {
+                for branch in &union.types {
+                    Self::collect_literal_type_strings(branch, values);
+                }
+            }
+            TSType::TSParenthesizedType(parenthesized) => {
+                Self::collect_literal_type_strings(&parenthesized.type_annotation, values);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_pick_member_accesses(
+        ty: &TSType<'_>,
+        type_parameters: &FxHashSet<&str>,
+        accesses: &mut Vec<MemberAccess>,
+    ) {
+        match ty {
+            TSType::TSTypeReference(reference) => {
+                let Some((name, _)) = type_name_root(&reference.type_name) else {
+                    return;
+                };
+                if name != "Pick" {
+                    if matches!(
+                        name.as_str(),
+                        "Partial" | "Required" | "Readonly" | "NonNullable"
+                    ) && let Some(first) = reference
+                        .type_arguments
+                        .as_deref()
+                        .and_then(|arguments| arguments.params.first())
+                    {
+                        Self::collect_pick_member_accesses(first, type_parameters, accesses);
+                    }
+                    return;
+                }
+                let Some(arguments) = reference.type_arguments.as_deref() else {
+                    return;
+                };
+                let (Some(target), Some(keys)) =
+                    (arguments.params.first(), arguments.params.get(1))
+                else {
+                    return;
+                };
+                let mut targets = Vec::new();
+                Self::collect_type_alias_surface_targets(target, type_parameters, &mut targets);
+                let mut members = Vec::new();
+                Self::collect_literal_type_strings(keys, &mut members);
+                accesses.extend(targets.into_iter().flat_map(|object| {
+                    members.iter().cloned().map(move |member| MemberAccess {
+                        object: object.clone(),
+                        member,
+                    })
+                }));
+            }
+            TSType::TSUnionType(union) => {
+                for branch in &union.types {
+                    Self::collect_pick_member_accesses(branch, type_parameters, accesses);
+                }
+            }
+            TSType::TSIntersectionType(intersection) => {
+                for branch in &intersection.types {
+                    Self::collect_pick_member_accesses(branch, type_parameters, accesses);
+                }
+            }
+            TSType::TSParenthesizedType(parenthesized) => {
+                Self::collect_pick_member_accesses(
+                    &parenthesized.type_annotation,
+                    type_parameters,
+                    accesses,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn record_type_alias_surface_targets(&mut self, alias: &TSTypeAliasDeclaration<'_>) {
+        let type_parameters: FxHashSet<&str> = alias
+            .type_parameters
+            .as_deref()
+            .into_iter()
+            .flat_map(|parameters| &parameters.params)
+            .map(|parameter| parameter.name.name.as_str())
+            .collect();
+        let mut targets = Vec::new();
+        Self::collect_type_alias_surface_targets(
+            &alias.type_annotation,
+            &type_parameters,
+            &mut targets,
+        );
+        targets.sort_unstable();
+        targets.dedup();
+        self.semantic_facts
+            .extend(targets.into_iter().map(|target_name| {
+                SemanticFact::TypeAliasSurfaceTarget(TypeAliasSurfaceTargetFact {
+                    alias_name: alias.id.name.to_string(),
+                    target_name,
+                })
+            }));
+        let mut picked_members = Vec::new();
+        Self::collect_pick_member_accesses(
+            &alias.type_annotation,
+            &type_parameters,
+            &mut picked_members,
+        );
+        self.member_accesses.extend(picked_members);
+    }
+
+    fn remove_type_parameter_refs(
+        refs: &mut Vec<(String, Span)>,
+        type_parameters: Option<&TSTypeParameterDeclaration<'_>>,
+    ) {
+        let Some(type_parameters) = type_parameters else {
+            return;
+        };
+        refs.retain(|(name, _)| {
+            !type_parameters
+                .params
+                .iter()
+                .any(|parameter| parameter.name.name == name.as_str())
+        });
+    }
+
     pub(super) fn record_local_type_declaration(&mut self, name: &str, span: Span) {
         if self
             .local_type_declarations
@@ -76,6 +252,7 @@ impl ModuleInfoExtractor {
         if let Some(return_type) = function.return_type.as_deref() {
             collector.visit_ts_type_annotation(return_type);
         }
+        Self::remove_type_parameter_refs(&mut collector.refs, function.type_parameters.as_deref());
         collector.refs
     }
 
@@ -97,6 +274,7 @@ impl ModuleInfoExtractor {
         if let Some(return_type) = arrow.return_type.as_deref() {
             collector.visit_ts_type_annotation(return_type);
         }
+        Self::remove_type_parameter_refs(&mut collector.refs, arrow.type_parameters.as_deref());
         collector.refs
     }
 
@@ -190,6 +368,7 @@ impl ModuleInfoExtractor {
                 ClassElement::StaticBlock(_) => {}
             }
         }
+        Self::remove_type_parameter_refs(&mut collector.refs, class.type_parameters.as_deref());
         collector.refs
     }
 
@@ -209,6 +388,7 @@ impl ModuleInfoExtractor {
             }
         }
         collector.visit_ts_interface_body(&iface.body);
+        Self::remove_type_parameter_refs(&mut collector.refs, iface.type_parameters.as_deref());
         collector.refs
     }
 
@@ -220,6 +400,7 @@ impl ModuleInfoExtractor {
             collector.visit_ts_type_parameter_declaration(type_parameters);
         }
         collector.visit_ts_type(&alias.type_annotation);
+        Self::remove_type_parameter_refs(&mut collector.refs, alias.type_parameters.as_deref());
         collector.refs
     }
 
@@ -237,6 +418,14 @@ impl ModuleInfoExtractor {
             self.insert_class_binding_target(binding_name.to_string(), resolved);
         }
 
+        self.record_typed_nested_bindings(binding_name, type_annotation);
+    }
+
+    pub(super) fn record_typed_nested_bindings(
+        &mut self,
+        binding_name: &str,
+        type_annotation: &TSTypeAnnotation<'_>,
+    ) {
         for (property_path, type_name) in extract_nested_type_bindings(type_annotation) {
             if let Some(factory) = self.store_factory_for_type_name(&type_name) {
                 self.insert_class_binding_target(

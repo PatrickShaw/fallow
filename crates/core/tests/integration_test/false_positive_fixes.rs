@@ -1896,6 +1896,34 @@ fn interface_member_usage_does_not_flag_implementer_members() {
         "detach should be credited through interface-typed access: {unused_members:?}"
     );
     assert!(
+        !unused_members.contains(&"FixedSizeScrollStrategy.refresh".to_string()),
+        "refresh should be credited through a nested type assertion: {unused_members:?}"
+    );
+    assert!(
+        !unused_members.contains(&"FixedSizeScrollStrategy.reset".to_string()),
+        "reset should be credited through a nullable asserted binding: {unused_members:?}"
+    );
+    assert!(
+        !unused_members.contains(&"FixedSizeScrollStrategy.inspect".to_string()),
+        "inspect should be credited through a class-typed property chain: {unused_members:?}"
+    );
+    assert!(
+        !unused_members.contains(&"FixedSizeScrollStrategy.notify".to_string()),
+        "notify should be credited through a local initialized from a typed field: {unused_members:?}"
+    );
+    assert!(
+        !unused_members.contains(&"FixedSizeScrollStrategy.audit".to_string()),
+        "audit should be credited through a function-type alias parameter: {unused_members:?}"
+    );
+    assert!(
+        !unused_members.contains(&"FixedSizeScrollStrategy.requiredByContract".to_string()),
+        "a required interface member cannot be removed from its implementer: {unused_members:?}"
+    );
+    assert!(
+        unused_members.contains(&"FixedSizeScrollStrategy.optionalByContract".to_string()),
+        "an optional interface member should remain removable when unused: {unused_members:?}"
+    );
+    assert!(
         unused_members.contains(&"FixedSizeScrollStrategy.unusedHelper".to_string()),
         "unrelated members should still be reported: {unused_members:?}"
     );

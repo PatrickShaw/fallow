@@ -1,27 +1,31 @@
 use oxc_ast::ast::{
-    Argument, BindingPattern, CallExpression, Expression, FormalParameters, FunctionBody,
-    VariableDeclarator,
+    Argument, BindingIdentifier, BindingPattern, CallExpression, Declaration, Expression,
+    FormalParameters, FunctionBody, Program, Statement, TSModuleDeclarationName, TSType,
+    TSTypeAliasDeclaration, TSTypeParameterDeclaration, VariableDeclarator,
 };
-use oxc_ast_visit::Visit;
+use rustc_hash::FxHashMap;
 
 use super::visit_factory_returns::FactoryReturnFunctionInput;
 use super::visit_helpers::StructuralParamMemberCollector;
 use crate::visitor::helpers::{extract_type_annotation_name, is_builtin_constructor};
 use crate::visitor::{
-    LocalStructuralFunction, ModuleInfoExtractor, StructuralCallArgument,
-    StructuralClassCallCandidate, StructuralParameterUse,
+    ContextualParameterTypes, FunctionTypeAliasBinding, LocalStructuralFunction,
+    ModuleInfoExtractor, StructuralCallArgument, StructuralClassCallCandidate,
+    StructuralParameterUse,
 };
 
+#[derive(Default)]
+struct ScopedStructuralUses {
+    params: FxHashMap<usize, StructuralParameterUse>,
+    typed_property_accesses: Vec<(String, String, String)>,
+}
+
 impl ModuleInfoExtractor {
-    pub(super) fn record_local_structural_function(
-        &mut self,
-        name: &str,
+    fn collect_structural_parameter_uses(
         params: &FormalParameters<'_>,
-        body: Option<&FunctionBody<'_>>,
-    ) {
-        let Some(body) = body else {
-            return;
-        };
+        body: &FunctionBody<'_>,
+        inferred_param_types: Option<&[Option<String>]>,
+    ) -> ScopedStructuralUses {
         let typed_params: Vec<(usize, String, String)> = params
             .items
             .iter()
@@ -30,13 +34,16 @@ impl ModuleInfoExtractor {
                 let BindingPattern::BindingIdentifier(id) = &param.pattern else {
                     return None;
                 };
-                let type_annotation = param.type_annotation.as_deref()?;
-                let type_name = extract_type_annotation_name(type_annotation)?;
+                let type_name = param
+                    .type_annotation
+                    .as_deref()
+                    .and_then(extract_type_annotation_name)
+                    .or_else(|| inferred_param_types?.get(index).and_then(Clone::clone))?;
                 Some((index, id.name.to_string(), type_name))
             })
             .collect();
         if typed_params.is_empty() {
-            return;
+            return ScopedStructuralUses::default();
         }
 
         let target_params = typed_params
@@ -44,25 +51,122 @@ impl ModuleInfoExtractor {
             .map(|(_, param_name, _)| param_name.clone())
             .collect();
         let mut collector = StructuralParamMemberCollector::new(target_params);
-        collector.visit_function_body(body);
+        collector.collect_function_body(body);
 
-        let mut function = LocalStructuralFunction::default();
+        let mut uses = ScopedStructuralUses::default();
         for (index, param_name, type_name) in typed_params {
-            let Some(members) = collector.members.remove(param_name.as_str()) else {
-                continue;
-            };
-            if members.is_empty() {
+            if let Some(members) = collector.members.remove(param_name.as_str())
+                && !members.is_empty()
+            {
+                uses.params.insert(
+                    index,
+                    StructuralParameterUse {
+                        type_name: type_name.clone(),
+                        members,
+                    },
+                );
+            }
+            if let Some(property_members) = collector.property_members.remove(param_name.as_str()) {
+                uses.typed_property_accesses.extend(
+                    property_members
+                        .into_iter()
+                        .map(|(property_path, member)| (type_name.clone(), property_path, member)),
+                );
+            }
+        }
+        uses
+    }
+
+    fn record_scoped_parameter_member_accesses(&mut self, uses: &ScopedStructuralUses) {
+        let type_alias_scopes = &self.function_type_alias_scopes;
+        let is_shadowed = |type_name: &str| {
+            type_alias_scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(type_name))
+                .is_some_and(|binding| !matches!(binding, FunctionTypeAliasBinding::ClassSelf))
+        };
+        self.member_accesses.extend(
+            uses.params
+                .values()
+                .filter(|param| !is_shadowed(param.type_name.as_str()))
+                .flat_map(|param| {
+                    param
+                        .members
+                        .iter()
+                        .map(|member| fallow_types::extract::MemberAccess {
+                            object: param.type_name.clone(),
+                            member: member.clone(),
+                        })
+                }),
+        );
+        for (type_name, property_path, member) in &uses.typed_property_accesses {
+            if self
+                .function_type_alias_scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(type_name.as_str()))
+                .is_some_and(|binding| !matches!(binding, FunctionTypeAliasBinding::ClassSelf))
+            {
                 continue;
             }
-            function
-                .params
-                .insert(index, StructuralParameterUse { type_name, members });
+            self.record_typed_property_member_fact(
+                type_name.clone(),
+                property_path.clone(),
+                member.clone(),
+            );
         }
+    }
 
-        if !function.params.is_empty() {
-            self.local_structural_functions
-                .insert(name.to_string(), function);
+    pub(super) fn record_scoped_typed_parameter_accesses(
+        &mut self,
+        params: &FormalParameters<'_>,
+        body: Option<&FunctionBody<'_>>,
+    ) {
+        let Some(body) = body else {
+            return;
+        };
+        if self.scoped_typed_parameter_body_spans.contains(&body.span) {
+            return;
         }
+        let uses = Self::collect_structural_parameter_uses(params, body, None);
+        self.record_scoped_parameter_member_accesses(&uses);
+    }
+
+    pub(super) fn record_local_structural_function(
+        &mut self,
+        name: &str,
+        params: &FormalParameters<'_>,
+        body: Option<&FunctionBody<'_>>,
+        inferred_param_types: Option<&[Option<String>]>,
+    ) {
+        let uses = self.record_structural_function_uses(params, body, inferred_param_types);
+        if uses.params.is_empty() {
+            return;
+        }
+        self.local_structural_functions.insert(
+            name.to_string(),
+            LocalStructuralFunction {
+                params: uses.params,
+            },
+        );
+    }
+
+    fn record_structural_function_uses(
+        &mut self,
+        params: &FormalParameters<'_>,
+        body: Option<&FunctionBody<'_>>,
+        inferred_param_types: Option<&[Option<String>]>,
+    ) -> ScopedStructuralUses {
+        let Some(body) = body else {
+            return ScopedStructuralUses::default();
+        };
+        let uses = Self::collect_structural_parameter_uses(params, body, inferred_param_types);
+        self.scoped_typed_parameter_body_spans.insert(body.span);
+        if !uses.params.is_empty() || !uses.typed_property_accesses.is_empty() {
+            self.record_scoped_parameter_member_accesses(&uses);
+        }
+        uses
     }
 
     fn structural_call_argument(arg: &Argument<'_>) -> Option<StructuralCallArgument> {
@@ -110,50 +214,316 @@ impl ModuleInfoExtractor {
         declarator: &VariableDeclarator<'_>,
         init: &Expression<'_>,
     ) {
-        if !self.is_module_scope() {
-            return;
-        }
+        let is_module_scope = self.is_module_scope();
         let BindingPattern::BindingIdentifier(id) = &declarator.id else {
             return;
         };
+        let inferred_param_types = declarator
+            .type_annotation
+            .as_deref()
+            .and_then(|annotation| self.resolve_function_type_alias_params(annotation));
         match init {
             Expression::ArrowFunctionExpression(arrow) => {
-                self.record_local_structural_function(
-                    id.name.as_str(),
-                    &arrow.params,
-                    Some(arrow.body.as_ref()),
-                );
-                self.record_factory_return_function(
-                    id.name.as_str(),
-                    FactoryReturnFunctionInput {
-                        params: &arrow.params,
-                        body: Some(arrow.body.as_ref()),
-                        is_expression_body: arrow.expression,
-                        is_async: arrow.r#async,
-                        is_generator: false,
-                        return_type: arrow.return_type.as_deref(),
-                    },
-                );
+                if is_module_scope {
+                    self.record_local_structural_function(
+                        id.name.as_str(),
+                        &arrow.params,
+                        Some(arrow.body.as_ref()),
+                        inferred_param_types
+                            .as_ref()
+                            .map(|types| types.parameters.as_slice()),
+                    );
+                    self.record_factory_return_function(
+                        id.name.as_str(),
+                        FactoryReturnFunctionInput {
+                            params: &arrow.params,
+                            body: Some(arrow.body.as_ref()),
+                            is_expression_body: arrow.expression,
+                            is_async: arrow.r#async,
+                            is_generator: false,
+                            return_type: arrow.return_type.as_deref(),
+                        },
+                    );
+                } else if inferred_param_types.is_some() {
+                    self.record_structural_function_uses(
+                        &arrow.params,
+                        Some(arrow.body.as_ref()),
+                        inferred_param_types
+                            .as_ref()
+                            .map(|types| types.parameters.as_slice()),
+                    );
+                }
             }
             Expression::FunctionExpression(function) => {
-                self.record_local_structural_function(
-                    id.name.as_str(),
-                    &function.params,
-                    function.body.as_deref(),
-                );
-                self.record_factory_return_function(
-                    id.name.as_str(),
-                    FactoryReturnFunctionInput {
-                        params: &function.params,
-                        body: function.body.as_deref(),
-                        is_expression_body: false,
-                        is_async: function.r#async,
-                        is_generator: function.generator,
-                        return_type: function.return_type.as_deref(),
-                    },
-                );
+                if is_module_scope {
+                    self.record_local_structural_function(
+                        id.name.as_str(),
+                        &function.params,
+                        function.body.as_deref(),
+                        inferred_param_types
+                            .as_ref()
+                            .map(|types| types.parameters.as_slice()),
+                    );
+                    self.record_factory_return_function(
+                        id.name.as_str(),
+                        FactoryReturnFunctionInput {
+                            params: &function.params,
+                            body: function.body.as_deref(),
+                            is_expression_body: false,
+                            is_async: function.r#async,
+                            is_generator: function.generator,
+                            return_type: function.return_type.as_deref(),
+                        },
+                    );
+                } else if inferred_param_types.is_some() {
+                    self.record_structural_function_uses(
+                        &function.params,
+                        function.body.as_deref(),
+                        inferred_param_types
+                            .as_ref()
+                            .map(|types| types.parameters.as_slice()),
+                    );
+                }
             }
             _ => {}
         }
+    }
+
+    fn function_type_alias_params(
+        alias: &TSTypeAliasDeclaration<'_>,
+    ) -> Option<ContextualParameterTypes> {
+        let TSType::TSFunctionType(function) = &alias.type_annotation else {
+            return None;
+        };
+        Some(ContextualParameterTypes {
+            parameters: function
+                .params
+                .items
+                .iter()
+                .map(|param| {
+                    param
+                        .type_annotation
+                        .as_deref()
+                        .and_then(extract_type_annotation_name)
+                })
+                .collect(),
+            type_parameters: alias
+                .type_parameters
+                .as_deref()
+                .into_iter()
+                .flat_map(|parameters| &parameters.params)
+                .map(|parameter| parameter.name.name.to_string())
+                .collect(),
+        })
+    }
+
+    fn statement_type_alias<'statement, 'ast>(
+        statement: &'statement Statement<'ast>,
+    ) -> Option<&'statement TSTypeAliasDeclaration<'ast>> {
+        match statement {
+            Statement::TSTypeAliasDeclaration(alias) => Some(alias.as_ref()),
+            Statement::ExportNamedDeclaration(export) if export.source.is_none() => {
+                match export.declaration.as_ref() {
+                    Some(Declaration::TSTypeAliasDeclaration(alias)) => Some(alias.as_ref()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn record_program_function_type_aliases(&mut self, program: &Program<'_>) {
+        for statement in &program.body {
+            if let Some(alias) = Self::statement_type_alias(statement)
+                && let Some(params) = Self::function_type_alias_params(alias)
+            {
+                self.function_type_alias_params
+                    .insert(alias.id.name.to_string(), params);
+            }
+        }
+    }
+
+    pub(super) fn push_function_type_alias_scope<'ast>(
+        &mut self,
+        statements: impl IntoIterator<Item = &'ast Statement<'ast>>,
+    ) -> bool {
+        let mut scope = FxHashMap::default();
+        for statement in statements {
+            let (name, binding) = match statement {
+                Statement::TSTypeAliasDeclaration(alias) => {
+                    let binding = Self::function_type_alias_params(alias).map_or(
+                        FunctionTypeAliasBinding::NonFunction,
+                        FunctionTypeAliasBinding::Function,
+                    );
+                    (alias.id.name.as_str(), binding)
+                }
+                Statement::TSInterfaceDeclaration(interface) => (
+                    interface.id.name.as_str(),
+                    FunctionTypeAliasBinding::NonFunction,
+                ),
+                Statement::TSEnumDeclaration(r#enum) => (
+                    r#enum.id.name.as_str(),
+                    FunctionTypeAliasBinding::NonFunction,
+                ),
+                Statement::ClassDeclaration(class) => {
+                    let Some(id) = class.id.as_ref() else {
+                        continue;
+                    };
+                    (id.name.as_str(), FunctionTypeAliasBinding::NonFunction)
+                }
+                Statement::TSModuleDeclaration(module) => {
+                    let TSModuleDeclarationName::Identifier(id) = &module.id else {
+                        continue;
+                    };
+                    (id.name.as_str(), FunctionTypeAliasBinding::NonFunction)
+                }
+                Statement::TSImportEqualsDeclaration(import) => (
+                    import.id.name.as_str(),
+                    FunctionTypeAliasBinding::NonFunction,
+                ),
+                _ => continue,
+            };
+            scope.insert(name.to_string(), binding);
+        }
+        if scope.is_empty() {
+            return false;
+        }
+        self.function_type_alias_scopes.push(scope);
+        true
+    }
+
+    pub(super) fn push_function_type_parameter_scope(
+        &mut self,
+        type_parameters: &TSTypeParameterDeclaration<'_>,
+    ) -> bool {
+        if self.namespace_depth > 0 {
+            return false;
+        }
+        let scope = type_parameters
+            .params
+            .iter()
+            .map(|parameter| {
+                (
+                    parameter.name.name.to_string(),
+                    FunctionTypeAliasBinding::NonFunction,
+                )
+            })
+            .collect();
+        self.function_type_alias_scopes.push(scope);
+        true
+    }
+
+    pub(super) fn push_class_type_scope(
+        &mut self,
+        id: Option<&BindingIdentifier<'_>>,
+        type_parameters: Option<&TSTypeParameterDeclaration<'_>>,
+    ) -> bool {
+        if self.namespace_depth > 0 || (id.is_none() && type_parameters.is_none()) {
+            return false;
+        }
+        let mut scope = FxHashMap::default();
+        if let Some(id) = id {
+            scope.insert(id.name.to_string(), FunctionTypeAliasBinding::ClassSelf);
+        }
+        if let Some(type_parameters) = type_parameters {
+            scope.extend(type_parameters.params.iter().map(|parameter| {
+                (
+                    parameter.name.name.to_string(),
+                    FunctionTypeAliasBinding::NonFunction,
+                )
+            }));
+        }
+        self.function_type_alias_scopes.push(scope);
+        true
+    }
+
+    pub(super) fn pop_function_type_alias_scope(&mut self) {
+        self.function_type_alias_scopes.pop();
+    }
+
+    fn resolve_function_type_alias(&self, name: &str) -> Option<&ContextualParameterTypes> {
+        for scope in self.function_type_alias_scopes.iter().rev() {
+            if let Some(binding) = scope.get(name) {
+                return match binding {
+                    FunctionTypeAliasBinding::Function(params) => Some(params),
+                    FunctionTypeAliasBinding::ClassSelf | FunctionTypeAliasBinding::NonFunction => {
+                        None
+                    }
+                };
+            }
+        }
+        self.function_type_alias_params.get(name)
+    }
+
+    fn resolve_function_type_alias_params(
+        &self,
+        annotation: &oxc_ast::ast::TSTypeAnnotation<'_>,
+    ) -> Option<ContextualParameterTypes> {
+        let TSType::TSTypeReference(reference) = &annotation.type_annotation else {
+            return None;
+        };
+        let oxc_ast::ast::TSTypeName::IdentifierReference(alias_name) = &reference.type_name else {
+            return None;
+        };
+        let alias = self.resolve_function_type_alias(alias_name.name.as_str())?;
+        if alias.type_parameters.is_empty() {
+            if reference.type_arguments.is_some() {
+                return None;
+            }
+            return Some(ContextualParameterTypes {
+                parameters: alias.parameters.clone(),
+                type_parameters: Vec::new(),
+            });
+        }
+
+        let arguments = reference.type_arguments.as_deref()?;
+        if arguments.params.len() != alias.type_parameters.len() {
+            return None;
+        }
+        let substitutions: FxHashMap<&str, String> = alias
+            .type_parameters
+            .iter()
+            .map(String::as_str)
+            .zip(&arguments.params)
+            .map(|(parameter, argument)| {
+                let TSType::TSTypeReference(argument) = argument else {
+                    return None;
+                };
+                let oxc_ast::ast::TSTypeName::IdentifierReference(argument_name) =
+                    &argument.type_name
+                else {
+                    return None;
+                };
+                if argument.type_arguments.is_some()
+                    || self
+                        .function_type_alias_scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(argument_name.name.as_str()))
+                        .is_some_and(|binding| {
+                            !matches!(binding, FunctionTypeAliasBinding::ClassSelf)
+                        })
+                {
+                    return None;
+                }
+                Some((parameter, argument_name.name.to_string()))
+            })
+            .collect::<Option<_>>()?;
+        let parameters = alias
+            .parameters
+            .iter()
+            .map(|parameter| {
+                parameter.as_ref().and_then(|name| {
+                    substitutions
+                        .get(name.as_str())
+                        .cloned()
+                        .or_else(|| (!alias.type_parameters.contains(name)).then(|| name.clone()))
+                })
+            })
+            .collect();
+        Some(ContextualParameterTypes {
+            parameters,
+            type_parameters: Vec::new(),
+        })
     }
 }

@@ -1674,6 +1674,17 @@ pub struct MemberAccess {
     pub member: String,
 }
 
+/// Direct export declarations that TypeScript treats as one merged symbol.
+///
+/// Spans identify the exact declaration slots without conflating unrelated
+/// type/value declarations that happen to share a name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DeclarationMergeFact {
+    /// Identifier spans for the declarations in this merge group.
+    pub export_spans: Vec<(u32, u32)>,
+}
+
 /// A typed extraction fact for cross-layer analysis.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1738,6 +1749,23 @@ pub enum SemanticFact {
     /// dynamic-import fact for the same source remains authoritative for graph
     /// reachability and unresolved-import diagnostics.
     VitestModuleMockOperation(VitestModuleMockOperationFact),
+    /// Direct declarations that form one legal TypeScript declaration merge.
+    /// Appended because bitcode encodes enum variants by ordinal.
+    DeclarationMerge(DeclarationMergeFact),
+    /// A named type whose direct receiver surface is contributed by another
+    /// named type (for example `Pick<Base, ...>` or a union constituent).
+    /// Appended because bitcode encodes enum variants by ordinal.
+    TypeAliasSurfaceTarget(TypeAliasSurfaceTargetFact),
+    /// A string-valued TypeScript enum member available as a static property key.
+    /// Appended because bitcode encodes enum variants by ordinal.
+    StringEnumMemberValue(StringEnumMemberValueFact),
+    /// A computed property access keyed by a static enum member.
+    /// Appended because bitcode encodes enum variants by ordinal.
+    ComputedEnumKeyUse(ComputedEnumKeyUseFact),
+    /// A directly declared non-optional member required by a named interface
+    /// or object type.
+    /// Appended because bitcode encodes enum variants by ordinal.
+    RequiredTypeMember(RequiredTypeMemberFact),
 }
 
 /// Iterate Angular template member names from typed semantic facts.
@@ -1903,6 +1931,32 @@ impl<'a> SemanticFactView<'a> {
     /// Collect typed-property-hop member facts.
     pub fn typed_property_member_accesses(self) -> Vec<TypedPropertyMemberAccessFact> {
         typed_property_member_access_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Collect members whose presence is required by a named structural type.
+    pub fn required_type_members(self) -> impl Iterator<Item = &'a RequiredTypeMemberFact> + 'a {
+        required_type_member_facts(self.semantic_facts)
+    }
+
+    /// Collect type-alias receiver-surface edges.
+    pub fn type_alias_surface_targets(self) -> Vec<TypeAliasSurfaceTargetFact> {
+        type_alias_surface_target_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Collect string-valued enum member definitions.
+    pub fn string_enum_member_values(self) -> Vec<StringEnumMemberValueFact> {
+        string_enum_member_value_facts(self.semantic_facts)
+            .cloned()
+            .collect()
+    }
+
+    /// Collect computed property accesses keyed by enum members.
+    pub fn computed_enum_key_uses(self) -> Vec<ComputedEnumKeyUseFact> {
+        computed_enum_key_use_facts(self.semantic_facts)
             .cloned()
             .collect()
     }
@@ -2081,6 +2135,54 @@ fn typed_property_member_access_facts(
     })
 }
 
+fn required_type_member_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &RequiredTypeMemberFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::RequiredTypeMember(required) = fact {
+            Some(required)
+        } else {
+            None
+        }
+    })
+}
+
+fn type_alias_surface_target_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &TypeAliasSurfaceTargetFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::TypeAliasSurfaceTarget(fact) = fact {
+            Some(fact)
+        } else {
+            None
+        }
+    })
+}
+
+fn string_enum_member_value_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &StringEnumMemberValueFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::StringEnumMemberValue(fact) = fact {
+            Some(fact)
+        } else {
+            None
+        }
+    })
+}
+
+fn computed_enum_key_use_facts(
+    semantic_facts: &[SemanticFact],
+) -> impl Iterator<Item = &ComputedEnumKeyUseFact> {
+    semantic_facts.iter().filter_map(|fact| {
+        if let SemanticFact::ComputedEnumKeyUse(fact) = fact {
+            Some(fact)
+        } else {
+            None
+        }
+    })
+}
+
 /// Iterate typed constructor-rooted fluent-chain member facts.
 fn fluent_chain_new_member_access_facts(
     semantic_facts: &[SemanticFact],
@@ -2250,6 +2352,55 @@ pub struct TypedPropertyMemberAccessFact {
     pub property_path: String,
     /// Member accessed on the terminal property's instance.
     pub member: String,
+}
+
+/// A class member directly required by a named structural type.
+///
+/// Optional properties and methods are excluded: removing an optional
+/// implementation can preserve assignability, while removing a required one
+/// from an explicit `implements` contract cannot.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RequiredTypeMemberFact {
+    /// Module-local interface or object-type alias name.
+    pub type_name: String,
+    /// Static required property or method name.
+    pub member: String,
+}
+
+/// One direct contributor to a named type alias's receiver surface.
+///
+/// Nested property types are deliberately excluded: in
+/// `{ nested: Nested }`, `Alias.member` does not access `Nested.member`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TypeAliasSurfaceTargetFact {
+    /// Module-local alias declaration name.
+    pub alias_name: String,
+    /// Module-local or imported named type contributing the direct surface.
+    pub target_name: String,
+}
+
+/// A statically known string value of a TypeScript enum member.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StringEnumMemberValueFact {
+    /// Module-local enum declaration name.
+    pub enum_name: String,
+    /// Static enum member name.
+    pub member_name: String,
+    /// Exact string initializer value.
+    pub value: String,
+}
+
+/// A computed property access whose key is a static enum member.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, bitcode::Encode, bitcode::Decode)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ComputedEnumKeyUseFact {
+    /// Local enum object used as the key source.
+    pub key_object: String,
+    /// Static member selected from the enum object.
+    pub key_member: String,
 }
 
 /// A member access on a fluent chain rooted at a static factory call.

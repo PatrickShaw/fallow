@@ -10,21 +10,24 @@ use fallow_types::extract::{ImportedName, ModuleLoadMechanism};
 use crate::resolve::{ResolvedImport, ResolvedModule};
 
 use super::ModuleGraph;
+use super::effective_exports::ExportNamespaces;
 use super::types::{
     ReferencePathId, ReferencePathInterner, ReferenceRouteGraphId, ReferenceRouteGraphSpec,
     ReferenceRouteNodeId, ReferenceRouteNodeSpec,
 };
+use super::{EffectiveExportResolution, ExportNamespace};
 
 #[derive(Default)]
 struct ReExportTargets {
-    named: FxHashMap<String, Vec<(FileId, String)>>,
-    star_barrels: Vec<FileId>,
+    named: FxHashMap<String, Vec<(FileId, String, bool)>>,
+    star_barrels: Vec<(FileId, bool)>,
 }
 
 /// One resolved consumer import matching a reachable re-export name.
 pub(super) struct ConsumerImport<'a> {
     pub(super) consumer: &'a ResolvedModule,
     pub(super) import: &'a ResolvedImport,
+    pub(super) namespaces: ExportNamespaces,
 }
 
 /// One namespace export state in the compact transition graph.
@@ -244,6 +247,7 @@ impl ReachableNamespaceExports {
 pub(super) struct NamespacePropagationIndexes<'a> {
     re_exports_by_source: FxHashMap<FileId, ReExportTargets>,
     consumers_by_target: FxHashMap<FileId, FxHashMap<String, Vec<ConsumerImport<'a>>>>,
+    consumer_namespaces: ExportNamespaces,
 }
 
 impl<'a> NamespacePropagationIndexes<'a> {
@@ -256,24 +260,30 @@ impl<'a> NamespacePropagationIndexes<'a> {
             for edge in &module.re_exports {
                 let targets = re_exports_by_source.entry(edge.source_file).or_default();
                 if edge.imported_name == "*" && edge.exported_name == "*" {
-                    targets.star_barrels.push(module.file_id);
+                    targets
+                        .star_barrels
+                        .push((module.file_id, edge.is_type_only));
                 } else if edge.imported_name != "*" {
                     targets
                         .named
                         .entry(edge.imported_name.clone())
                         .or_default()
-                        .push((module.file_id, edge.exported_name.clone()));
+                        .push((
+                            module.file_id,
+                            edge.exported_name.clone(),
+                            edge.is_type_only,
+                        ));
                 }
             }
         }
         for targets in re_exports_by_source.values_mut() {
             targets
                 .star_barrels
-                .sort_unstable_by_key(|file_id| file_id.0);
+                .sort_unstable_by_key(|(file_id, type_only)| (file_id.0, *type_only));
             targets.star_barrels.dedup();
             for named in targets.named.values_mut() {
                 named.sort_unstable_by(|left, right| {
-                    (left.0.0, left.1.as_str()).cmp(&(right.0.0, right.1.as_str()))
+                    (left.0.0, left.1.as_str(), left.2).cmp(&(right.0.0, right.1.as_str(), right.2))
                 });
                 named.dedup();
             }
@@ -281,6 +291,7 @@ impl<'a> NamespacePropagationIndexes<'a> {
 
         let mut consumers_by_target: FxHashMap<FileId, FxHashMap<String, Vec<ConsumerImport<'a>>>> =
             FxHashMap::default();
+        let mut consumer_namespaces = ExportNamespaces::default();
         for consumer in module_by_id.values() {
             for import in &consumer.resolved_imports {
                 let Some(target) = import.target.internal_file_id() else {
@@ -291,12 +302,21 @@ impl<'a> NamespacePropagationIndexes<'a> {
                     ImportedName::Default => "default",
                     _ => continue,
                 };
+                let namespaces = consumer_import_namespaces(consumer, import);
+                if namespaces.is_empty() {
+                    continue;
+                }
+                consumer_namespaces.extend(namespaces);
                 consumers_by_target
                     .entry(target)
                     .or_default()
                     .entry(imported_name.to_string())
                     .or_default()
-                    .push(ConsumerImport { consumer, import });
+                    .push(ConsumerImport {
+                        consumer,
+                        import,
+                        namespaces,
+                    });
             }
         }
         for by_name in consumers_by_target.values_mut() {
@@ -314,13 +334,44 @@ impl<'a> NamespacePropagationIndexes<'a> {
         Self {
             re_exports_by_source,
             consumers_by_target,
+            consumer_namespaces,
         }
+    }
+
+    pub(super) const fn has_consumers_in(&self, namespace: ExportNamespace) -> bool {
+        self.consumer_namespaces.contains(namespace)
     }
 
     pub(super) fn enumerate_reachable_barrels(
         &self,
+        graph: &ModuleGraph,
         seed_file: FileId,
         seed_name: &str,
+        namespace: ExportNamespace,
+    ) -> ReachableNamespaceExports {
+        self.enumerate_reachable_barrels_with(
+            seed_file,
+            seed_name,
+            namespace,
+            |source_file, source_name, barrel_file, barrel_name| {
+                uniquely_forwards_binding(
+                    graph,
+                    source_file,
+                    source_name,
+                    barrel_file,
+                    barrel_name,
+                    namespace,
+                )
+            },
+        )
+    }
+
+    fn enumerate_reachable_barrels_with(
+        &self,
+        seed_file: FileId,
+        seed_name: &str,
+        namespace: ExportNamespace,
+        mut forwards: impl FnMut(FileId, &str, FileId, &str) -> bool,
     ) -> ReachableNamespaceExports {
         let mut traversal = NamespaceTraversal::new(seed_file, seed_name);
 
@@ -333,12 +384,20 @@ impl<'a> NamespacePropagationIndexes<'a> {
                 continue;
             };
             if let Some(named) = targets.named.get(source_name.as_str()) {
-                for (barrel_file, exported_name) in named {
-                    traversal.connect(source_index, *barrel_file, exported_name);
+                for (barrel_file, exported_name, is_type_only) in named {
+                    if (namespace == ExportNamespace::Type || !is_type_only)
+                        && forwards(source_file, &source_name, *barrel_file, exported_name)
+                    {
+                        traversal.connect(source_index, *barrel_file, exported_name);
+                    }
                 }
             }
-            for &barrel_file in &targets.star_barrels {
-                traversal.connect(source_index, barrel_file, &source_name);
+            for &(barrel_file, is_type_only) in &targets.star_barrels {
+                if (namespace == ExportNamespace::Type || !is_type_only)
+                    && forwards(source_file, &source_name, barrel_file, &source_name)
+                {
+                    traversal.connect(source_index, barrel_file, &source_name);
+                }
             }
         }
 
@@ -357,6 +416,56 @@ impl<'a> NamespacePropagationIndexes<'a> {
     }
 }
 
+fn consumer_import_namespaces(
+    consumer: &ResolvedModule,
+    import: &ResolvedImport,
+) -> ExportNamespaces {
+    let local_name = import.info.local_name.as_str();
+    if local_name.is_empty() || consumer.unused_import_bindings.contains(local_name) {
+        return ExportNamespaces::default();
+    }
+    let mut namespaces = ExportNamespaces::default();
+    if import.info.is_type_only {
+        namespaces.insert(ExportNamespace::Type);
+        return namespaces;
+    }
+    let uses_type = consumer
+        .type_referenced_import_bindings
+        .iter()
+        .any(|binding| binding == local_name);
+    let uses_value = consumer
+        .value_referenced_import_bindings
+        .iter()
+        .any(|binding| binding == local_name);
+    if uses_type {
+        namespaces.insert(ExportNamespace::Type);
+    }
+    if uses_value || !uses_type {
+        namespaces.insert(ExportNamespace::Value);
+    }
+    namespaces
+}
+
+fn uniquely_forwards_binding(
+    graph: &ModuleGraph,
+    source_file: FileId,
+    source_name: &str,
+    barrel_file: FileId,
+    barrel_name: &str,
+    namespace: ExportNamespace,
+) -> bool {
+    matches!(
+        (
+            graph.resolve_export(source_file, source_name, namespace),
+            graph.resolve_export(barrel_file, barrel_name, namespace),
+        ),
+        (
+            EffectiveExportResolution::Unique(source),
+            EffectiveExportResolution::Unique(barrel),
+        ) if source == barrel
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +474,7 @@ mod tests {
         NamespacePropagationIndexes {
             re_exports_by_source: FxHashMap::default(),
             consumers_by_target: FxHashMap::default(),
+            consumer_namespaces: ExportNamespaces::default(),
         }
     }
 
@@ -380,11 +490,16 @@ mod tests {
             targets.star_barrels.extend(
                 (0..BARREL_COUNT)
                     .filter(|&barrel| barrel != source)
-                    .map(FileId),
+                    .map(|barrel| (FileId(barrel), false)),
             );
         }
 
-        let reachable = indexes.enumerate_reachable_barrels(FileId(0), "Ns");
+        let reachable = indexes.enumerate_reachable_barrels_with(
+            FileId(0),
+            "Ns",
+            ExportNamespace::Value,
+            |_, _, _, _| true,
+        );
 
         assert_eq!(reachable.state_count(), BARREL_COUNT as usize);
         assert_eq!(
@@ -408,12 +523,17 @@ mod tests {
                     .entry(*source)
                     .or_default()
                     .star_barrels
-                    .extend(next.iter().copied());
+                    .extend(next.iter().copied().map(|file| (file, false)));
             }
             previous = next;
         }
 
-        let reachable = indexes.enumerate_reachable_barrels(FileId(0), "Ns");
+        let reachable = indexes.enumerate_reachable_barrels_with(
+            FileId(0),
+            "Ns",
+            ExportNamespace::Value,
+            |_, _, _, _| true,
+        );
 
         assert_eq!(reachable.state_count(), 1 + (LAYERS as usize * 2));
         assert_eq!(

@@ -28,6 +28,12 @@ fn credits_components_rendered_through_namespace_reexport() {
         !flagged.contains(&"ListItem"),
         "a namespace-rendered component must not be flagged: {flagged:?}"
     );
+    // Options API: the `<script>` block writes `export default {...}` itself, so
+    // the namespace binding is a declaration rather than an implicit default.
+    assert!(
+        !flagged.contains(&"ListOptions"),
+        "a namespace-rendered Options-API component must not be flagged: {flagged:?}"
+    );
     // Rendered via `<Popover.PopoverRoot>` / `<Popover.PopoverContent>` through a
     // second namespace barrel: credited, not flagged.
     assert!(
@@ -45,6 +51,22 @@ fn credits_components_rendered_through_namespace_reexport() {
     assert!(
         flagged.contains(&"DeadOrphan"),
         "an unconsumed namespace component must still be flagged: {flagged:?}"
+    );
+    assert!(
+        !flagged.contains(&"Visible"),
+        "the explicit binding that shadows a star export must be credited: {flagged:?}"
+    );
+    assert!(
+        flagged.contains(&"Hidden"),
+        "the shadowed star binding must not be credited: {flagged:?}"
+    );
+    assert!(
+        flagged.contains(&"Left") && flagged.contains(&"Right"),
+        "an ambiguous star binding must not credit either component: {flagged:?}"
+    );
+    assert!(
+        flagged.contains(&"TypeOnly"),
+        "a type-only import must not count as a rendered component: {flagged:?}"
     );
 }
 

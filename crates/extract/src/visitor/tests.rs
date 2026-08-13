@@ -5594,6 +5594,56 @@ fn member_access_computed_dynamic_marks_whole() {
 }
 
 #[test]
+fn computed_enum_key_records_static_string_value_and_use() {
+    let info = parse(
+        r"
+        export enum ProtocolKey { Protocol = '__protocol', Numeric = 1 }
+        export function read(target: object) {
+            return target[ProtocolKey.Protocol]
+        }
+        ",
+    );
+
+    assert!(info.semantic_facts.iter().any(|fact| matches!(
+        fact,
+        SemanticFact::StringEnumMemberValue(value)
+            if value.enum_name == "ProtocolKey"
+                && value.member_name == "Protocol"
+                && value.value == "__protocol"
+    )));
+    assert!(!info.semantic_facts.iter().any(|fact| matches!(
+        fact,
+        SemanticFact::StringEnumMemberValue(value) if value.member_name == "Numeric"
+    )));
+    assert!(info.semantic_facts.iter().any(|fact| matches!(
+        fact,
+        SemanticFact::ComputedEnumKeyUse(usage)
+            if usage.key_object == "ProtocolKey" && usage.key_member == "Protocol"
+    )));
+}
+
+#[test]
+fn computed_enum_key_ignores_lexically_shadowed_binding() {
+    let info = parse(
+        r"
+        import { ProtocolKey } from './protocol';
+        export function read(
+            target: object,
+            ProtocolKey: { Protocol: string },
+        ) {
+            return target[ProtocolKey.Protocol]
+        }
+        ",
+    );
+
+    assert!(!info.semantic_facts.iter().any(|fact| matches!(
+        fact,
+        SemanticFact::ComputedEnumKeyUse(usage)
+            if usage.key_object == "ProtocolKey" && usage.key_member == "Protocol"
+    )));
+}
+
+#[test]
 fn import_meta_env_static_member_access_tracked() {
     let info = parse("const secret = import.meta.env.SECRET_KEY;");
     assert!(
@@ -6096,6 +6146,573 @@ fn typed_getter_records_instance_binding() {
         }),
         "typed getter should be recorded as an instance binding, found: {:?}",
         info.class_heritage
+    );
+}
+
+#[test]
+fn ssr_safe_html_element_alias_canonicalizes_superclass() {
+    let info = parse(
+        r"
+        const BaseClass = (
+          typeof HTMLElement !== 'undefined' ? HTMLElement : class {}
+        ) as typeof HTMLElement;
+
+        export class NativeElement extends BaseClass {}
+        ",
+    );
+
+    let native_element = info
+        .exports
+        .iter()
+        .find(|export| export.name.to_string() == "NativeElement")
+        .expect("NativeElement export should be extracted");
+    assert_eq!(native_element.super_class.as_deref(), Some("HTMLElement"));
+}
+
+#[test]
+fn shadowed_html_element_alias_keeps_local_superclass() {
+    let info = parse(
+        r"
+        class HTMLElement {}
+        const LocalBase = (
+          typeof HTMLElement !== 'undefined' ? HTMLElement : class {}
+        ) as typeof HTMLElement;
+
+        export class LocalElement extends LocalBase {}
+        ",
+    );
+
+    let local_element = info
+        .exports
+        .iter()
+        .find(|export| export.name.to_string() == "LocalElement")
+        .expect("LocalElement export should be extracted");
+    assert_eq!(local_element.super_class.as_deref(), Some("LocalBase"));
+}
+
+#[test]
+fn asserted_receiver_records_member_on_asserted_type() {
+    let info = parse(
+        r"
+        interface Strategy {
+          refresh(): void;
+        }
+
+        export function refresh(value: unknown): void {
+          (value as unknown as Strategy).refresh();
+        }
+        ",
+    );
+
+    assert!(
+        info.member_accesses
+            .iter()
+            .any(|access| access.object == "Strategy" && access.member == "refresh"),
+        "nested assertion should retain the final asserted receiver type: {:?}",
+        info.member_accesses
+    );
+}
+
+#[test]
+fn nullable_asserted_binding_records_member_on_asserted_type() {
+    let info = parse(
+        r"
+        interface Strategy {
+          reset(): void;
+        }
+
+        export function reset(value: unknown): void {
+          const strategy = value ? (value as unknown as Strategy) : null;
+          if (strategy) strategy.reset();
+        }
+        ",
+    );
+
+    assert!(
+        info.member_accesses
+            .iter()
+            .any(|access| access.object == "Strategy" && access.member == "reset"),
+        "nullable binding should retain its non-null asserted type: {:?}",
+        info.member_accesses
+    );
+}
+
+#[test]
+fn asserted_generic_receiver_does_not_credit_module_type() {
+    let info = parse(
+        r"
+        import type { Strategy } from './strategy';
+
+        export function useStrategy<Strategy>(value: unknown): void {
+          (value as Strategy).directOnly();
+          const strategy = value ? (value as Strategy) : null;
+          if (strategy) strategy.conditionalOnly();
+        }
+        ",
+    );
+
+    for member in ["directOnly", "conditionalOnly"] {
+        assert!(
+            !info
+                .member_accesses
+                .iter()
+                .any(|access| access.object == "Strategy" && access.member == member),
+            "a generic type parameter must not credit an imported same-name type: {member} in {:?}",
+            info.member_accesses
+        );
+    }
+}
+
+#[test]
+fn scoped_typed_parameter_records_property_chain_accesses() {
+    let info = parse(
+        r"
+        interface Context {
+          strategy: Strategy;
+        }
+
+        export function useContext(context: Context): void {
+          context.strategy.inspect();
+          const { strategy } = context;
+          strategy.reset();
+        }
+        ",
+    );
+
+    let facts = info
+        .semantic_facts
+        .iter()
+        .filter_map(|fact| {
+            if let SemanticFact::TypedPropertyMemberAccess(access) = fact {
+                Some((
+                    access.type_name.as_str(),
+                    access.property_path.as_str(),
+                    access.member.as_str(),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        facts.contains(&("Context", "strategy", "inspect")),
+        "{facts:?}"
+    );
+    assert!(
+        facts.contains(&("Context", "strategy", "reset")),
+        "{facts:?}"
+    );
+}
+
+#[test]
+fn destructured_receiver_alias_respects_nested_value_shadowing() {
+    let info = parse(
+        r"
+        interface Context {
+          strategy: Strategy;
+        }
+        declare const replacement: Strategy;
+
+        export function useContext(context: Context): void {
+          const { strategy } = context;
+          strategy.outerUsed();
+
+          function nested(strategy: Strategy): void {
+            strategy.parameterOnly();
+          }
+          {
+            const strategy = replacement;
+            strategy.blockOnly();
+          }
+          void nested;
+        }
+        ",
+    );
+
+    let contextual_members = info
+        .semantic_facts
+        .iter()
+        .filter_map(|fact| match fact {
+            SemanticFact::TypedPropertyMemberAccess(access)
+                if access.type_name == "Context" && access.property_path == "strategy" =>
+            {
+                Some(access.member.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        contextual_members.contains(&"outerUsed"),
+        "{contextual_members:?}"
+    );
+    assert!(
+        !contextual_members.contains(&"parameterOnly")
+            && !contextual_members.contains(&"blockOnly"),
+        "nearer value bindings must stop destructured receiver alias resolution: {contextual_members:?}"
+    );
+}
+
+#[test]
+fn typed_field_initializer_binds_local_receiver() {
+    let info = parse(
+        r"
+        interface Strategy {
+          notify(): void;
+        }
+
+        export class Registry {
+          current?: Strategy;
+
+          flush(): void {
+            for (let current = this.current; current; current = undefined) {
+              current.notify();
+            }
+          }
+        }
+        ",
+    );
+
+    assert!(
+        info.member_accesses
+            .iter()
+            .any(|access| access.object == "Strategy" && access.member == "notify"),
+        "typed field initializer should bind the local receiver: {:?}",
+        info.member_accesses
+    );
+}
+
+#[test]
+fn function_type_alias_supplies_scoped_parameter_types() {
+    let info = parse(
+        r"
+        class Context {
+          strategy!: Strategy;
+        }
+        type ContextTask = (context: Context) => void;
+
+        export const audit: ContextTask = context => {
+          const { strategy } = context;
+          strategy.audit();
+        };
+        ",
+    );
+
+    assert!(
+        info.semantic_facts.iter().any(|fact| matches!(
+            fact,
+            SemanticFact::TypedPropertyMemberAccess(access)
+                if access.type_name == "Context"
+                    && access.property_path == "strategy"
+                    && access.member == "audit"
+        )),
+        "function alias should provide the contextual parameter type: {:?}",
+        info.semantic_facts
+    );
+}
+
+#[test]
+fn generic_function_type_alias_substitutes_concrete_parameter_types() {
+    let info = parse(
+        r"
+        import type { Context } from './context';
+        type Handler<T> = (value: T) => void;
+
+        export const handle: Handler<Context> = value => {
+          value.run();
+        };
+        ",
+    );
+
+    assert!(
+        info.member_accesses
+            .iter()
+            .any(|access| access.object == "Context" && access.member == "run"),
+        "the concrete type argument should replace the alias parameter: {:?}",
+        info.member_accesses
+    );
+    assert!(
+        !info
+            .member_accesses
+            .iter()
+            .any(|access| access.object == "T" && access.member == "run"),
+        "a generic alias parameter must not become a module type: {:?}",
+        info.member_accesses
+    );
+}
+
+#[test]
+fn function_type_alias_supplies_nested_scoped_parameter_types() {
+    let info = parse(
+        r"
+        class Context {
+          strategy!: Strategy;
+        }
+        type ContextTask = (context: Context) => void;
+
+        export function createAudit() {
+          const audit: ContextTask = context => {
+            const { strategy } = context;
+            strategy.audit();
+          };
+          return audit;
+        }
+        ",
+    );
+
+    assert!(
+        info.semantic_facts.iter().any(|fact| matches!(
+            fact,
+            SemanticFact::TypedPropertyMemberAccess(access)
+                if access.type_name == "Context"
+                    && access.property_path == "strategy"
+                    && access.member == "audit"
+        )),
+        "nested function alias should provide the contextual parameter type: {:?}",
+        info.semantic_facts
+    );
+}
+
+#[test]
+fn nearest_function_type_alias_controls_contextual_parameter_types() {
+    let info = parse(
+        r"
+        class OuterContext {
+          outer(): void {}
+        }
+        class InnerContext {
+          inner(): void {}
+        }
+        type Handler = (context: OuterContext) => void;
+
+        export function createHandler() {
+          const handler: Handler = context => context.inner();
+          type Handler = (context: InnerContext) => void;
+          return handler;
+        }
+        ",
+    );
+
+    assert!(
+        info.member_accesses
+            .iter()
+            .any(|access| access.object == "InnerContext" && access.member == "inner"),
+        "the nearest lexical alias should type the parameter: {:?}",
+        info.member_accesses
+    );
+    assert!(
+        !info
+            .member_accesses
+            .iter()
+            .any(|access| access.object == "OuterContext" && access.member == "inner"),
+        "an outer alias must not leak through a local declaration: {:?}",
+        info.member_accesses
+    );
+}
+
+#[test]
+fn non_function_type_alias_shadows_outer_contextual_alias() {
+    let info = parse(
+        r"
+        class OuterContext {
+          outer(): void {}
+        }
+        type Handler = (context: OuterContext) => void;
+
+        export function createHandler() {
+          type Handler = string;
+          const handler: Handler = context => context.outer();
+          return handler;
+        }
+        ",
+    );
+
+    assert!(
+        !info
+            .member_accesses
+            .iter()
+            .any(|access| access.object == "OuterContext" && access.member == "outer"),
+        "a non-function alias must still shadow the outer alias: {:?}",
+        info.member_accesses
+    );
+}
+
+#[test]
+fn all_nearer_type_declarations_shadow_contextual_aliases() {
+    let info = parse(
+        r"
+        class OuterContext {
+          interfaceShadowed(): void {}
+          genericShadowed(): void {}
+        }
+        type Handler = (context: OuterContext) => void;
+
+        export function interfaceHandler() {
+          interface Handler {
+            (context: unknown): void;
+          }
+          const handler: Handler = context => context.interfaceShadowed();
+          return handler;
+        }
+
+        export function genericHandler<Handler>() {
+          const handler: Handler = context => context.genericShadowed();
+          return handler;
+        }
+        ",
+    );
+
+    for member in ["interfaceShadowed", "genericShadowed"] {
+        assert!(
+            !info
+                .member_accesses
+                .iter()
+                .any(|access| access.object == "OuterContext" && access.member == member),
+            "the nearest type-space declaration must shadow the outer alias: {member} in {:?}",
+            info.member_accesses
+        );
+    }
+}
+
+#[test]
+fn switch_and_static_block_aliases_do_not_leak_outer_context() {
+    let info = parse(
+        r"
+        class OuterContext {
+          switchShadowed(): void {}
+          staticShadowed(): void {}
+        }
+        class InnerContext {
+          switchUsed(): void {}
+          staticUsed(): void {}
+        }
+        type Handler = (context: OuterContext) => void;
+
+        export function switchHandler(value: string) {
+          switch (value) {
+            default:
+              const handler: Handler = context => context.switchUsed();
+              type Handler = (context: InnerContext) => void;
+              return handler;
+          }
+        }
+
+        export class Registry {
+          static {
+            const handler: Handler = context => context.staticUsed();
+            type Handler = (context: InnerContext) => void;
+            void handler;
+          }
+        }
+        ",
+    );
+
+    for (used, shadowed) in [
+        ("switchUsed", "switchShadowed"),
+        ("staticUsed", "staticShadowed"),
+    ] {
+        assert!(
+            info.member_accesses
+                .iter()
+                .any(|access| access.object == "InnerContext" && access.member == used),
+            "the lexical alias should apply inside its raw statement scope: {used} in {:?}",
+            info.member_accesses
+        );
+        assert!(
+            !info
+                .member_accesses
+                .iter()
+                .any(|access| access.object == "OuterContext" && access.member == shadowed),
+            "the outer alias must not leak into a raw statement scope: {shadowed} in {:?}",
+            info.member_accesses
+        );
+    }
+}
+
+#[test]
+fn class_type_bindings_do_not_leak_outer_contextual_aliases() {
+    let info = parse(
+        r"
+        class OuterContext {
+          genericShadowed(): void {}
+          classNameShadowed(): void {}
+        }
+        type Handler = (context: OuterContext) => void;
+
+        export class Registry<Handler> {
+          create() {
+            const handler: Handler = context => context.genericShadowed();
+            return handler;
+          }
+
+          useSelf(target: Registry) {
+            target.required();
+          }
+
+          required(): void {}
+        }
+
+        export const Named = class Handler {
+          create() {
+            const handler: Handler = context => context.classNameShadowed();
+            return handler;
+          }
+        };
+        ",
+    );
+
+    for member in ["genericShadowed", "classNameShadowed"] {
+        assert!(
+            !info
+                .member_accesses
+                .iter()
+                .any(|access| access.object == "OuterContext" && access.member == member),
+            "class type bindings must shadow the outer alias: {member} in {:?}",
+            info.member_accesses
+        );
+    }
+    assert!(
+        info.member_accesses
+            .iter()
+            .any(|access| access.object == "Registry" && access.member == "required"),
+        "the current class binding remains a concrete receiver type: {:?}",
+        info.member_accesses
+    );
+}
+
+#[test]
+fn required_type_members_exclude_optional_contract_members() {
+    let info = parse(
+        r"
+        export interface Port {
+          active: boolean;
+          run(): void;
+          optionalProperty?: string;
+          optionalMethod?(): void;
+        }
+        export type Alias = {
+          save(): void;
+          optionalSave?(): void;
+        };
+        ",
+    );
+
+    let required: FxHashSet<(String, String)> = info
+        .semantic_facts
+        .iter()
+        .filter_map(|fact| match fact {
+            SemanticFact::RequiredTypeMember(required) => {
+                Some((required.type_name.clone(), required.member.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        required,
+        FxHashSet::from_iter([
+            ("Port".to_string(), "active".to_string()),
+            ("Port".to_string(), "run".to_string()),
+            ("Alias".to_string(), "save".to_string()),
+        ])
     );
 }
 
@@ -9786,6 +10403,141 @@ fn structural_param_member_accesses_recorded_regardless_of_inner_shadow() {
     );
 }
 
+#[test]
+fn typed_parameter_member_accesses_keep_sibling_function_scopes() {
+    let info = parse(
+        r"
+        import type { FirstContext, SecondContext } from './contexts'
+
+        export function useFirst(ctx: FirstContext) {
+            ctx.firstUsed()
+        }
+
+        export function useSecond(ctx: SecondContext) {
+            ctx.secondUsed()
+        }
+        ",
+    );
+
+    let accesses: Vec<(&str, &str)> = info
+        .member_accesses
+        .iter()
+        .map(|access| (access.object.as_str(), access.member.as_str()))
+        .collect();
+
+    assert!(
+        accesses.contains(&("FirstContext", "firstUsed")),
+        "the first function's receiver type must not be overwritten by a sibling binding: \
+         {accesses:?}"
+    );
+    assert!(
+        accesses.contains(&("SecondContext", "secondUsed")),
+        "the second function must retain its own receiver type: {accesses:?}"
+    );
+    assert!(
+        !accesses.contains(&("SecondContext", "firstUsed")),
+        "a sibling function's same-named parameter must not receive this member: {accesses:?}"
+    );
+}
+
+#[test]
+fn type_alias_surface_targets_exclude_nested_property_types() {
+    let info = parse(
+        r"
+        import type { AliasContext, NestedContext } from './contexts'
+
+        export type ContextSurface =
+            | Pick<AliasContext, 'aliasUsed' | 'pickedOnly'>
+            | ({ nested: NestedContext } & AliasContext)
+        ",
+    );
+
+    let targets: Vec<&str> = info
+        .semantic_facts
+        .iter()
+        .filter_map(|fact| match fact {
+            SemanticFact::TypeAliasSurfaceTarget(fact) if fact.alias_name == "ContextSurface" => {
+                Some(fact.target_name.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(targets, ["AliasContext"]);
+    assert!(
+        info.member_accesses
+            .iter()
+            .any(|access| { access.object == "AliasContext" && access.member == "pickedOnly" })
+    );
+}
+
+#[test]
+fn generic_type_alias_parameters_are_not_module_surface_targets() {
+    let info = parse(
+        r"
+        import type { T } from './external';
+        export type Alias<T> = T;
+        ",
+    );
+
+    assert!(
+        !info.semantic_facts.iter().any(|fact| matches!(
+            fact,
+            SemanticFact::TypeAliasSurfaceTarget(target)
+                if target.alias_name == "Alias" && target.target_name == "T"
+        )),
+        "a bound alias parameter must not become a surface target: {:?}",
+        info.semantic_facts
+    );
+    assert!(
+        !info
+            .public_signature_type_references
+            .iter()
+            .any(|reference| reference.export_name == "Alias" && reference.type_name == "T"),
+        "a bound alias parameter must not resolve to an imported same-name type: {:?}",
+        info.public_signature_type_references
+    );
+}
+
+#[test]
+fn lexical_generic_parameters_shadow_imported_signature_types() {
+    let info = parse(
+        r"
+        import type { Context } from './external';
+
+        export function useContext<Context>(value: Context): Context {
+          value.run();
+          return value;
+        }
+
+        export class ContextBox<Context> {
+          value!: Context;
+          use(value: Context): Context {
+            value.run();
+            return value;
+          }
+        }
+        ",
+    );
+
+    assert!(
+        !info
+            .public_signature_type_references
+            .iter()
+            .any(|reference| reference.type_name == "Context"),
+        "lexical generic parameters must not resolve to imported same-name types: {:?}",
+        info.public_signature_type_references
+    );
+    assert!(
+        !info
+            .member_accesses
+            .iter()
+            .any(|access| access.object == "Context" && access.member == "run"),
+        "lexical generic parameters must not credit imported same-name members: {:?}",
+        info.member_accesses
+    );
+}
+
 // ---- merge_branch_aliases and visit_switch_statement edge (lines 703-724)
 // A Playwright fixture alias threaded through a switch statement without a
 // default case should still propagate the merged alias to subsequent accesses
@@ -9843,5 +10595,83 @@ fn playwright_fixture_reassigned_to_sibling_fixture_credits_sibling() {
         "after reassigning r to readerB, doWork must be credited to readerB; \
          got {:#?}",
         info.semantic_facts
+    );
+}
+
+#[test]
+fn sibling_scope_new_expression_locals_credit_both_classes() {
+    // Two scopes binding the same local name to different classes make the
+    // module-flat binding `Ambiguous`; the walk-order resolution keeps each
+    // scope's own receiver so neither member is reported unused.
+    let info = parse(
+        r"
+        import { Alpha } from './alpha';
+        import { Beta } from './beta';
+
+        function first() {
+            const service = new Alpha();
+            service.alphaOnly();
+        }
+
+        function second() {
+            const service = new Beta();
+            service.betaOnly();
+        }
+        ",
+    );
+
+    assert!(
+        has_member_access(&info, "Alpha", "alphaOnly"),
+        "first scope's receiver must credit Alpha: {:?}",
+        info.member_accesses
+    );
+    assert!(
+        has_member_access(&info, "Beta", "betaOnly"),
+        "second scope's receiver must credit Beta: {:?}",
+        info.member_accesses
+    );
+}
+
+#[test]
+fn shadowed_destructured_alias_does_not_credit_typed_property_member() {
+    let info = parse(
+        r"
+        interface Context {
+          strategy: Strategy;
+        }
+
+        export function useContext(context: Context): void {
+            const { strategy } = context;
+            strategy.inspect();
+            {
+                const strategy = makeOther();
+                strategy.reset();
+            }
+        }
+        ",
+    );
+
+    let facts = info
+        .semantic_facts
+        .iter()
+        .filter_map(|fact| {
+            if let SemanticFact::TypedPropertyMemberAccess(access) = fact {
+                Some((
+                    access.type_name.as_str(),
+                    access.property_path.as_str(),
+                    access.member.as_str(),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        facts.contains(&("Context", "strategy", "inspect")),
+        "the unshadowed alias must still be credited: {facts:?}"
+    );
+    assert!(
+        !facts.contains(&("Context", "strategy", "reset")),
+        "a redeclared alias name must not credit the typed property: {facts:?}"
     );
 }

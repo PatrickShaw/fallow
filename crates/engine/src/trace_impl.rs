@@ -11,7 +11,7 @@ use crate::duplicates::{
     CloneFingerprintSet, CloneGroup, CloneInstance, DuplicationReport, dominant_identifier,
     group_refactoring_suggestion,
 };
-use crate::graph::{ModuleGraph, ReferenceKind};
+use crate::graph::{EffectiveExportResolution, ExportNamespace, ModuleGraph, ReferenceKind};
 
 /// Match a user-provided file path against a module's actual path.
 ///
@@ -51,38 +51,34 @@ fn reference_to_export_reference(
     }
 }
 
-/// Collect every re-export chain across the graph that re-exports `export_name`
-/// from the module identified by `target_file_id`.
+/// Project graph-owned effective routes into the public trace contract.
 fn collect_re_export_chains(
     graph: &ModuleGraph,
     root: &Path,
     target_file_id: crate::discover::FileId,
     export_name: &str,
+    namespace: ExportNamespace,
 ) -> Vec<ReExportChain> {
     graph
-        .modules
-        .iter()
-        .flat_map(|m| {
-            m.re_exports
-                .iter()
-                .filter(move |re| {
-                    re.source_file == target_file_id
-                        && (re.imported_name == export_name || re.imported_name == "*")
-                })
-                .map(move |re| {
-                    let barrel_export = m.exports.iter().find(|e| {
-                        if re.exported_name == "*" {
-                            e.name.to_string() == export_name
-                        } else {
-                            e.name.to_string() == re.exported_name
-                        }
-                    });
-                    ReExportChain {
-                        barrel_file: m.path.strip_prefix(root).unwrap_or(&m.path).to_path_buf(),
-                        exported_as: re.exported_name.clone(),
-                        reference_count: barrel_export.map_or(0, |e| e.references.len()),
-                    }
-                })
+        .effective_re_export_routes(target_file_id, export_name, namespace)
+        .into_iter()
+        .filter_map(|route| {
+            let module = graph.modules.get(route.barrel_file().0 as usize)?;
+            Some(ReExportChain {
+                barrel_file: module
+                    .path
+                    .strip_prefix(root)
+                    .unwrap_or(&module.path)
+                    .to_path_buf(),
+                exported_as: route.exported_name().to_string(),
+                reference_count: graph
+                    .effective_export_surface_references(
+                        route.barrel_file(),
+                        route.exported_name(),
+                        namespace,
+                    )
+                    .len(),
+            })
         })
         .collect()
 }
@@ -132,22 +128,23 @@ pub fn trace_export(
         .iter()
         .find(|m| path_matches(&m.path, root, file_path))?;
 
-    let export = module
-        .exports
-        .iter()
-        .filter(|e| export_name_matches(e, export_name))
-        .max_by_key(|e| (!e.references.is_empty(), !e.is_type_only))?;
+    let surface = select_export(graph, module, export_name)?;
+    let namespace = surface.namespace();
 
-    let direct_references: Vec<ExportReference> = export
-        .references
-        .iter()
+    let mut referenced_files = FxHashSet::default();
+    let direct_references: Vec<ExportReference> = graph
+        .effective_export_surface_references(module.file_id, export_name, namespace)
+        .into_iter()
+        .filter(|reference| referenced_files.insert(reference.from_file))
         .map(|r| reference_to_export_reference(graph, root, r))
         .collect();
 
-    let re_export_chains = collect_re_export_chains(graph, root, module.file_id, export_name);
+    let re_export_chains =
+        collect_re_export_chains(graph, root, module.file_id, export_name, namespace);
 
-    let is_used = !export.references.is_empty();
-    let reason = export_trace_reason(module, export.references.len(), is_used, &re_export_chains);
+    let reference_count = direct_references.len();
+    let is_used = reference_count > 0;
+    let reason = export_trace_reason(module, reference_count, is_used, &re_export_chains);
 
     Some(ExportTrace {
         file: module
@@ -156,6 +153,10 @@ pub fn trace_export(
             .unwrap_or(&module.path)
             .to_path_buf(),
         export_name: export_name.to_string(),
+        namespace: match namespace {
+            ExportNamespace::Type => fallow_types::semantic::SemanticNamespace::Type,
+            ExportNamespace::Value => fallow_types::semantic::SemanticNamespace::Value,
+        },
         file_reachable: module.is_reachable(),
         is_entry_point: module.is_entry_point(),
         is_used,
@@ -181,28 +182,43 @@ pub fn semantic_symbol_for_export(
         .modules
         .iter()
         .find(|module| path_matches(&module.path, root, file_path))?;
-    let export = module
-        .exports
-        .iter()
-        .filter(|export| export_name_matches(export, export_name))
-        .max_by_key(|export| (!export.references.is_empty(), !export.is_type_only))?;
-    let source = std::fs::read_to_string(&module.path).ok()?;
+    let surface = select_export(graph, module, export_name)?;
+    let namespace = surface.namespace();
+    let (identity_module, span, identity_exported_name, local_name) = if let Some(re_export) =
+        graph.effective_export_surface_re_export(module.file_id, export_name, namespace)
+    {
+        let local_name = if re_export.imported_name == "*" {
+            export_name
+        } else {
+            re_export.imported_name.as_str()
+        };
+        (module, re_export.span, export_name, local_name)
+    } else {
+        let origin = surface.origin()?;
+        let origin_module = graph.modules.get(origin.file_id().0 as usize)?;
+        let origin_export = origin.export();
+        let origin_name = match &origin_export.name {
+            fallow_types::extract::ExportName::Named(name) => name.as_str(),
+            fallow_types::extract::ExportName::Default => "default",
+        };
+        (origin_module, origin_export.span, origin_name, origin_name)
+    };
+    let source = std::fs::read_to_string(&identity_module.path).ok()?;
     let offsets = fallow_types::extract::compute_line_offsets(&source);
-    let (line, col) = fallow_types::extract::byte_offset_to_line_col(&offsets, export.span.start);
+    let (line, col) = fallow_types::extract::byte_offset_to_line_col(&offsets, span.start);
     Some(SemanticSymbol {
-        path: module
+        path: identity_module
             .path
             .strip_prefix(root)
-            .unwrap_or(&module.path)
+            .unwrap_or(&identity_module.path)
             .to_path_buf(),
-        namespace: if export.is_type_only {
-            SemanticNamespace::Type
-        } else {
-            SemanticNamespace::Value
+        namespace: match namespace {
+            ExportNamespace::Type => SemanticNamespace::Type,
+            ExportNamespace::Value => SemanticNamespace::Value,
         },
         declaration_kind: "export".to_string(),
-        exported_name: export_name.to_string(),
-        local_name: export_name.to_string(),
+        exported_name: identity_exported_name.to_string(),
+        local_name: local_name.to_string(),
         owner: None,
         line,
         col,
@@ -303,7 +319,7 @@ pub fn semantic_symbol_for_exact_class_method(
     let owners = module
         .exports
         .iter()
-        .filter(|export| export_name_matches(export, owner_name))
+        .filter(|export| export.name.matches_str(owner_name))
         .collect::<Vec<_>>();
     if owners.len() != 1 {
         return Err(if owners.is_empty() {
@@ -463,9 +479,16 @@ fn class_member_trace_reason(
     format!("{head}{body}")
 }
 
-fn export_name_matches(export: &crate::graph::ExportSymbol, export_name: &str) -> bool {
-    let name_str = export.name.to_string();
-    name_str == export_name || (export_name == "default" && name_str == "default")
+fn select_export<'graph>(
+    graph: &'graph ModuleGraph,
+    module: &'graph crate::graph::ModuleNode,
+    export_name: &str,
+) -> Option<crate::graph::EffectiveExportSurface<'graph>> {
+    [ExportNamespace::Value, ExportNamespace::Type]
+        .into_iter()
+        .find_map(|namespace| {
+            graph.effective_export_surface(module.file_id, export_name, namespace)
+        })
 }
 
 /// Map a module's exports to [`TracedExport`] entries with relativized references.
@@ -477,15 +500,17 @@ fn traced_exports(
     module
         .exports
         .iter()
-        .map(|e| TracedExport {
-            name: e.name.to_string(),
-            is_type_only: e.is_type_only,
-            reference_count: e.references.len(),
-            referenced_by: e
-                .references
-                .iter()
+        .map(|e| {
+            let referenced_by: Vec<_> = e
+                .physical_references()
                 .map(|r| reference_to_export_reference(graph, root, r))
-                .collect(),
+                .collect();
+            TracedExport {
+                name: e.name.to_string(),
+                is_type_only: e.is_type_only,
+                reference_count: referenced_by.len(),
+                referenced_by,
+            }
         })
         .collect()
 }
@@ -810,7 +835,27 @@ mod tests {
 
     use crate::discover::{DiscoveredFile, EntryPoint, EntryPointSource, FileId};
     use crate::extract::{ExportInfo, ExportName, ImportInfo, ImportedName, VisibilityTag};
-    use crate::resolve::{ResolveResult, ResolvedImport, ResolvedModule};
+    use crate::resolve::{ResolveResult, ResolvedImport, ResolvedModule, ResolvedReExport};
+    use fallow_types::extract::ReExportInfo;
+
+    fn resolved_re_export(
+        source: FileId,
+        imported_name: &str,
+        exported_name: &str,
+    ) -> ResolvedReExport {
+        ResolvedReExport {
+            info: ReExportInfo {
+                source: "./source".to_string(),
+                imported_name: imported_name.to_string(),
+                exported_name: exported_name.to_string(),
+                is_type_only: false,
+                span: oxc_span::Span::default(),
+                statement_span: oxc_span::Span::default(),
+                source_span: oxc_span::Span::default(),
+            },
+            target: ResolveResult::InternalModule(source),
+        }
+    }
 
     fn build_test_graph() -> ModuleGraph {
         let files = vec![
@@ -951,6 +996,492 @@ mod tests {
 
         let trace = trace_export(&graph, root, "src/utils.ts", "nonexistent");
         assert!(trace.is_none());
+    }
+
+    #[test]
+    fn trace_reports_only_the_effective_re_export_origin() {
+        let files: Vec<_> = ["entry", "barrel", "star-source", "explicit-source"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| DiscoveredFile {
+                id: FileId(index as u32),
+                path: PathBuf::from(format!("/project/src/{name}.ts")),
+                size_bytes: 10,
+            })
+            .collect();
+        let entry_points = vec![EntryPoint {
+            path: files[0].path.clone(),
+            source: EntryPointSource::PackageJsonMain,
+        }];
+        let re_export = |source: FileId, imported: &str, exported: &str| ResolvedReExport {
+            info: ReExportInfo {
+                source: format!("./{}", source.0),
+                imported_name: imported.to_string(),
+                exported_name: exported.to_string(),
+                is_type_only: false,
+                span: oxc_span::Span::default(),
+                statement_span: oxc_span::Span::default(),
+                source_span: oxc_span::Span::default(),
+            },
+            target: ResolveResult::InternalModule(source),
+        };
+        let export = || ExportInfo {
+            name: ExportName::Named("foo".to_string()),
+            local_name: Some("foo".to_string()),
+            is_type_only: false,
+            visibility: VisibilityTag::None,
+            expected_unused_reason: None,
+            span: oxc_span::Span::new(0, 3),
+            members: Vec::new(),
+            is_side_effect_used: false,
+            super_class: None,
+        };
+        let resolved = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: files[0].path.clone(),
+                resolved_imports: vec![ResolvedImport {
+                    info: ImportInfo {
+                        source: "./barrel".to_string(),
+                        imported_name: ImportedName::Named("foo".to_string()),
+                        local_name: "foo".to_string(),
+                        is_type_only: false,
+                        from_style: false,
+                        span: oxc_span::Span::default(),
+                        source_span: oxc_span::Span::default(),
+                    },
+                    target: ResolveResult::InternalModule(FileId(1)),
+                }],
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(1),
+                path: files[1].path.clone(),
+                re_exports: vec![
+                    re_export(FileId(2), "*", "*"),
+                    re_export(FileId(3), "foo", "foo"),
+                ],
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(2),
+                path: files[2].path.clone(),
+                exports: vec![export()].into(),
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(3),
+                path: files[3].path.clone(),
+                exports: vec![export()].into(),
+                ..Default::default()
+            },
+        ];
+        let graph = ModuleGraph::build(&resolved, &entry_points, &files);
+
+        let shadowed = trace_export(&graph, Path::new("/project"), "src/star-source.ts", "foo")
+            .expect("shadowed source export exists");
+        let effective = trace_export(
+            &graph,
+            Path::new("/project"),
+            "src/explicit-source.ts",
+            "foo",
+        )
+        .expect("effective source export exists");
+
+        assert!(shadowed.re_export_chains.is_empty());
+        assert_eq!(effective.re_export_chains.len(), 1);
+        assert_eq!(effective.re_export_chains[0].exported_as, "foo");
+    }
+
+    fn star_surface_trace_graph(root: &Path) -> ModuleGraph {
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("create source directory");
+        let paths: Vec<_> = ["source", "barrel-a", "barrel-b", "outer", "entry"]
+            .into_iter()
+            .map(|name| src.join(format!("{name}.ts")))
+            .collect();
+        std::fs::write(&paths[0], "\n\nexport const foo = 1;\n").expect("write source");
+        for path in &paths[1..] {
+            std::fs::write(path, "export {};\n").expect("write module");
+        }
+        let files: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| DiscoveredFile {
+                id: FileId(index as u32),
+                path: path.clone(),
+                size_bytes: 20,
+            })
+            .collect();
+        let resolved = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: paths[0].clone(),
+                exports: vec![ExportInfo {
+                    name: ExportName::Named("foo".to_string()),
+                    local_name: Some("foo".to_string()),
+                    is_type_only: false,
+                    visibility: VisibilityTag::None,
+                    expected_unused_reason: None,
+                    span: oxc_span::Span::new(2, 5),
+                    members: Vec::new(),
+                    is_side_effect_used: false,
+                    super_class: None,
+                }]
+                .into(),
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(1),
+                path: paths[1].clone(),
+                re_exports: vec![resolved_re_export(FileId(0), "*", "*")],
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(2),
+                path: paths[2].clone(),
+                re_exports: vec![resolved_re_export(FileId(0), "*", "*")],
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(3),
+                path: paths[3].clone(),
+                re_exports: vec![
+                    resolved_re_export(FileId(1), "foo", "left"),
+                    resolved_re_export(FileId(1), "foo", "right"),
+                ],
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(4),
+                path: paths[4].clone(),
+                resolved_imports: vec![
+                    ResolvedImport {
+                        info: ImportInfo {
+                            source: "./outer".to_string(),
+                            imported_name: ImportedName::Named("left".to_string()),
+                            local_name: "left".to_string(),
+                            is_type_only: false,
+                            from_style: false,
+                            span: oxc_span::Span::new(10, 20),
+                            source_span: oxc_span::Span::default(),
+                        },
+                        target: ResolveResult::InternalModule(FileId(3)),
+                    },
+                    ResolvedImport {
+                        info: ImportInfo {
+                            source: "./barrel-b".to_string(),
+                            imported_name: ImportedName::Named("foo".to_string()),
+                            local_name: "otherFoo".to_string(),
+                            is_type_only: false,
+                            from_style: false,
+                            span: oxc_span::Span::new(30, 40),
+                            source_span: oxc_span::Span::default(),
+                        },
+                        target: ResolveResult::InternalModule(FileId(2)),
+                    },
+                ],
+                ..Default::default()
+            },
+        ];
+        let entry_points = vec![EntryPoint {
+            path: paths[4].clone(),
+            source: EntryPointSource::PackageJsonMain,
+        }];
+        ModuleGraph::build(&resolved, &entry_points, &files)
+    }
+
+    #[test]
+    fn star_surface_trace_keeps_aliases_separate_and_uses_origin_identity() {
+        let root = tempfile::tempdir().expect("temporary project");
+        let graph = star_surface_trace_graph(root.path());
+
+        let used = trace_export(&graph, root.path(), "src/barrel-a.ts", "foo")
+            .expect("aliased barrel exposes foo");
+        let sibling = trace_export(&graph, root.path(), "src/barrel-b.ts", "foo")
+            .expect("sibling barrel exposes foo");
+        assert!(used.is_used);
+        assert_eq!(used.direct_references.len(), 1);
+        assert!(sibling.is_used);
+        assert_eq!(sibling.direct_references.len(), 1);
+
+        let source_trace = trace_export(&graph, root.path(), "src/source.ts", "foo")
+            .expect("source declaration is traceable");
+        let chain_count = |file: &str, name: &str| {
+            source_trace
+                .re_export_chains
+                .iter()
+                .find(|chain| chain.barrel_file == Path::new(file) && chain.exported_as == name)
+                .map(|chain| chain.reference_count)
+        };
+        assert_eq!(chain_count("src/barrel-a.ts", "foo"), Some(1));
+        assert_eq!(chain_count("src/barrel-b.ts", "foo"), Some(1));
+        assert_eq!(chain_count("src/outer.ts", "left"), Some(1));
+        assert_eq!(chain_count("src/outer.ts", "right"), Some(0));
+
+        let semantic = semantic_symbol_for_export(&graph, root.path(), "src/barrel-a.ts", "foo")
+            .expect("star surface resolves to its declaration identity");
+        assert_eq!(semantic.path, Path::new("src/source.ts"));
+        assert_eq!(semantic.exported_name, "foo");
+        assert_eq!(semantic.local_name, "foo");
+        assert_eq!((semantic.line, semantic.col), (3, 0));
+
+        let alias = semantic_symbol_for_export(&graph, root.path(), "src/outer.ts", "left")
+            .expect("named re-export keeps its export-specifier identity");
+        assert_eq!(alias.path, Path::new("src/outer.ts"));
+        assert_eq!(alias.exported_name, "left");
+        assert_eq!(alias.local_name, "foo");
+    }
+
+    #[test]
+    fn trace_follows_renamed_and_convergent_re_export_routes() {
+        let names = [
+            "source",
+            "renamed",
+            "final",
+            "left",
+            "right",
+            "diamond-entry",
+        ];
+        let files: Vec<_> = names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| DiscoveredFile {
+                id: FileId(index as u32),
+                path: PathBuf::from(format!("/project/src/{name}.ts")),
+                size_bytes: 10,
+            })
+            .collect();
+        let re_export = |source: FileId, imported: &str, exported: &str| ResolvedReExport {
+            info: ReExportInfo {
+                source: format!("./{}", source.0),
+                imported_name: imported.to_string(),
+                exported_name: exported.to_string(),
+                is_type_only: false,
+                span: oxc_span::Span::default(),
+                statement_span: oxc_span::Span::default(),
+                source_span: oxc_span::Span::default(),
+            },
+            target: ResolveResult::InternalModule(source),
+        };
+        let mut resolved: Vec<_> = files
+            .iter()
+            .map(|file| ResolvedModule {
+                file_id: file.id,
+                path: file.path.clone(),
+                ..Default::default()
+            })
+            .collect();
+        resolved[0].exports = vec![ExportInfo {
+            name: ExportName::Named("foo".to_string()),
+            local_name: Some("foo".to_string()),
+            is_type_only: false,
+            visibility: VisibilityTag::None,
+            expected_unused_reason: None,
+            span: oxc_span::Span::new(0, 3),
+            members: Vec::new(),
+            is_side_effect_used: false,
+            super_class: None,
+        }]
+        .into();
+        resolved[1].re_exports = vec![re_export(FileId(0), "foo", "bar")];
+        resolved[2].re_exports = vec![re_export(FileId(1), "bar", "baz")];
+        resolved[3].re_exports = vec![re_export(FileId(0), "*", "*")];
+        resolved[4].re_exports = vec![re_export(FileId(0), "*", "*")];
+        resolved[5].re_exports = vec![
+            re_export(FileId(3), "*", "*"),
+            re_export(FileId(4), "*", "*"),
+        ];
+        let entry_points = vec![EntryPoint {
+            path: files[5].path.clone(),
+            source: EntryPointSource::PackageJsonMain,
+        }];
+        let graph = ModuleGraph::build(&resolved, &entry_points, &files);
+
+        let trace = trace_export(&graph, Path::new("/project"), "src/source.ts", "foo")
+            .expect("source export exists");
+        let routes: FxHashSet<_> = trace
+            .re_export_chains
+            .iter()
+            .map(|route| (route.barrel_file.as_path(), route.exported_as.as_str()))
+            .collect();
+
+        assert_eq!(routes.len(), 5);
+        assert!(routes.contains(&(Path::new("src/renamed.ts"), "bar")));
+        assert!(routes.contains(&(Path::new("src/final.ts"), "baz")));
+        assert!(routes.contains(&(Path::new("src/left.ts"), "foo")));
+        assert!(routes.contains(&(Path::new("src/right.ts"), "foo")));
+        assert!(routes.contains(&(Path::new("src/diamond-entry.ts"), "foo")));
+    }
+
+    #[test]
+    fn trace_prefers_the_value_namespace_independent_of_usage() {
+        let files = vec![
+            DiscoveredFile {
+                id: FileId(0),
+                path: PathBuf::from("/project/src/entry.ts"),
+                size_bytes: 10,
+            },
+            DiscoveredFile {
+                id: FileId(1),
+                path: PathBuf::from("/project/src/source.ts"),
+                size_bytes: 10,
+            },
+        ];
+        let export = |is_type_only| ExportInfo {
+            name: ExportName::Named("Foo".to_string()),
+            local_name: Some("Foo".to_string()),
+            is_type_only,
+            visibility: VisibilityTag::None,
+            expected_unused_reason: None,
+            span: oxc_span::Span::new(0, 3),
+            members: Vec::new(),
+            is_side_effect_used: false,
+            super_class: None,
+        };
+        let resolved = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: files[0].path.clone(),
+                resolved_imports: vec![ResolvedImport {
+                    info: ImportInfo {
+                        source: "./source".to_string(),
+                        imported_name: ImportedName::Named("Foo".to_string()),
+                        local_name: "Foo".to_string(),
+                        is_type_only: true,
+                        from_style: false,
+                        span: oxc_span::Span::default(),
+                        source_span: oxc_span::Span::default(),
+                    },
+                    target: ResolveResult::InternalModule(FileId(1)),
+                }],
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(1),
+                path: files[1].path.clone(),
+                exports: vec![export(false), export(true)].into(),
+                ..Default::default()
+            },
+        ];
+        let entry_points = vec![EntryPoint {
+            path: files[0].path.clone(),
+            source: EntryPointSource::PackageJsonMain,
+        }];
+        let graph = ModuleGraph::build(&resolved, &entry_points, &files);
+
+        let trace = trace_export(&graph, Path::new("/project"), "src/source.ts", "Foo")
+            .expect("value export exists");
+
+        assert_eq!(
+            trace.namespace,
+            fallow_types::semantic::SemanticNamespace::Value
+        );
+        assert!(!trace.is_used, "type usage must not select the type export");
+    }
+
+    #[test]
+    fn trace_preserves_dual_namespace_named_re_exports() {
+        let files: Vec<_> = ["entry", "barrel", "types", "values"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| DiscoveredFile {
+                id: FileId(index as u32),
+                path: PathBuf::from(format!("/project/src/{name}.ts")),
+                size_bytes: 10,
+            })
+            .collect();
+        let export = |is_type_only| ExportInfo {
+            name: ExportName::Named("Foo".to_string()),
+            local_name: Some("Foo".to_string()),
+            is_type_only,
+            visibility: VisibilityTag::None,
+            expected_unused_reason: None,
+            span: oxc_span::Span::new(0, 3),
+            members: Vec::new(),
+            is_side_effect_used: false,
+            super_class: None,
+        };
+        let re_export = |source: FileId, is_type_only| ResolvedReExport {
+            info: ReExportInfo {
+                source: format!("./{}", source.0),
+                imported_name: "Foo".to_string(),
+                exported_name: "Foo".to_string(),
+                is_type_only,
+                span: oxc_span::Span::default(),
+                statement_span: oxc_span::Span::default(),
+                source_span: oxc_span::Span::default(),
+            },
+            target: ResolveResult::InternalModule(source),
+        };
+        let mut resolved = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: files[0].path.clone(),
+                resolved_imports: vec![ResolvedImport {
+                    info: ImportInfo {
+                        source: "./barrel".to_string(),
+                        imported_name: ImportedName::Named("Foo".to_string()),
+                        local_name: "Foo".to_string(),
+                        is_type_only: false,
+                        from_style: false,
+                        span: oxc_span::Span::new(0, 10),
+                        source_span: oxc_span::Span::default(),
+                    },
+                    target: ResolveResult::InternalModule(FileId(1)),
+                }],
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(1),
+                path: files[1].path.clone(),
+                re_exports: vec![re_export(FileId(2), true), re_export(FileId(3), false)],
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(2),
+                path: files[2].path.clone(),
+                exports: vec![export(true)].into(),
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(3),
+                path: files[3].path.clone(),
+                exports: vec![export(false)].into(),
+                ..Default::default()
+            },
+        ];
+        let entry_points = vec![EntryPoint {
+            path: files[0].path.clone(),
+            source: EntryPointSource::PackageJsonMain,
+        }];
+        let graph = ModuleGraph::build(&resolved, &entry_points, &files);
+        resolved[1].re_exports.reverse();
+        let reversed_graph = ModuleGraph::build(&resolved, &entry_points, &files);
+
+        let trace = trace_export(&graph, Path::new("/project"), "src/barrel.ts", "Foo")
+            .expect("barrel exposes Foo in both namespaces");
+
+        assert_eq!(
+            trace.namespace,
+            fallow_types::semantic::SemanticNamespace::Value
+        );
+        assert!(
+            trace.is_used,
+            "the value import must credit the value surface"
+        );
+        assert_eq!(trace.direct_references.len(), 1);
+        let reversed_trace = trace_export(
+            &reversed_graph,
+            Path::new("/project"),
+            "src/barrel.ts",
+            "Foo",
+        )
+        .expect("reversed declarations expose the same surface");
+        assert_eq!(
+            serde_json::to_value(trace).expect("serialize trace"),
+            serde_json::to_value(reversed_trace).expect("serialize reversed trace")
+        );
     }
 
     fn build_class_member_graph() -> ModuleGraph {
@@ -1750,6 +2281,7 @@ mod tests {
         let trace = ExportTrace {
             file: PathBuf::from(r"src\utils.ts"),
             export_name: "foo".to_string(),
+            namespace: fallow_types::semantic::SemanticNamespace::Value,
             file_reachable: true,
             is_entry_point: false,
             is_used: true,

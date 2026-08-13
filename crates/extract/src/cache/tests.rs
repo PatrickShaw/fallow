@@ -25,6 +25,73 @@ fn cache_store_default_is_empty() {
 }
 
 #[test]
+fn cache_roundtrip_preserves_declaration_merge_facts() {
+    let module = parse_from_content(
+        FileId(0),
+        Path::new("src/merged.ts"),
+        "export interface Merged {}\nexport namespace Merged {}",
+    );
+    let cached = module_to_cached_from_parts(&module, 10, 20);
+    let encoded = bitcode::encode(&cached);
+    let decoded: CachedModule = bitcode::decode(&encoded).expect("decode cached module");
+    let restored = cached_to_module(&decoded, FileId(0));
+
+    assert!(restored.semantic_facts.iter().any(|fact| matches!(
+        fact,
+        fallow_types::extract::SemanticFact::DeclarationMerge(group)
+            if group.export_spans.len() == 2
+    )));
+}
+
+#[test]
+fn cache_roundtrip_preserves_type_alias_surface_targets() {
+    let module = parse_from_content(
+        FileId(0),
+        Path::new("src/alias.ts"),
+        "export type Surface = Pick<Target, 'used'> & { nested: Nested }",
+    );
+    let cached = module_to_cached_from_parts(&module, 10, 20);
+    let encoded = bitcode::encode(&cached);
+    let decoded: CachedModule = bitcode::decode(&encoded).expect("decode cached module");
+    let restored = cached_to_module(&decoded, FileId(0));
+
+    assert!(restored.semantic_facts.iter().any(|fact| matches!(
+        fact,
+        fallow_types::extract::SemanticFact::TypeAliasSurfaceTarget(edge)
+            if edge.alias_name == "Surface" && edge.target_name == "Target"
+    )));
+    assert!(!restored.semantic_facts.iter().any(|fact| matches!(
+        fact,
+        fallow_types::extract::SemanticFact::TypeAliasSurfaceTarget(edge)
+            if edge.target_name == "Nested"
+    )));
+}
+
+#[test]
+fn cache_roundtrip_preserves_computed_enum_key_facts() {
+    let module = parse_from_content(
+        FileId(0),
+        Path::new("src/key.ts"),
+        "export enum Key { Protocol = '__protocol' }\nvalue[Key.Protocol]",
+    );
+    let cached = module_to_cached_from_parts(&module, 10, 20);
+    let encoded = bitcode::encode(&cached);
+    let decoded: CachedModule = bitcode::decode(&encoded).expect("decode cached module");
+    let restored = cached_to_module(&decoded, FileId(0));
+
+    assert!(restored.semantic_facts.iter().any(|fact| matches!(
+        fact,
+        fallow_types::extract::SemanticFact::StringEnumMemberValue(value)
+            if value.value == "__protocol"
+    )));
+    assert!(restored.semantic_facts.iter().any(|fact| matches!(
+        fact,
+        fallow_types::extract::SemanticFact::ComputedEnumKeyUse(usage)
+            if usage.key_object == "Key" && usage.key_member == "Protocol"
+    )));
+}
+
+#[test]
 fn cache_roundtrip_preserves_unresolved_callee_diagnostics() {
     let module = parse_from_content(
         FileId(7),
@@ -4355,22 +4422,41 @@ fn cache_save_atomic_write_leaves_no_tmp_on_success() {
 /// produced by a fresh (cold) parse of the same source. Guards against a
 /// forgotten `CACHE_VERSION` bump or a serialization bug silently returning
 /// WRONG analysis results from disk.
+const WARM_CACHE_SOURCE: &str = "import { useEffect } from 'react';\n\
+     import { vi } from 'vitest';\n\
+     import { ProtocolKey } from './protocol';\n\
+     import type { Props } from './types';\n\
+     export interface Runner { run(): void; optionalRun?(): void }\n\
+     class OuterContext { outer(): void {} }\n\
+     class InnerContext { used(): void {} }\n\
+     type Handler = (context: OuterContext) => void;\n\
+     type GenericHandler<T> = (context: T) => void;\n\
+     export const genericHandler: GenericHandler<InnerContext> = context => context.used();\n\
+     export function createHandler() {\n\
+       const handler: Handler = context => context.used();\n\
+       type Handler = (context: InnerContext) => void;\n\
+       return handler;\n\
+     }\n\
+     export function readShadowedKey(\n\
+       target: object,\n\
+       ProtocolKey: { Protocol: string },\n\
+     ) {\n\
+       return target[ProtocolKey.Protocol];\n\
+     }\n\
+     vi.mock('./dependency', () => ({ dependency: vi.fn() }));\n\
+     export const App = ({ name }: Props) => {\n\
+       useEffect(() => {}, [name]);\n\
+       return <Child id={name} />;\n\
+     };\n\
+     export default App;";
+
 #[test]
 fn warm_cache_load_matches_cold_parse() {
     let dir = test_cache_dir("warm_equals_cold");
     let path = Path::new("src/warm.tsx");
-    let source = "import { useEffect } from 'react';\n\
-         import { vi } from 'vitest';\n\
-         import type { Props } from './types';\n\
-         vi.mock('./dependency', () => ({ dependency: vi.fn() }));\n\
-         export const App = ({ name }: Props) => {\n\
-           useEffect(() => {}, [name]);\n\
-           return <Child id={name} />;\n\
-         };\n\
-         export default App;";
 
     // Cold parse -> the cache unit that a fresh run would write to disk.
-    let cold_module = parse_from_content(FileId(0), path, source);
+    let cold_module = parse_from_content(FileId(0), path, WARM_CACHE_SOURCE);
     let cold_cached = module_to_cached_from_parts(&cold_module, 10, 20);
     let cold_bytes = bitcode::encode(&cold_cached);
 
@@ -4404,11 +4490,30 @@ fn warm_cache_load_matches_cold_parse() {
     );
     assert_eq!(warm_module.react_props.len(), cold_module.react_props.len());
     assert_eq!(warm_module.hook_uses.len(), cold_module.hook_uses.len());
+    let member_accesses = |module: &ModuleInfo| {
+        module
+            .member_accesses
+            .iter()
+            .map(|access| (access.object.clone(), access.member.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(member_accesses(&warm_module), member_accesses(&cold_module));
     assert_eq!(
         warm_module.render_edges.len(),
         cold_module.render_edges.len()
     );
     assert_eq!(warm_module.semantic_facts, cold_module.semantic_facts);
+    assert_eq!(
+        warm_module.public_signature_type_references,
+        cold_module.public_signature_type_references
+    );
+    assert!(
+        warm_module
+            .member_accesses
+            .iter()
+            .any(|access| access.object == "InnerContext" && access.member == "used"),
+        "warm cache should retain the receiver selected by the nearest alias"
+    );
     assert!(
         warm_module.semantic_facts.iter().any(|fact| matches!(
             fact,
@@ -4417,6 +4522,22 @@ fn warm_cache_load_matches_cold_parse() {
                     && operation.action.replaces_original()
         )),
         "warm cache should retain the proven replacement operation"
+    );
+    assert!(
+        warm_module.semantic_facts.iter().any(|fact| matches!(
+            fact,
+            SemanticFact::RequiredTypeMember(required)
+                if required.type_name == "Runner" && required.member == "run"
+        )),
+        "warm cache should retain required structural members"
+    );
+    assert!(
+        !warm_module.semantic_facts.iter().any(|fact| matches!(
+            fact,
+            SemanticFact::RequiredTypeMember(required)
+                if required.type_name == "Runner" && required.member == "optionalRun"
+        )),
+        "optional structural members must remain removable"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

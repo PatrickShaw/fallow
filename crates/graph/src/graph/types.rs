@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use fallow_types::discover::FileId;
 use fallow_types::extract::{ExportName, ModuleLoadMechanism, VisibilityTag};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// A single module in the graph.
 ///
@@ -205,6 +205,8 @@ pub struct SymbolReference {
     pub from_file: FileId,
     /// How the export is referenced.
     pub kind: ReferenceKind,
+    /// Semantic namespace used by this reference.
+    pub namespace: super::ExportNamespace,
     /// Byte span of the import statement in the referencing file.
     /// Used by the LSP to locate references for Code Lens navigation.
     #[serde(with = "crate::cache::span_serde")]
@@ -227,7 +229,72 @@ pub(crate) struct RoutedReference {
     pub(crate) path: Option<ReferencePathId>,
 }
 
+pub(crate) type RoutedReferenceKey = (
+    FileId,
+    oxc_span::Span,
+    Option<ReferencePathId>,
+    super::ExportNamespace,
+);
+
+impl RoutedReference {
+    pub(crate) const fn key(self) -> RoutedReferenceKey {
+        (
+            self.reference.from_file,
+            self.reference.import_span,
+            self.path,
+            self.reference.namespace,
+        )
+    }
+}
+
 impl ExportSymbol {
+    const INLINE_PHYSICAL_REFERENCE_LIMIT: usize = 8;
+
+    /// References that use one semantic namespace.
+    pub fn references_in(
+        &self,
+        namespace: super::ExportNamespace,
+    ) -> impl Iterator<Item = &SymbolReference> {
+        self.references
+            .iter()
+            .filter(move |reference| reference.namespace == namespace)
+    }
+
+    /// Distinct physical reference sites, collapsing Type and Value uses of
+    /// the same import while preserving different resolved routes.
+    pub fn physical_references(&self) -> impl Iterator<Item = &SymbolReference> {
+        let mut seen = (self.references.len() > Self::INLINE_PHYSICAL_REFERENCE_LIMIT)
+            .then(FxHashSet::default);
+        self.references
+            .iter()
+            .enumerate()
+            .filter(move |(index, reference)| {
+                let key = (
+                    reference.from_file,
+                    reference.import_span,
+                    self.reference_path(*index),
+                );
+                if let Some(seen) = &mut seen {
+                    return seen.insert(key);
+                }
+                !(0..*index).any(|prior_index| {
+                    let prior = &self.references[prior_index];
+                    key == (
+                        prior.from_file,
+                        prior.import_span,
+                        self.reference_path(prior_index),
+                    )
+                })
+            })
+            .map(|(_, reference)| reference)
+    }
+
+    /// Number of distinct physical reference sites.
+    #[must_use]
+    pub fn physical_reference_count(&self) -> usize {
+        self.physical_references().count()
+    }
+
     /// Provenance path recorded for the reference at `index`, when tracked.
     pub(crate) fn reference_path(&self, index: usize) -> Option<ReferencePathId> {
         self.reference_paths.get(index).copied().flatten()
@@ -238,13 +305,18 @@ impl ExportSymbol {
     pub(crate) fn has_reference_from(
         &self,
         from_file: FileId,
+        import_span: oxc_span::Span,
         path: Option<ReferencePathId>,
+        namespace: super::ExportNamespace,
     ) -> bool {
         self.references
             .iter()
             .enumerate()
             .any(|(index, reference)| {
-                reference.from_file == from_file && self.reference_path(index) == path
+                reference.from_file == from_file
+                    && reference.import_span == import_span
+                    && self.reference_path(index) == path
+                    && reference.namespace == namespace
             })
     }
 
@@ -862,6 +934,7 @@ const _: () = assert!(std::mem::size_of::<ModuleNode>() == 96);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::ExportNamespace;
 
     #[test]
     fn reference_kind_equality() {
@@ -921,6 +994,7 @@ mod tests {
                     .map(|_| SymbolReference {
                         from_file: FileId(0),
                         kind: ReferenceKind::NamedImport,
+                        namespace: ExportNamespace::Value,
                         import_span: oxc_span::Span::default(),
                     })
                     .collect(),
@@ -930,6 +1004,37 @@ mod tests {
             re_exports: Vec::new(),
             flags: 0,
         }
+    }
+
+    fn export_with_reference_files(files: &[u32]) -> ExportSymbol {
+        ExportSymbol {
+            name: ExportName::Named("value".to_string()),
+            is_type_only: false,
+            is_side_effect_used: false,
+            visibility: VisibilityTag::None,
+            expected_unused_reason: None,
+            span: oxc_span::Span::default(),
+            references: files
+                .iter()
+                .map(|file| SymbolReference {
+                    from_file: FileId(*file),
+                    kind: ReferenceKind::NamedImport,
+                    namespace: ExportNamespace::Value,
+                    import_span: oxc_span::Span::default(),
+                })
+                .collect(),
+            reference_paths: Vec::new(),
+            members: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn physical_references_deduplicate_small_and_large_sets() {
+        let small = export_with_reference_files(&[0, 1, 2, 3, 4, 5, 6, 0]);
+        let large = export_with_reference_files(&[0, 1, 2, 3, 4, 5, 6, 7, 0]);
+
+        assert_eq!(small.physical_reference_count(), 7);
+        assert_eq!(large.physical_reference_count(), 8);
     }
 
     #[test]
@@ -1051,6 +1156,7 @@ mod tests {
         let reference = SymbolReference {
             from_file: FileId(42),
             kind: ReferenceKind::NamedImport,
+            namespace: ExportNamespace::Value,
             import_span: oxc_span::Span::new(10, 30),
         };
         assert_eq!(reference.from_file, FileId(42));
@@ -1064,6 +1170,7 @@ mod tests {
         let reference = SymbolReference {
             from_file: FileId(7),
             kind: ReferenceKind::ReExport,
+            namespace: ExportNamespace::Value,
             import_span: oxc_span::Span::new(5, 25),
         };
         let copied = reference;
@@ -1193,11 +1300,13 @@ mod tests {
                 SymbolReference {
                     from_file: FileId(1),
                     kind: ReferenceKind::NamedImport,
+                    namespace: ExportNamespace::Value,
                     import_span: oxc_span::Span::new(0, 10),
                 },
                 SymbolReference {
                     from_file: FileId(2),
                     kind: ReferenceKind::ReExport,
+                    namespace: ExportNamespace::Value,
                     import_span: oxc_span::Span::new(5, 15),
                 },
             ],
@@ -1230,6 +1339,7 @@ mod tests {
                 SymbolReference {
                     from_file: FileId(id),
                     kind: ReferenceKind::NamedImport,
+                    namespace: ExportNamespace::Value,
                     import_span: oxc_span::Span::default(),
                 },
                 None,
@@ -1239,8 +1349,18 @@ mod tests {
         assert!(export.reference_paths.is_empty());
         assert_eq!(export.reference_paths.capacity(), 0);
         assert_eq!(export.reference_path(1), None);
-        assert!(export.has_reference_from(FileId(1), None));
-        assert!(!export.has_reference_from(FileId(9), None));
+        assert!(export.has_reference_from(
+            FileId(1),
+            oxc_span::Span::default(),
+            None,
+            ExportNamespace::Value
+        ));
+        assert!(!export.has_reference_from(
+            FileId(9),
+            oxc_span::Span::default(),
+            None,
+            ExportNamespace::Value
+        ));
     }
 
     #[test]
@@ -1259,6 +1379,7 @@ mod tests {
         let reference = SymbolReference {
             from_file: FileId(0),
             kind: ReferenceKind::NamedImport,
+            namespace: ExportNamespace::Value,
             import_span: oxc_span::Span::default(),
         };
         export.push_reference(reference, None);
@@ -1269,8 +1390,18 @@ mod tests {
         assert_eq!(export.reference_paths, vec![None, Some(tracked), None]);
         assert_eq!(export.reference_path(0), None);
         assert_eq!(export.reference_path(1), Some(tracked));
-        assert!(export.has_reference_from(FileId(0), Some(tracked)));
-        assert!(!export.has_reference_from(FileId(0), Some(ReferencePathId::from_index(7))));
+        assert!(export.has_reference_from(
+            FileId(0),
+            reference.import_span,
+            Some(tracked),
+            ExportNamespace::Value
+        ));
+        assert!(!export.has_reference_from(
+            FileId(0),
+            reference.import_span,
+            Some(ReferencePathId::from_index(7)),
+            ExportNamespace::Value
+        ));
     }
 
     #[test]

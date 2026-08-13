@@ -7,7 +7,9 @@ use fallow_config::{CompiledIgnoreExportRule, ResolvedConfig, Severity};
 use fallow_types::extract::{ExportInfo, ExportName, ModuleInfo};
 
 use crate::discover::FileId;
-use crate::graph::{ExportSymbol, ModuleGraph, ModuleNode};
+use crate::graph::{
+    EffectiveExportResolution, ExportNamespace, ExportSymbol, ModuleGraph, ModuleNode,
+};
 use crate::results::{
     DuplicateExport, DuplicateLocation, ExportUsage, PrivateTypeLeak, ReferenceLocation,
     StaleSuppression, SuppressionOrigin, UnusedExport,
@@ -823,15 +825,15 @@ fn collect_module_private_type_leaks(
     }
 }
 
-/// Add dynamic-import edges that act as re-exports to the existing
-/// `re_export_sources` map. Caller has already populated it from static
-/// `re_exports`. A dynamic import counts as a re-export only when the wrapper
-/// module also exports the same name, mirroring the static `export { X } from`
-/// shape.
+type DynamicReExportSources = FxHashMap<usize, FxHashMap<String, FxHashSet<usize>>>;
+
+/// Record dynamic-import edges that act as named re-exports. A dynamic import
+/// counts only when the wrapper module exports the same name, mirroring a
+/// static `export { X } from` shape without conflating unrelated names.
 fn collect_dynamic_reexport_sources(
     resolved_modules: &[crate::resolve::ResolvedModule],
     graph: &ModuleGraph,
-    re_export_sources: &mut FxHashMap<usize, FxHashSet<usize>>,
+    re_export_sources: &mut DynamicReExportSources,
 ) {
     use crate::extract::ExportName;
     use fallow_types::extract::ImportedName;
@@ -852,16 +854,13 @@ fn collect_dynamic_reexport_sources(
                 continue;
             };
 
-            let matches_export = match &dynamic_import.info.imported_name {
-                ImportedName::Named(name) => wrapper_exports
-                    .iter()
-                    .any(|e| matches!(&e.name, ExportName::Named(n) if n == name)),
-                ImportedName::Default => wrapper_exports
-                    .iter()
-                    .any(|e| matches!(&e.name, ExportName::Default)),
-                ImportedName::Namespace | ImportedName::SideEffect => false,
+            let ImportedName::Named(name) = &dynamic_import.info.imported_name else {
+                continue;
             };
-            if !matches_export {
+            if !wrapper_exports
+                .iter()
+                .any(|export| matches!(&export.name, ExportName::Named(n) if n == name))
+            {
                 continue;
             }
 
@@ -871,6 +870,8 @@ fn collect_dynamic_reexport_sources(
             }
             re_export_sources
                 .entry(wrapper_idx)
+                .or_default()
+                .entry(name.clone())
                 .or_default()
                 .insert(source_idx);
         }
@@ -886,6 +887,22 @@ struct ExportEntry {
     is_type_only: bool,
 }
 
+impl ExportEntry {
+    const fn namespaces(&self) -> &'static [ExportNamespace] {
+        if self.is_type_only {
+            &[ExportNamespace::Type]
+        } else {
+            &[ExportNamespace::Type, ExportNamespace::Value]
+        }
+    }
+
+    fn connects_importer(&self, graph: &ModuleGraph, importer: FileId, export_name: &str) -> bool {
+        self.namespaces().iter().any(|&namespace| {
+            graph.importer_connects_export_origin(importer, self.file_id, export_name, namespace)
+        })
+    }
+}
+
 /// Partition `entries` into connected components where two entries are connected
 /// when they share at least one common importer in `graph`, or one directly
 /// imports the other.
@@ -893,7 +910,11 @@ struct ExportEntry {
 /// Returns index sets into `entries`; each inner vec is one component.
 /// Singleton components (no shared importer with any sibling) are included so
 /// the caller can drop them as unrelated leaf modules.
-fn partition_by_common_importer(entries: &[ExportEntry], graph: &ModuleGraph) -> Vec<Vec<usize>> {
+fn partition_by_common_importer(
+    entries: &[ExportEntry],
+    export_name: &str,
+    graph: &ModuleGraph,
+) -> Vec<Vec<usize>> {
     let n = entries.len();
     let mut union_find = UnionFind::new(n);
 
@@ -906,6 +927,9 @@ fn partition_by_common_importer(entries: &[ExportEntry], graph: &ModuleGraph) ->
             continue;
         }
         for &importer in &graph.reverse_deps[idx] {
+            if !entry.connects_importer(graph, importer, export_name) {
+                continue;
+            }
             importer_to_entries.entry(importer).or_default().push(i);
         }
     }
@@ -934,6 +958,9 @@ fn partition_by_common_importer(entries: &[ExportEntry], graph: &ModuleGraph) ->
             continue;
         }
         for &importer in &graph.reverse_deps[idx] {
+            if !entry.connects_importer(graph, importer, export_name) {
+                continue;
+            }
             if let Some(&j) = entry_index_by_file_id.get(&importer) {
                 union_find.union(i, j);
             }
@@ -1021,7 +1048,7 @@ pub(super) fn find_duplicate_exports_with_plugins(
     plugin_result: Option<&crate::plugins::AggregatedPluginResult>,
     resolved_modules: &[crate::resolve::ResolvedModule],
 ) -> Vec<DuplicateExport> {
-    let re_export_sources = build_re_export_source_map(graph, resolved_modules);
+    let dynamic_re_export_sources = build_dynamic_re_export_source_map(graph, resolved_modules);
     let export_locations =
         collect_duplicate_export_locations(graph, config, suppressions, plugin_result);
 
@@ -1034,7 +1061,7 @@ pub(super) fn find_duplicate_exports_with_plugins(
             evaluate_duplicate_export_group(
                 name,
                 locations,
-                &re_export_sources,
+                &dynamic_re_export_sources,
                 graph,
                 line_offsets_by_file,
             )
@@ -1042,28 +1069,14 @@ pub(super) fn find_duplicate_exports_with_plugins(
         .collect()
 }
 
-/// Map each module index to the set of module indices it re-exports from
-/// (static `export ... from` edges plus dynamically-resolved re-exports). Used
-/// to strip re-export chain members from a duplicate-export group: a module that
-/// re-exports from another group member is not an independent origin.
-fn build_re_export_source_map(
+/// Map each wrapper module and exported name to the dynamic-import modules that
+/// supply it. Static exports are resolved by the graph's canonical effective
+/// export index instead of maintaining a second source map here.
+fn build_dynamic_re_export_source_map(
     graph: &ModuleGraph,
     resolved_modules: &[crate::resolve::ResolvedModule],
-) -> FxHashMap<usize, FxHashSet<usize>> {
-    let mut re_export_sources: FxHashMap<usize, FxHashSet<usize>> = FxHashMap::default();
-    for (idx, module) in graph.modules.iter().enumerate() {
-        debug_assert_eq!(
-            module.file_id.0 as usize, idx,
-            "ModuleGraph::modules FileId-as-index invariant broken"
-        );
-        for re in &module.re_exports {
-            re_export_sources
-                .entry(idx)
-                .or_default()
-                .insert(re.source_file.0 as usize);
-        }
-    }
-
+) -> DynamicReExportSources {
+    let mut re_export_sources = DynamicReExportSources::default();
     collect_dynamic_reexport_sources(resolved_modules, graph, &mut re_export_sources);
     re_export_sources
 }
@@ -1199,7 +1212,7 @@ fn duplicate_export_entry(
 fn evaluate_duplicate_export_group(
     name: String,
     locations: Vec<ExportEntry>,
-    re_export_sources: &FxHashMap<usize, FxHashSet<usize>>,
+    dynamic_re_export_sources: &DynamicReExportSources,
     graph: &ModuleGraph,
     line_offsets_by_file: &LineOffsetsMap<'_>,
 ) -> Option<DuplicateExport> {
@@ -1212,11 +1225,14 @@ fn evaluate_duplicate_export_group(
     let module_indices: FxHashSet<usize> = locations.iter().map(|e| e.module_idx).collect();
     let independent_entries: Vec<ExportEntry> = locations
         .into_iter()
-        .filter(|e| {
-            let sources = re_export_sources.get(&e.module_idx);
-            let has_source_in_set =
-                sources.is_some_and(|s| s.iter().any(|src| module_indices.contains(src)));
-            !has_source_in_set
+        .filter(|entry| {
+            !is_re_export_chain_member(
+                entry,
+                &name,
+                &module_indices,
+                dynamic_re_export_sources,
+                graph,
+            )
         })
         .collect();
 
@@ -1230,7 +1246,7 @@ fn evaluate_duplicate_export_group(
     // module imports) from inflating `value_modules` and defeating the
     // value+type self-suppression check that should apply only to the
     // frontend component.
-    let components = partition_by_common_importer(&independent_entries, graph);
+    let components = partition_by_common_importer(&independent_entries, &name, graph);
 
     let mut surviving_locations: Vec<DuplicateLocation> = Vec::new();
     for component_indices in components {
@@ -1249,6 +1265,31 @@ fn evaluate_duplicate_export_group(
         export_name: name,
         locations: surviving_locations,
     })
+}
+
+fn is_re_export_chain_member(
+    entry: &ExportEntry,
+    export_name: &str,
+    group_modules: &FxHashSet<usize>,
+    dynamic_re_export_sources: &DynamicReExportSources,
+    graph: &ModuleGraph,
+) -> bool {
+    let is_static_re_export = entry.namespaces().iter().any(|&namespace| {
+        matches!(
+            graph.resolve_export(entry.file_id, export_name, namespace),
+            EffectiveExportResolution::Unique(binding)
+                if binding.origin_file() != entry.file_id
+                    && group_modules.contains(&(binding.origin_file().0 as usize))
+        )
+    });
+    if is_static_re_export {
+        return true;
+    }
+
+    dynamic_re_export_sources
+        .get(&entry.module_idx)
+        .and_then(|exports| exports.get(export_name))
+        .is_some_and(|sources| sources.iter().any(|source| group_modules.contains(source)))
 }
 
 /// Resolve one importer-connected component into the duplicate locations it
@@ -1329,7 +1370,7 @@ pub fn collect_export_usages(
             let (line, col) =
                 byte_offset_to_line_col(line_offsets_by_file, module.file_id, export.span.start);
 
-            let reference_locations = export_reference_locations(
+            let (reference_count, reference_locations) = export_reference_locations(
                 export,
                 &file_paths,
                 line_offsets_by_file,
@@ -1341,7 +1382,7 @@ pub fn collect_export_usages(
                 export_name: export.name.to_string(),
                 line,
                 col,
-                reference_count: export.references.len(),
+                reference_count,
                 reference_locations,
             });
         }
@@ -1358,11 +1399,12 @@ fn export_reference_locations(
     file_paths: &FxHashMap<FileId, &std::path::Path>,
     line_offsets_by_file: &LineOffsetsMap<'_>,
     source_cache: &mut FxHashMap<FileId, (String, Vec<u32>)>,
-) -> Vec<ReferenceLocation> {
-    export
-        .references
-        .iter()
+) -> (usize, Vec<ReferenceLocation>) {
+    let mut reference_count = 0;
+    let locations = export
+        .physical_references()
         .filter_map(|r| {
+            reference_count += 1;
             if r.import_span.start == 0 && r.import_span.end == 0 {
                 return None;
             }
@@ -1383,7 +1425,8 @@ fn export_reference_locations(
                 col: ref_col,
             })
         })
-        .collect()
+        .collect();
+    (reference_count, locations)
 }
 
 #[cfg(test)]
@@ -1394,9 +1437,13 @@ fn export_reference_locations(
 mod tests {
     use super::*;
     use crate::discover::{DiscoveredFile, EntryPoint, EntryPointSource, FileId};
-    use crate::extract::{ExportInfo, ExportName, ImportInfo, ImportedName, VisibilityTag};
-    use crate::graph::{ExportSymbol, ModuleGraph, ReExportEdge};
-    use crate::resolve::{ResolveResult, ResolvedImport, ResolvedModule};
+    use crate::extract::{
+        ExportInfo, ExportName, ImportInfo, ImportedName, ReExportInfo, VisibilityTag,
+    };
+    use crate::graph::{
+        ExportNamespace, ExportSymbol, ModuleGraph, ReExportEdge, ReferenceKind, SymbolReference,
+    };
+    use crate::resolve::{ResolveResult, ResolvedImport, ResolvedModule, ResolvedReExport};
     use crate::suppress::Suppression;
     use oxc_span::Span;
     use std::path::PathBuf;
@@ -1547,6 +1594,78 @@ mod tests {
         ModuleGraph::build(&resolved_modules, &entry_points, &files)
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "test file counts are trivially small"
+    )]
+    fn build_duplicate_graph(
+        file_specs: &[(&str, bool)],
+        exports: &[(usize, &str, bool)],
+        imports: &[(usize, usize, &str, bool)],
+    ) -> ModuleGraph {
+        let files: Vec<DiscoveredFile> = file_specs
+            .iter()
+            .enumerate()
+            .map(|(index, (path, _))| DiscoveredFile {
+                id: FileId(index as u32),
+                path: PathBuf::from(path),
+                size_bytes: 0,
+            })
+            .collect();
+        let entry_points: Vec<EntryPoint> = file_specs
+            .iter()
+            .filter(|(_, is_entry)| *is_entry)
+            .map(|(path, _)| EntryPoint {
+                path: PathBuf::from(path),
+                source: EntryPointSource::ManualEntry,
+            })
+            .collect();
+        let mut resolved_modules: Vec<ResolvedModule> = files
+            .iter()
+            .map(|file| ResolvedModule {
+                file_id: file.id,
+                path: file.path.clone(),
+                ..Default::default()
+            })
+            .collect();
+
+        let mut exports_by_module = vec![Vec::new(); resolved_modules.len()];
+        for &(module, name, is_type_only) in exports {
+            exports_by_module[module].push(ExportInfo {
+                name: ExportName::Named(name.to_string()),
+                local_name: Some(name.to_string()),
+                is_type_only,
+                visibility: VisibilityTag::None,
+                expected_unused_reason: None,
+                span: Span::new(10, 20),
+                members: vec![],
+                is_side_effect_used: false,
+                super_class: None,
+            });
+        }
+        for (module, module_exports) in resolved_modules.iter_mut().zip(exports_by_module) {
+            module.exports = module_exports.into();
+        }
+        for &(importer, source, name, is_type_only) in imports {
+            resolved_modules[importer]
+                .resolved_imports
+                .push(ResolvedImport {
+                    info: ImportInfo {
+                        source: format!("./{source}"),
+                        imported_name: ImportedName::Named(name.to_string()),
+                        local_name: format!("{name}{source}"),
+                        is_type_only,
+                        from_style: false,
+                        span: Span::new(1, 4),
+                        source_span: Span::default(),
+                    },
+                    target: ResolveResult::InternalModule(FileId(source as u32)),
+                });
+        }
+
+        ModuleGraph::build(&resolved_modules, &entry_points, &files)
+    }
+
     #[test]
     fn duplicate_exports_empty_graph() {
         let graph = build_graph(&[]);
@@ -1571,17 +1690,15 @@ mod tests {
 
     #[test]
     fn duplicate_exports_detects_same_name_in_two_modules() {
-        let mut graph = build_graph(&[
-            ("/src/entry.ts", true),
-            ("/src/a.ts", false),
-            ("/src/b.ts", false),
-        ]);
-        graph.modules[1].set_reachable(true);
-        graph.modules[1].exports = vec![make_export("helper", 10, 20)];
-        graph.modules[2].set_reachable(true);
-        graph.modules[2].exports = vec![make_export("helper", 10, 20)];
-        graph.reverse_deps[1] = vec![FileId(0)];
-        graph.reverse_deps[2] = vec![FileId(0)];
+        let graph = build_duplicate_graph(
+            &[
+                ("/src/entry.ts", true),
+                ("/src/a.ts", false),
+                ("/src/b.ts", false),
+            ],
+            &[(1, "helper", false), (2, "helper", false)],
+            &[(0, 1, "helper", false), (0, 2, "helper", false)],
+        );
         let suppressions = SuppressionContext::empty();
         let config = test_config();
         let result =
@@ -1703,6 +1820,193 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_exports_follow_type_only_star_routes_for_value_backed_exports() {
+        let paths = ["/src/entry.ts", "/src/barrel.ts", "/src/a.ts", "/src/b.ts"];
+        let files: Vec<DiscoveredFile> = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| DiscoveredFile {
+                id: FileId(index as u32),
+                path: PathBuf::from(path),
+                size_bytes: 0,
+            })
+            .collect();
+        let entry_points = vec![EntryPoint {
+            path: files[0].path.clone(),
+            source: EntryPointSource::ManualEntry,
+        }];
+        let class_export = |file_id: u32| ResolvedModule {
+            file_id: FileId(file_id),
+            path: files[file_id as usize].path.clone(),
+            exports: vec![ExportInfo {
+                name: ExportName::Named("Foo".to_string()),
+                local_name: Some("Foo".to_string()),
+                is_type_only: false,
+                is_side_effect_used: false,
+                visibility: VisibilityTag::None,
+                expected_unused_reason: None,
+                span: Span::new(10, 20),
+                members: vec![],
+                super_class: None,
+            }]
+            .into(),
+            ..Default::default()
+        };
+        let type_star = |source: &str, target: u32| ResolvedReExport {
+            info: ReExportInfo {
+                source: source.to_string(),
+                imported_name: "*".to_string(),
+                exported_name: "*".to_string(),
+                is_type_only: true,
+                span: Span::new(10, 20),
+                statement_span: Span::new(10, 30),
+                source_span: Span::new(24, 29),
+            },
+            target: ResolveResult::InternalModule(FileId(target)),
+        };
+        let resolved_modules = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: files[0].path.clone(),
+                resolved_imports: vec![ResolvedImport {
+                    info: ImportInfo {
+                        source: "./barrel".to_string(),
+                        imported_name: ImportedName::Named("Foo".to_string()),
+                        local_name: "Foo".to_string(),
+                        is_type_only: true,
+                        from_style: false,
+                        span: Span::new(0, 10),
+                        source_span: Span::new(0, 1),
+                    },
+                    target: ResolveResult::InternalModule(FileId(1)),
+                }],
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(1),
+                path: files[1].path.clone(),
+                re_exports: vec![type_star("./a", 2), type_star("./b", 3)],
+                ..Default::default()
+            },
+            class_export(2),
+            class_export(3),
+        ];
+        let graph = ModuleGraph::build(&resolved_modules, &entry_points, &files);
+
+        let result = find_duplicate_exports(
+            &graph,
+            &test_config(),
+            &SuppressionContext::empty(),
+            &FxHashMap::default(),
+            &resolved_modules,
+        );
+
+        assert_eq!(
+            result.len(),
+            1,
+            "ambiguous type-only stars must retain both class exports"
+        );
+        assert_eq!(result[0].export_name, "Foo");
+        assert_eq!(result[0].locations.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_exports_preserves_local_export_with_unrelated_re_export() {
+        let files = vec![
+            DiscoveredFile {
+                id: FileId(0),
+                path: PathBuf::from("/src/entry.ts"),
+                size_bytes: 0,
+            },
+            DiscoveredFile {
+                id: FileId(1),
+                path: PathBuf::from("/src/source.ts"),
+                size_bytes: 0,
+            },
+            DiscoveredFile {
+                id: FileId(2),
+                path: PathBuf::from("/src/barrel.ts"),
+                size_bytes: 0,
+            },
+        ];
+        let entry_points = vec![EntryPoint {
+            path: files[0].path.clone(),
+            source: EntryPointSource::ManualEntry,
+        }];
+        let imported_foo = |target: FileId| ResolvedImport {
+            info: ImportInfo {
+                source: format!("./{}", target.0),
+                imported_name: ImportedName::Named("Foo".to_string()),
+                local_name: format!("Foo{}", target.0),
+                is_type_only: false,
+                from_style: false,
+                span: Span::new(1, 4),
+                source_span: Span::default(),
+            },
+            target: ResolveResult::InternalModule(target),
+        };
+        let export = |name: &str, span: Span| ExportInfo {
+            name: ExportName::Named(name.to_string()),
+            local_name: Some(name.to_string()),
+            is_type_only: false,
+            visibility: VisibilityTag::None,
+            expected_unused_reason: None,
+            span,
+            members: vec![],
+            is_side_effect_used: false,
+            super_class: None,
+        };
+        let resolved_modules = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: files[0].path.clone(),
+                resolved_imports: vec![imported_foo(FileId(1)), imported_foo(FileId(2))],
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(1),
+                path: files[1].path.clone(),
+                exports: vec![
+                    export("Foo", Span::new(10, 13)),
+                    export("Bar", Span::new(20, 23)),
+                ]
+                .into(),
+                ..Default::default()
+            },
+            ResolvedModule {
+                file_id: FileId(2),
+                path: files[2].path.clone(),
+                exports: vec![export("Foo", Span::new(30, 33))].into(),
+                re_exports: vec![ResolvedReExport {
+                    info: ReExportInfo {
+                        source: "./source".to_string(),
+                        imported_name: "Bar".to_string(),
+                        exported_name: "Bar".to_string(),
+                        is_type_only: false,
+                        span: Span::new(40, 43),
+                        statement_span: Span::new(35, 44),
+                        source_span: Span::new(35, 39),
+                    },
+                    target: ResolveResult::InternalModule(FileId(1)),
+                }],
+                ..Default::default()
+            },
+        ];
+        let graph = ModuleGraph::build(&resolved_modules, &entry_points, &files);
+        let result = find_duplicate_exports(
+            &graph,
+            &test_config(),
+            &SuppressionContext::empty(),
+            &FxHashMap::default(),
+            &resolved_modules,
+        );
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].export_name, "Foo");
+        assert_eq!(result[0].locations.len(), 2);
+    }
+
+    #[test]
     fn duplicate_exports_suppressed_file_wide() {
         let mut graph = build_graph(&[
             ("/src/entry.ts", true),
@@ -1727,19 +2031,24 @@ mod tests {
 
     #[test]
     fn duplicate_exports_three_modules_same_name() {
-        let mut graph = build_graph(&[
-            ("/src/entry.ts", true),
-            ("/src/a.ts", false),
-            ("/src/b.ts", false),
-            ("/src/c.ts", false),
-        ]);
-        for i in 1..=3 {
-            graph.modules[i].set_reachable(true);
-            graph.modules[i].exports = vec![make_export("sharedFn", 10, 20)];
-        }
-        graph.reverse_deps[1] = vec![FileId(0)];
-        graph.reverse_deps[2] = vec![FileId(0)];
-        graph.reverse_deps[3] = vec![FileId(0)];
+        let graph = build_duplicate_graph(
+            &[
+                ("/src/entry.ts", true),
+                ("/src/a.ts", false),
+                ("/src/b.ts", false),
+                ("/src/c.ts", false),
+            ],
+            &[
+                (1, "sharedFn", false),
+                (2, "sharedFn", false),
+                (3, "sharedFn", false),
+            ],
+            &[
+                (0, 1, "sharedFn", false),
+                (0, 2, "sharedFn", false),
+                (0, 3, "sharedFn", false),
+            ],
+        );
         let suppressions = SuppressionContext::empty();
         let config = test_config();
         let result =
@@ -1772,16 +2081,15 @@ mod tests {
 
     #[test]
     fn duplicate_exports_direct_import_still_flagged() {
-        let mut graph = build_graph(&[
-            ("/src/entry.ts", true),
-            ("/src/a.ts", false),
-            ("/src/b.ts", false),
-        ]);
-        graph.modules[1].set_reachable(true);
-        graph.modules[1].exports = vec![make_export("helper", 10, 20)];
-        graph.modules[2].set_reachable(true);
-        graph.modules[2].exports = vec![make_export("helper", 10, 20)];
-        graph.reverse_deps[2] = vec![FileId(1)];
+        let graph = build_duplicate_graph(
+            &[
+                ("/src/entry.ts", true),
+                ("/src/a.ts", false),
+                ("/src/b.ts", false),
+            ],
+            &[(1, "helper", false), (2, "helper", false)],
+            &[(0, 1, "helper", false), (1, 2, "helper", false)],
+        );
         let suppressions = SuppressionContext::empty();
         let config = test_config();
         let result =
@@ -1855,17 +2163,15 @@ mod tests {
 
     #[test]
     fn duplicate_exports_same_namespace_still_flagged() {
-        let mut graph = build_graph(&[
-            ("/src/entry.ts", true),
-            ("/src/a.ts", false),
-            ("/src/b.ts", false),
-        ]);
-        graph.modules[1].set_reachable(true);
-        graph.modules[1].exports = vec![make_export("helper", 10, 20)];
-        graph.modules[2].set_reachable(true);
-        graph.modules[2].exports = vec![make_export("helper", 10, 20)];
-        graph.reverse_deps[1] = vec![FileId(0)];
-        graph.reverse_deps[2] = vec![FileId(0)];
+        let graph = build_duplicate_graph(
+            &[
+                ("/src/entry.ts", true),
+                ("/src/a.ts", false),
+                ("/src/b.ts", false),
+            ],
+            &[(1, "helper", false), (2, "helper", false)],
+            &[(0, 1, "helper", false), (0, 2, "helper", false)],
+        );
         let suppressions = SuppressionContext::empty();
         let config = test_config();
         let result =
@@ -1941,30 +2247,27 @@ mod tests {
     fn duplicate_exports_genuine_value_duplicate_still_flagged_despite_unrelated_backend() {
         // Files: 0=entry, 1=backend Label (no shared importer), 2=frontend-a Label,
         // 3=frontend-b Label, 4=shared consumer of frontend-a and frontend-b
-        let mut graph = build_graph(&[
-            ("/src/entry.ts", true),
-            ("/src/backend/label.ts", false),
-            ("/src/frontend/a.ts", false),
-            ("/src/frontend/b.ts", false),
-            ("/src/frontend/consumer.ts", false),
-        ]);
-        graph.modules[1].set_reachable(true);
-        graph.modules[2].set_reachable(true);
-        graph.modules[3].set_reachable(true);
-        graph.modules[4].set_reachable(true);
-
-        // All three export a value `Label`.
-        graph.modules[1].exports = vec![make_export("Label", 10, 20)];
-        graph.modules[2].exports = vec![make_export("Label", 10, 20)];
-        graph.modules[3].exports = vec![make_export("Label", 10, 20)];
-
-        // Backend is only imported by the entry (no connection to frontend).
-        graph.reverse_deps[1] = vec![FileId(0)];
-        // Frontend consumer imports from both frontend-a and frontend-b.
-        graph.reverse_deps[2] = vec![FileId(4)];
-        graph.reverse_deps[3] = vec![FileId(4)];
-        // Frontend consumer is imported by entry.
-        graph.reverse_deps[4] = vec![FileId(0)];
+        let graph = build_duplicate_graph(
+            &[
+                ("/src/entry.ts", true),
+                ("/src/backend/label.ts", false),
+                ("/src/frontend/a.ts", false),
+                ("/src/frontend/b.ts", false),
+                ("/src/frontend/consumer.ts", false),
+            ],
+            &[
+                (1, "Label", false),
+                (2, "Label", false),
+                (3, "Label", false),
+                (4, "consumer", false),
+            ],
+            &[
+                (0, 1, "Label", false),
+                (0, 4, "consumer", false),
+                (4, 2, "Label", false),
+                (4, 3, "Label", false),
+            ],
+        );
 
         let suppressions = SuppressionContext::empty();
         let config = test_config();
@@ -2116,21 +2419,16 @@ mod tests {
     fn dynamic_import_named_without_matching_export_still_flagged() {
         use crate::extract::ImportedName;
 
-        let mut graph = build_graph(&[
-            ("/src/entry.ts", true),
-            ("/src/Foo.tsx", false),
-            ("/src/other-foo.tsx", false),
-            ("/src/wrapper.tsx", false),
-        ]);
-        graph.modules[1].set_reachable(true);
-        graph.modules[1].exports = vec![make_export("Foo", 10, 30)];
-        graph.modules[2].set_reachable(true);
-        graph.modules[2].exports = vec![make_export("Foo", 10, 30)];
-        graph.modules[3].set_reachable(true);
-        graph.modules[3].exports = vec![make_export("Bar", 10, 30)];
-        graph.reverse_deps[1] = vec![FileId(0)];
-        graph.reverse_deps[2] = vec![FileId(0)];
-        graph.reverse_deps[3] = vec![FileId(0)];
+        let graph = build_duplicate_graph(
+            &[
+                ("/src/entry.ts", true),
+                ("/src/Foo.tsx", false),
+                ("/src/other-foo.tsx", false),
+                ("/src/wrapper.tsx", false),
+            ],
+            &[(1, "Foo", false), (2, "Foo", false), (3, "Bar", false)],
+            &[(0, 1, "Foo", false), (0, 2, "Foo", false)],
+        );
 
         let mut wrapper = make_resolved_module(3, "/src/wrapper.tsx");
         wrapper.resolved_dynamic_imports =
@@ -2162,17 +2460,15 @@ mod tests {
     fn dynamic_import_default_without_default_export_still_flagged() {
         use crate::extract::ImportedName;
 
-        let mut graph = build_graph(&[
-            ("/src/entry.ts", true),
-            ("/src/source.ts", false),
-            ("/src/wrapper.ts", false),
-        ]);
-        graph.modules[1].set_reachable(true);
-        graph.modules[1].exports = vec![make_export("helper", 10, 20)];
-        graph.modules[2].set_reachable(true);
-        graph.modules[2].exports = vec![make_export("helper", 10, 20)];
-        graph.reverse_deps[1] = vec![FileId(0)];
-        graph.reverse_deps[2] = vec![FileId(0)];
+        let graph = build_duplicate_graph(
+            &[
+                ("/src/entry.ts", true),
+                ("/src/source.ts", false),
+                ("/src/wrapper.ts", false),
+            ],
+            &[(1, "helper", false), (2, "helper", false)],
+            &[(0, 1, "helper", false), (0, 2, "helper", false)],
+        );
 
         let mut wrapper = make_resolved_module(2, "/src/wrapper.ts");
         wrapper.resolved_dynamic_imports = vec![dynamic_import_to(1, ImportedName::Default)];
@@ -2197,17 +2493,15 @@ mod tests {
 
     #[test]
     fn duplicate_without_dynamic_link_still_flagged() {
-        let mut graph = build_graph(&[
-            ("/src/entry.ts", true),
-            ("/src/a.ts", false),
-            ("/src/b.ts", false),
-        ]);
-        graph.modules[1].set_reachable(true);
-        graph.modules[1].exports = vec![make_export("helper", 10, 20)];
-        graph.modules[2].set_reachable(true);
-        graph.modules[2].exports = vec![make_export("helper", 10, 20)];
-        graph.reverse_deps[1] = vec![FileId(0)];
-        graph.reverse_deps[2] = vec![FileId(0)];
+        let graph = build_duplicate_graph(
+            &[
+                ("/src/entry.ts", true),
+                ("/src/a.ts", false),
+                ("/src/b.ts", false),
+            ],
+            &[(1, "helper", false), (2, "helper", false)],
+            &[(0, 1, "helper", false), (0, 2, "helper", false)],
+        );
 
         let resolved_modules = vec![
             make_resolved_module(1, "/src/a.ts"),
@@ -2230,17 +2524,15 @@ mod tests {
     fn dynamic_import_named_mismatched_with_wrapper_export_still_flagged() {
         use crate::extract::ImportedName;
 
-        let mut graph = build_graph(&[
-            ("/src/entry.ts", true),
-            ("/src/source.ts", false),
-            ("/src/wrapper.ts", false),
-        ]);
-        graph.modules[1].set_reachable(true);
-        graph.modules[1].exports = vec![make_export("Foo", 10, 30)];
-        graph.modules[2].set_reachable(true);
-        graph.modules[2].exports = vec![make_export("Foo", 10, 30)];
-        graph.reverse_deps[1] = vec![FileId(0)];
-        graph.reverse_deps[2] = vec![FileId(0)];
+        let graph = build_duplicate_graph(
+            &[
+                ("/src/entry.ts", true),
+                ("/src/source.ts", false),
+                ("/src/wrapper.ts", false),
+            ],
+            &[(1, "Foo", false), (2, "Foo", false)],
+            &[(0, 1, "Foo", false), (0, 2, "Foo", false)],
+        );
 
         let mut wrapper = make_resolved_module(2, "/src/wrapper.ts");
         wrapper.resolved_dynamic_imports =
@@ -2295,17 +2587,25 @@ mod tests {
 
     #[test]
     fn duplicate_exports_skipped_when_ignore_exports_lists_specific_names() {
-        let mut graph = build_graph(&[
-            ("/src/entry.ts", true),
-            ("/src/ui/dialog/index.ts", false),
-            ("/src/ui/card/index.ts", false),
-        ]);
-        graph.modules[1].set_reachable(true);
-        graph.modules[1].exports = vec![make_export("Root", 10, 30), make_export("Helper", 40, 60)];
-        graph.modules[2].set_reachable(true);
-        graph.modules[2].exports = vec![make_export("Root", 10, 30), make_export("Helper", 40, 60)];
-        graph.reverse_deps[1] = vec![FileId(0)];
-        graph.reverse_deps[2] = vec![FileId(0)];
+        let graph = build_duplicate_graph(
+            &[
+                ("/src/entry.ts", true),
+                ("/src/ui/dialog/index.ts", false),
+                ("/src/ui/card/index.ts", false),
+            ],
+            &[
+                (1, "Root", false),
+                (1, "Helper", false),
+                (2, "Root", false),
+                (2, "Helper", false),
+            ],
+            &[
+                (0, 1, "Root", false),
+                (0, 1, "Helper", false),
+                (0, 2, "Root", false),
+                (0, 2, "Helper", false),
+            ],
+        );
 
         let suppressions = SuppressionContext::empty();
         let config = test_config_with_ignore_exports(vec![fallow_config::IgnoreExportRule {
@@ -3047,6 +3347,26 @@ mod tests {
     }
 
     #[test]
+    fn collect_usages_collapses_namespaces_at_one_physical_site() {
+        let mut graph = build_graph(&[("/src/utils.ts", true), ("/src/app.ts", false)]);
+        let mut export = make_export("helper", 10, 20);
+        export.references = [ExportNamespace::Type, ExportNamespace::Value]
+            .into_iter()
+            .map(|namespace| SymbolReference {
+                from_file: FileId(1),
+                kind: ReferenceKind::NamedImport,
+                namespace,
+                import_span: Span::new(0, 10),
+            })
+            .collect();
+        graph.modules[0].exports = vec![export];
+
+        let result = collect_export_usages(&graph, &FxHashMap::default());
+        assert_eq!(result[0].reference_count, 1);
+        assert_eq!(result[0].reference_locations.len(), 1);
+    }
+
+    #[test]
     fn collect_usages_zero_references_still_reported() {
         let mut graph = build_graph(&[("/src/utils.ts", true)]);
         graph.modules[0].exports = vec![make_export("unused", 10, 20)];
@@ -3298,7 +3618,11 @@ mod tests {
     /// original O(n^2) `entries.iter().position(...)` linear scan, so the
     /// O(1) `file_id -> first index` map in `partition_by_common_importer`
     /// (issue #1843 follow-up) can be proven to produce identical grouping.
-    fn reference_partition(entries: &[ExportEntry], graph: &ModuleGraph) -> Vec<Vec<usize>> {
+    fn reference_partition(
+        entries: &[ExportEntry],
+        export_name: &str,
+        graph: &ModuleGraph,
+    ) -> Vec<Vec<usize>> {
         let mut union_find = UnionFind::new(entries.len());
 
         let mut importer_to_entries: FxHashMap<FileId, Vec<usize>> = FxHashMap::default();
@@ -3308,6 +3632,9 @@ mod tests {
                 continue;
             }
             for &importer in &graph.reverse_deps[idx] {
+                if !entry.connects_importer(graph, importer, export_name) {
+                    continue;
+                }
                 importer_to_entries.entry(importer).or_default().push(i);
             }
         }
@@ -3326,6 +3653,9 @@ mod tests {
                 continue;
             }
             for &importer in &graph.reverse_deps[idx] {
+                if !entry.connects_importer(graph, importer, export_name) {
+                    continue;
+                }
                 if entry_file_ids.contains(&importer)
                     && let Some(j) = entries.iter().position(|e| e.file_id == importer)
                 {
@@ -3347,17 +3677,39 @@ mod tests {
 
     #[test]
     fn partition_direct_import_index_matches_position_scan() {
-        // Four real files (FileIds 0..=3), all also duplicate-export entry files.
-        let mut graph = build_graph(&[
-            ("f0.ts", false),
-            ("f1.ts", false),
-            ("f2.ts", false),
-            ("f3.ts", false),
-        ]);
-
-        // file0 imported by file1 and file3; file2 imported by file1.
-        graph.reverse_deps[0] = vec![FileId(1), FileId(3)];
-        graph.reverse_deps[2] = vec![FileId(1)];
+        let files: Vec<_> = (0..4)
+            .map(|file_id| DiscoveredFile {
+                id: FileId(file_id),
+                path: PathBuf::from(format!("f{file_id}.ts")),
+                size_bytes: 0,
+            })
+            .collect();
+        let named_import = |target: FileId| ResolvedImport {
+            info: ImportInfo {
+                source: format!("./f{}", target.0),
+                imported_name: ImportedName::Named("shared".to_string()),
+                local_name: "shared".to_string(),
+                is_type_only: false,
+                from_style: false,
+                span: Span::default(),
+                source_span: Span::default(),
+            },
+            target: ResolveResult::InternalModule(target),
+        };
+        let resolved_modules: Vec<_> = files
+            .iter()
+            .map(|file| ResolvedModule {
+                file_id: file.id,
+                path: file.path.clone(),
+                resolved_imports: match file.id.0 {
+                    1 => vec![named_import(FileId(0)), named_import(FileId(2))],
+                    3 => vec![named_import(FileId(0))],
+                    _ => Vec::new(),
+                },
+                ..Default::default()
+            })
+            .collect();
+        let graph = ModuleGraph::build(&resolved_modules, &[], &files);
 
         // Five entries with a DUPLICATE file_id (indices 1 and 2 both in file1),
         // exercising the first-index-wins semantics the map must preserve.
@@ -3369,8 +3721,8 @@ mod tests {
             make_export_entry(4, 3),
         ];
 
-        let actual = normalize_components(partition_by_common_importer(&entries, &graph));
-        let reference = normalize_components(reference_partition(&entries, &graph));
+        let actual = normalize_components(partition_by_common_importer(&entries, "shared", &graph));
+        let reference = normalize_components(reference_partition(&entries, "shared", &graph));
         assert_eq!(
             actual, reference,
             "map-based partition must match the position()-scan reference"

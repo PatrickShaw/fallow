@@ -80,7 +80,9 @@ impl<'a> Visit<'a> for SignatureTypeCollector {
 pub(super) struct StructuralParamMemberCollector {
     target_params: FxHashSet<String>,
     shadowed_stack: Vec<FxHashSet<String>>,
+    alias_stack: Vec<FxHashMap<String, (String, String)>>,
     pub(super) members: FxHashMap<String, FxHashSet<String>>,
+    pub(super) property_members: FxHashMap<String, FxHashSet<(String, String)>>,
 }
 
 impl StructuralParamMemberCollector {
@@ -88,51 +90,115 @@ impl StructuralParamMemberCollector {
         Self {
             target_params,
             shadowed_stack: Vec::new(),
+            alias_stack: Vec::new(),
             members: FxHashMap::default(),
+            property_members: FxHashMap::default(),
         }
     }
 
-    fn is_shadowed(&self, name: &str) -> bool {
-        self.shadowed_stack.iter().any(|scope| scope.contains(name))
+    pub(super) fn collect_function_body(&mut self, body: &FunctionBody<'_>) {
+        self.shadowed_stack.push(FxHashSet::default());
+        self.alias_stack.push(FxHashMap::default());
+        self.visit_function_body(body);
+        self.alias_stack.pop();
+        self.shadowed_stack.pop();
+    }
+
+    fn tracks_receiver_name(&self, name: &str) -> bool {
+        self.target_params.contains(name)
+            || self
+                .alias_stack
+                .iter()
+                .any(|aliases| aliases.contains_key(name))
     }
 
     fn collect_shadowed_params(&self, params: &FormalParameters<'_>) -> FxHashSet<String> {
-        let mut shadowed = FxHashSet::default();
-        for param in &params.items {
-            if let BindingPattern::BindingIdentifier(id) = &param.pattern
-                && self.target_params.contains(id.name.as_str())
-            {
-                shadowed.insert(id.name.to_string());
-            }
-        }
-        shadowed
+        params
+            .items
+            .iter()
+            .flat_map(|param| param.pattern.get_binding_identifiers())
+            .filter(|id| self.tracks_receiver_name(id.name.as_str()))
+            .map(|id| id.name.to_string())
+            .collect()
     }
 
     fn record_shadowed_bindings<'a>(
         &mut self,
         bindings: impl Iterator<Item = &'a BindingIdentifier<'a>>,
     ) {
-        let Some(scope) = self.shadowed_stack.last_mut() else {
-            return;
-        };
         for binding in bindings {
-            if self.target_params.contains(binding.name.as_str()) {
+            if self.tracks_receiver_name(binding.name.as_str())
+                && let Some(scope) = self.shadowed_stack.last_mut()
+            {
                 scope.insert(binding.name.to_string());
             }
         }
+    }
+
+    fn resolve_receiver_path(&self, object: &Expression<'_>) -> Option<(String, String)> {
+        let object_path = static_member_object_name(object)?;
+        let (root, suffix) = object_path
+            .split_once('.')
+            .map_or((object_path.as_str(), ""), |(root, suffix)| (root, suffix));
+        for (aliases, shadowed) in self.alias_stack.iter().zip(&self.shadowed_stack).rev() {
+            if let Some((param, alias_path)) = aliases.get(root) {
+                let path = match (alias_path.is_empty(), suffix.is_empty()) {
+                    (true, _) => suffix.to_string(),
+                    (_, true) => alias_path.clone(),
+                    (false, false) => format!("{alias_path}.{suffix}"),
+                };
+                return Some((param.clone(), path));
+            }
+            if shadowed.contains(root) {
+                return None;
+            }
+        }
+        self.target_params
+            .contains(root)
+            .then(|| (root.to_string(), suffix.to_string()))
+    }
+
+    fn destructured_receiver_aliases(
+        &self,
+        declarator: &VariableDeclarator<'_>,
+    ) -> Vec<(String, (String, String))> {
+        let BindingPattern::ObjectPattern(pattern) = &declarator.id else {
+            return Vec::new();
+        };
+        let Some(init) = declarator.init.as_ref() else {
+            return Vec::new();
+        };
+        let Some((param, base_path)) = self.resolve_receiver_path(init) else {
+            return Vec::new();
+        };
+        extract_object_pattern_bindings(pattern)
+            .into_iter()
+            .map(|(local, property_path)| {
+                let path = if base_path.is_empty() {
+                    property_path
+                } else {
+                    format!("{base_path}.{property_path}")
+                };
+                (local, (param.clone(), path))
+            })
+            .collect()
     }
 }
 
 impl<'a> Visit<'a> for StructuralParamMemberCollector {
     fn visit_static_member_expression(&mut self, expr: &StaticMemberExpression<'a>) {
-        if let Expression::Identifier(object) = &expr.object
-            && self.target_params.contains(object.name.as_str())
-            && !self.is_shadowed(object.name.as_str())
-        {
-            self.members
-                .entry(object.name.to_string())
-                .or_default()
-                .insert(expr.property.name.to_string());
+        if let Some((param, property_path)) = self.resolve_receiver_path(&expr.object) {
+            if property_path.is_empty() {
+                self.members
+                    .entry(param)
+                    .or_default()
+                    .insert(expr.property.name.to_string());
+            } else {
+                self.property_members
+                    .entry(param)
+                    .or_default()
+                    .insert((property_path, expr.property.name.to_string()));
+            }
         }
         walk::walk_static_member_expression(self, expr);
     }
@@ -140,24 +206,35 @@ impl<'a> Visit<'a> for StructuralParamMemberCollector {
     fn visit_function(&mut self, func: &Function<'a>, flags: ScopeFlags) {
         let shadowed = self.collect_shadowed_params(&func.params);
         self.shadowed_stack.push(shadowed);
+        self.alias_stack.push(FxHashMap::default());
         walk::walk_function(self, func, flags);
+        self.alias_stack.pop();
         self.shadowed_stack.pop();
     }
 
     fn visit_arrow_function_expression(&mut self, expr: &ArrowFunctionExpression<'a>) {
         let shadowed = self.collect_shadowed_params(&expr.params);
         self.shadowed_stack.push(shadowed);
+        self.alias_stack.push(FxHashMap::default());
         walk::walk_arrow_function_expression(self, expr);
+        self.alias_stack.pop();
         self.shadowed_stack.pop();
     }
 
     fn visit_block_statement(&mut self, stmt: &BlockStatement<'a>) {
         self.shadowed_stack.push(FxHashSet::default());
+        self.alias_stack.push(FxHashMap::default());
         walk::walk_block_statement(self, stmt);
+        self.alias_stack.pop();
         self.shadowed_stack.pop();
     }
 
     fn visit_variable_declaration(&mut self, decl: &VariableDeclaration<'a>) {
+        let aliases = decl
+            .declarations
+            .iter()
+            .flat_map(|declarator| self.destructured_receiver_aliases(declarator))
+            .collect::<Vec<_>>();
         if matches!(
             decl.kind,
             VariableDeclarationKind::Const | VariableDeclarationKind::Let
@@ -169,6 +246,9 @@ impl<'a> Visit<'a> for StructuralParamMemberCollector {
             );
         }
         walk::walk_variable_declaration(self, decl);
+        if let Some(scope) = self.alias_stack.last_mut() {
+            scope.extend(aliases);
+        }
     }
 }
 

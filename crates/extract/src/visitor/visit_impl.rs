@@ -10,8 +10,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::PathBuf;
 
 use crate::{
-    DynamicImportInfo, DynamicImportPattern, ExportInfo, ExportName, ImportInfo, ImportedName,
-    MemberAccess, ModuleLoadMechanism, ReExportInfo, RequireCallInfo, VisibilityTag,
+    ComputedEnumKeyUseFact, DynamicImportInfo, DynamicImportPattern, ExportInfo, ExportName,
+    ImportInfo, ImportedName, MemberAccess, ModuleLoadMechanism, ReExportInfo, RequireCallInfo,
+    RequiredTypeMemberFact, SemanticFact, VisibilityTag,
 };
 use fallow_types::extract::{
     AngularComponentSelector, CalleeUse, ClassHeritageInfo, DiFramework, DiKeySite, DiRole,
@@ -28,10 +29,11 @@ use super::helpers::{
     extract_class_type_parameter_names, extract_concat_parts, extract_custom_element_tag_reference,
     extract_custom_elements_define, extract_implemented_interface_names,
     extract_nested_type_bindings, extract_query_list_element_type, extract_super_class_name,
-    extract_super_class_type_args, extract_type_annotation_name, has_angular_class_decorator,
-    has_angular_plural_query_decorator, infer_array_binding_element_type, is_meta_url_arg,
-    lit_custom_element_decorator, lit_custom_element_tag, regex_pattern_to_suffix,
-    return_type_element_name, ts_import_type_qualifier_root,
+    extract_super_class_type_args, extract_type_annotation_name, extract_type_reference_name,
+    has_angular_class_decorator, has_angular_plural_query_decorator,
+    infer_array_binding_element_type, is_meta_url_arg, lit_custom_element_decorator,
+    lit_custom_element_tag, regex_pattern_to_suffix, return_type_element_name,
+    ts_import_type_qualifier_root,
 };
 use super::{
     BindingTarget, ModuleInfoExtractor, PendingLocalExportSpecifier, ROUTE_LOADER_DATA_OBJECT,
@@ -765,6 +767,7 @@ impl ModuleInfoExtractor {
             Declaration::TSEnumDeclaration(enumd) => {
                 self.record_local_declaration_name(&enumd.id.name);
                 self.record_local_type_declaration(&enumd.id.name, enumd.id.span);
+                self.record_string_enum_member_values(enumd);
             }
             Declaration::TSModuleDeclaration(module) => {
                 if let TSModuleDeclarationName::Identifier(id) = &module.id {
@@ -841,11 +844,19 @@ impl ModuleInfoExtractor {
             self.record_path_relative_binding(id.name.as_str(), None);
             let refs = Self::collect_function_signature_refs(function);
             self.record_local_signature_refs(&id.name, refs);
+            let type_parameter_scope_pushed = function
+                .type_parameters
+                .as_deref()
+                .is_some_and(|params| self.push_function_type_parameter_scope(params));
             self.record_local_structural_function(
                 id.name.as_str(),
                 &function.params,
                 function.body.as_deref(),
+                None,
             );
+            if type_parameter_scope_pushed {
+                self.pop_function_type_alias_scope();
+            }
             self.record_factory_return_function(
                 id.name.as_str(),
                 FactoryReturnFunctionInput {
@@ -887,6 +898,7 @@ impl ModuleInfoExtractor {
     fn record_top_level_type_alias_declaration(&mut self, alias: &TSTypeAliasDeclaration<'_>) {
         self.record_local_declaration_name(&alias.id.name);
         self.record_local_type_declaration(&alias.id.name, alias.id.span);
+        self.record_type_alias_surface_targets(alias);
         self.record_playwright_fixture_type_alias(alias);
         if let Some(factory) = Self::store_factory_from_return_type(&alias.type_annotation) {
             // `type CounterStore = ReturnType<typeof useCounterStore>`: remember the
@@ -898,6 +910,7 @@ impl ModuleInfoExtractor {
         let refs = Self::collect_type_alias_signature_refs(alias);
         self.record_local_signature_refs(&alias.id.name, refs);
         if let TSType::TSTypeLiteral(type_lit) = &alias.type_annotation {
+            self.record_required_type_members(&alias.id.name, &type_lit.members);
             let properties = collect_object_type_property_types(&type_lit.members);
             if !properties.is_empty() {
                 self.interface_property_types
@@ -920,6 +933,7 @@ impl ModuleInfoExtractor {
         self.record_playwright_fixture_interface(iface);
         let refs = Self::collect_interface_signature_refs(iface);
         self.record_local_signature_refs(&iface.id.name, refs);
+        self.record_required_type_members(&iface.id.name, &iface.body.body);
         let properties = collect_object_type_property_types(&iface.body.body);
         if !properties.is_empty() {
             self.interface_property_types
@@ -932,6 +946,28 @@ impl ModuleInfoExtractor {
         // members / substitute T), so such a typed param abstains.
         if iface.extends.is_empty() && iface.type_parameters.is_none() {
             self.record_react_object_type_props(&iface.id.name, &iface.body.body);
+        }
+    }
+
+    fn record_required_type_members(&mut self, type_name: &str, members: &[TSSignature<'_>]) {
+        for member in members {
+            let required_name = match member {
+                TSSignature::TSPropertySignature(property) if !property.optional => {
+                    property.key.static_name()
+                }
+                TSSignature::TSMethodSignature(method) if !method.optional => {
+                    method.key.static_name()
+                }
+                _ => None,
+            };
+            if let Some(member) = required_name {
+                self.semantic_facts.push(SemanticFact::RequiredTypeMember(
+                    RequiredTypeMemberFact {
+                        type_name: type_name.to_string(),
+                        member: member.to_string(),
+                    },
+                ));
+            }
         }
     }
 
@@ -1026,6 +1062,7 @@ impl ModuleInfoExtractor {
         declarator: &VariableDeclarator<'_>,
         init: &Expression<'_>,
     ) {
+        self.record_native_html_element_alias_candidate(decl, declarator, init);
         self.record_local_structural_function_from_variable_declarator(declarator, init);
         self.record_factory_return_candidate(declarator, init);
         self.record_source_returning_helper_from_variable_declarator(decl, declarator, init);
@@ -1045,6 +1082,87 @@ impl ModuleInfoExtractor {
         if let BindingPattern::ObjectPattern(obj_pat) = &declarator.id {
             self.record_tainted_destructure_bindings(obj_pat, init);
             self.record_chained_tainted_destructure_bindings(obj_pat, init);
+        }
+    }
+
+    fn record_native_html_element_alias_candidate(
+        &mut self,
+        decl: &VariableDeclaration<'_>,
+        declarator: &VariableDeclarator<'_>,
+        init: &Expression<'_>,
+    ) {
+        if !self.is_module_scope() || decl.kind != VariableDeclarationKind::Const {
+            return;
+        }
+        let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+            return;
+        };
+        let Expression::TSAsExpression(assertion) = init else {
+            return;
+        };
+        let TSType::TSTypeQuery(query) = &assertion.type_annotation else {
+            return;
+        };
+        let TSTypeQueryExprName::IdentifierReference(type_name) = &query.expr_name else {
+            return;
+        };
+        if type_name.name != "HTMLElement" {
+            return;
+        }
+        let Expression::ConditionalExpression(conditional) =
+            unwrap_static_expr(&assertion.expression)
+        else {
+            return;
+        };
+        if html_element_availability_test(&conditional.test)
+            && is_html_element_identifier(&conditional.consequent)
+            && matches!(
+                unwrap_static_expr(&conditional.alternate),
+                Expression::ClassExpression(_)
+            )
+        {
+            self.native_html_element_alias_candidates
+                .insert(id.name.to_string());
+        }
+    }
+
+    pub(super) fn resolve_native_html_element_aliases(&mut self) {
+        if self.native_html_element_alias_candidates.is_empty()
+            || self.local_declaration_names.contains("HTMLElement")
+            || self
+                .imports
+                .iter()
+                .any(|import| import.local_name == "HTMLElement")
+        {
+            return;
+        }
+        let aliases = &self.native_html_element_alias_candidates;
+        for export in &mut self.exports {
+            if export
+                .super_class
+                .as_deref()
+                .is_some_and(|name| aliases.contains(name))
+            {
+                export.super_class = Some("HTMLElement".to_string());
+            }
+        }
+        for heritage in &mut self.class_heritage {
+            if heritage
+                .super_class
+                .as_deref()
+                .is_some_and(|name| aliases.contains(name))
+            {
+                heritage.super_class = Some("HTMLElement".to_string());
+            }
+        }
+        for class in self.local_class_exports.values_mut() {
+            if class
+                .super_class
+                .as_deref()
+                .is_some_and(|name| aliases.contains(name))
+            {
+                class.super_class = Some("HTMLElement".to_string());
+            }
         }
     }
 
@@ -1463,6 +1581,21 @@ impl<'a> ModuleInfoExtractor {
         declarator: &VariableDeclarator<'a>,
         init: &Expression<'a>,
     ) {
+        if let BindingPattern::BindingIdentifier(id) = &declarator.id
+            && let Some(source) = static_member_object_name(unwrap_static_expr(init))
+        {
+            let source = self.qualify_this_scope(&source);
+            if let Some(BindingTarget::Class(type_name)) = self.resolve_bound_object_name(&source) {
+                self.insert_class_binding_target(id.name.to_string(), type_name);
+            }
+        }
+
+        if let BindingPattern::BindingIdentifier(id) = &declarator.id
+            && let Some(type_name) = self.nullable_asserted_type_name(init)
+        {
+            self.insert_class_binding_target(id.name.to_string(), type_name);
+        }
+
         if let Expression::NewExpression(new_expr) = init
             && let Expression::Identifier(callee) = &new_expr.callee
             && let BindingPattern::BindingIdentifier(id) = &declarator.id
@@ -1510,6 +1643,40 @@ impl<'a> ModuleInfoExtractor {
                     callee_method: member.property.name.to_string(),
                 });
         }
+    }
+
+    fn asserted_receiver_type_name(&self, expr: &Expression<'_>) -> Option<String> {
+        let type_annotation = asserted_receiver_type(expr)?;
+        let root_name = asserted_type_root_name(type_annotation)?;
+        if self
+            .function_type_alias_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(root_name))
+            .is_some_and(|binding| !matches!(binding, super::FunctionTypeAliasBinding::ClassSelf))
+        {
+            return None;
+        }
+        extract_type_reference_name(type_annotation)
+    }
+
+    fn nullable_asserted_type_name(&self, expr: &Expression<'_>) -> Option<String> {
+        let Expression::ConditionalExpression(conditional) = unwrap_static_expr(expr) else {
+            return None;
+        };
+        if matches!(
+            unwrap_static_expr(&conditional.alternate),
+            Expression::NullLiteral(_)
+        ) {
+            return self.asserted_receiver_type_name(&conditional.consequent);
+        }
+        if matches!(
+            unwrap_static_expr(&conditional.consequent),
+            Expression::NullLiteral(_)
+        ) {
+            return self.asserted_receiver_type_name(&conditional.alternate);
+        }
+        None
     }
 
     fn record_route_loader_data_declarator(
@@ -1984,6 +2151,7 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
             self.directives
                 .push(directive.directive.as_str().to_string());
         }
+        self.record_program_function_type_aliases(program);
         self.record_program_prologue(program);
         self.record_program_sanitizer_functions(program);
         self.record_local_function_return_types(program);
@@ -1994,7 +2162,10 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
         if let BindingPattern::BindingIdentifier(id) = &param.pattern
             && let Some(type_annotation) = param.type_annotation.as_deref()
         {
-            self.record_typed_binding(id.name.as_str(), type_annotation);
+            // The parameter itself is resolved by the scope-owned body collector.
+            // Only nested paths remain in the module fallback for consumers such
+            // as typed store properties; conflicting scopes become Ambiguous.
+            self.record_typed_nested_bindings(id.name.as_str(), type_annotation);
             if param.accessibility.is_some() {
                 let key = self.this_member_key(id.name.as_str());
                 self.record_typed_binding(key.as_str(), type_annotation);
@@ -2080,6 +2251,8 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
 
     fn visit_block_statement(&mut self, stmt: &BlockStatement<'a>) {
         self.block_depth += 1;
+        let type_alias_scope_pushed =
+            self.namespace_depth == 0 && self.push_function_type_alias_scope(&stmt.body);
         if self.namespace_depth == 0 {
             self.nested_declaration_stack.push(FxHashSet::default());
             self.scoped_array_binding_element_types
@@ -2097,6 +2270,9 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
                 self.record_fail_closed_guard_after_statement(statement);
             }
         }
+        if type_alias_scope_pushed {
+            self.pop_function_type_alias_scope();
+        }
         if self.namespace_depth == 0 {
             self.nested_declaration_stack.pop();
             self.scoped_array_binding_element_types.pop();
@@ -2107,6 +2283,26 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
             self.path_relative_binding_stack.pop();
         }
         self.block_depth -= 1;
+    }
+
+    fn visit_switch_statement(&mut self, stmt: &SwitchStatement<'a>) {
+        let type_alias_scope_pushed = self.namespace_depth == 0
+            && self.push_function_type_alias_scope(
+                stmt.cases.iter().flat_map(|case| &case.consequent),
+            );
+        walk::walk_switch_statement(self, stmt);
+        if type_alias_scope_pushed {
+            self.pop_function_type_alias_scope();
+        }
+    }
+
+    fn visit_static_block(&mut self, block: &StaticBlock<'a>) {
+        let type_alias_scope_pushed =
+            self.namespace_depth == 0 && self.push_function_type_alias_scope(&block.body);
+        walk::walk_static_block(self, block);
+        if type_alias_scope_pushed {
+            self.pop_function_type_alias_scope();
+        }
     }
 
     fn visit_declaration(&mut self, decl: &Declaration<'a>) {
@@ -2121,27 +2317,45 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
 
     fn visit_function(&mut self, func: &Function<'a>, flags: ScopeFlags) {
         self.record_next_function_param_sources(func);
+        let type_parameter_scope_pushed = func
+            .type_parameters
+            .as_deref()
+            .is_some_and(|params| self.push_function_type_parameter_scope(params));
+        self.record_scoped_typed_parameter_accesses(&func.params, func.body.as_deref());
         self.push_function_declaration_scope(&func.params);
         self.function_depth += 1;
         let component_pushed = self.react_enter_function(func);
         walk::walk_function(self, func, flags);
         self.react_exit_component(component_pushed);
         self.function_depth -= 1;
+        if type_parameter_scope_pushed {
+            self.pop_function_type_alias_scope();
+        }
         self.pop_function_declaration_scope();
     }
 
     fn visit_arrow_function_expression(&mut self, expr: &ArrowFunctionExpression<'a>) {
         self.record_next_arrow_param_sources(expr);
+        let type_parameter_scope_pushed = expr
+            .type_parameters
+            .as_deref()
+            .is_some_and(|params| self.push_function_type_parameter_scope(params));
+        self.record_scoped_typed_parameter_accesses(&expr.params, Some(expr.body.as_ref()));
         self.push_function_declaration_scope(&expr.params);
         self.function_depth += 1;
         let component_pushed = self.react_enter_arrow(expr);
         walk::walk_arrow_function_expression(self, expr);
         self.react_exit_component(component_pushed);
         self.function_depth -= 1;
+        if type_parameter_scope_pushed {
+            self.pop_function_type_alias_scope();
+        }
         self.pop_function_declaration_scope();
     }
 
     fn visit_function_body(&mut self, body: &FunctionBody<'a>) {
+        let type_alias_scope_pushed =
+            self.namespace_depth == 0 && self.push_function_type_alias_scope(&body.statements);
         if self.namespace_depth == 0 {
             self.scoped_array_binding_element_types
                 .push(FxHashMap::default());
@@ -2151,6 +2365,9 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
             if self.namespace_depth == 0 {
                 self.record_fail_closed_guard_after_statement(statement);
             }
+        }
+        if type_alias_scope_pushed {
+            self.pop_function_type_alias_scope();
         }
         if self.namespace_depth == 0 {
             self.scoped_array_binding_element_types.pop();
@@ -2653,6 +2870,12 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
                 member: expr.property.name.to_string(),
             });
         }
+        if let Some(type_name) = self.asserted_receiver_type_name(&expr.object) {
+            self.member_accesses.push(MemberAccess {
+                object: type_name,
+                member: expr.property.name.to_string(),
+            });
+        }
         if let Some(callee_name) = Self::bare_call_callee_name(&expr.object)
             && Self::inline_store_factory_receiver(&expr.object).is_none()
         {
@@ -2687,8 +2910,10 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
             // it resolves against the same class's binding key (issue #1821);
             // stripped back to `this.` before emission. A bare `this` object and
             // any non-`this` receiver pass through unchanged.
+            let object = self.qualify_this_scope(&object_name);
+            self.record_walk_order_member_access(&object, expr.property.name.as_str());
             self.member_accesses.push(MemberAccess {
-                object: self.qualify_this_scope(&object_name),
+                object,
                 member: expr.property.name.to_string(),
             });
         }
@@ -2704,6 +2929,18 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
     }
 
     fn visit_computed_member_expression(&mut self, expr: &ComputedMemberExpression<'a>) {
+        if let Expression::StaticMemberExpression(key) = &expr.expression
+            && let Expression::Identifier(key_object) = &key.object
+        {
+            self.pending_computed_enum_key_uses
+                .push(super::PendingComputedEnumKeyUse {
+                    fact: ComputedEnumKeyUseFact {
+                        key_object: key_object.name.to_string(),
+                        key_member: key.property.name.to_string(),
+                    },
+                    key_object_span: key_object.span,
+                });
+        }
         if let Expression::Identifier(obj) = &expr.object {
             if (self.route_loader_data_bindings.contains(obj.name.as_str())
                 || obj.name == "loaderData")
@@ -2806,6 +3043,8 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
     fn visit_class(&mut self, class: &Class<'a>) {
         let member_access_start = self.member_accesses.len();
         let whole_object_start = self.whole_object_uses.len();
+        let type_scope_pushed =
+            self.push_class_type_scope(class.id.as_ref(), class.type_parameters.as_deref());
         self.record_lit_custom_element(class);
 
         if let Some(meta) = extract_angular_component_metadata(class) {
@@ -2836,6 +3075,9 @@ impl<'a> Visit<'a> for ModuleInfoExtractor {
         self.class_scope_stack.pop();
         self.class_type_param_constraints.pop();
         self.class_super_stack.pop();
+        if type_scope_pushed {
+            self.pop_function_type_alias_scope();
+        }
     }
 
     /// Track asset references inside `` html`...` `` tagged template literals
@@ -3097,6 +3339,85 @@ fn unwrap_static_expr<'a, 'b>(mut expr: &'b Expression<'a>) -> &'b Expression<'a
             Expression::TSNonNullExpression(ts_non_null) => expr = &ts_non_null.expression,
             _ => return expr,
         }
+    }
+}
+
+fn html_element_availability_test(expr: &Expression<'_>) -> bool {
+    let Expression::BinaryExpression(binary) = unwrap_static_expr(expr) else {
+        return false;
+    };
+    if !matches!(
+        binary.operator,
+        BinaryOperator::Inequality | BinaryOperator::StrictInequality
+    ) {
+        return false;
+    }
+    let Expression::UnaryExpression(typeof_expr) = unwrap_static_expr(&binary.left) else {
+        return false;
+    };
+    typeof_expr.operator == UnaryOperator::Typeof
+        && is_html_element_identifier(&typeof_expr.argument)
+        && matches!(
+            unwrap_static_expr(&binary.right),
+            Expression::StringLiteral(literal) if literal.value == "undefined"
+        )
+}
+
+fn is_html_element_identifier(expr: &Expression<'_>) -> bool {
+    matches!(
+        unwrap_static_expr(expr),
+        Expression::Identifier(identifier) if identifier.name == "HTMLElement"
+    )
+}
+
+fn asserted_receiver_type<'ast, 'borrow>(
+    expr: &'borrow Expression<'ast>,
+) -> Option<&'borrow TSType<'ast>> {
+    match expr {
+        Expression::ParenthesizedExpression(parenthesized) => {
+            asserted_receiver_type(&parenthesized.expression)
+        }
+        Expression::TSAsExpression(assertion) => Some(&assertion.type_annotation),
+        Expression::TSTypeAssertion(assertion) => Some(&assertion.type_annotation),
+        _ => None,
+    }
+}
+
+fn asserted_type_root_name<'borrow>(ty: &'borrow TSType<'_>) -> Option<&'borrow str> {
+    match ty {
+        TSType::TSTypeReference(type_ref) => match &type_ref.type_name {
+            TSTypeName::IdentifierReference(ident) => Some(ident.name.as_str()),
+            TSTypeName::QualifiedName(qualified) => type_name_root_str(&qualified.left),
+            TSTypeName::ThisExpression(_) => None,
+        },
+        TSType::TSParenthesizedType(parenthesized) => {
+            asserted_type_root_name(&parenthesized.type_annotation)
+        }
+        TSType::TSUnionType(union) => {
+            let mut root = None;
+            for branch in &union.types {
+                if matches!(
+                    branch,
+                    TSType::TSNullKeyword(_) | TSType::TSUndefinedKeyword(_)
+                ) {
+                    continue;
+                }
+                if root.is_some() {
+                    return None;
+                }
+                root = Some(asserted_type_root_name(branch)?);
+            }
+            root
+        }
+        _ => None,
+    }
+}
+
+fn type_name_root_str<'borrow>(name: &'borrow TSTypeName<'_>) -> Option<&'borrow str> {
+    match name {
+        TSTypeName::IdentifierReference(ident) => Some(ident.name.as_str()),
+        TSTypeName::QualifiedName(qualified) => type_name_root_str(&qualified.left),
+        TSTypeName::ThisExpression(_) => None,
     }
 }
 

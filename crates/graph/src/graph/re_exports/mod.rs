@@ -15,12 +15,13 @@ use std::cell::{Cell, RefCell};
 use crate::resolve::ResolvedModule;
 use fallow_types::discover::FileId;
 
-use super::types::{ReferencePathId, ReferencePathInterner};
+use super::types::{ReferencePathInterner, RoutedReferenceKey};
 use super::{Edge, ModuleGraph};
 
 use propagate::{
-    NamedImportOriginIndex, NamedReExportPropagation, StarReExportPropagation,
-    propagate_named_re_export, propagate_star_re_export,
+    EffectiveDeclarationRouteCache, ImportBindingUsageIndex, NamedPropagationScratch,
+    NamedReExportPropagation, StarReExportPropagation, propagate_named_re_export,
+    propagate_star_re_export,
 };
 
 #[cfg(test)]
@@ -100,10 +101,12 @@ struct ReExportTuple {
 struct ReExportContext<'a> {
     entry_star_targets: &'a FxHashSet<FileId>,
     edges_by_target: &'a FxHashMap<FileId, Vec<usize>>,
-    named_import_origin_index: &'a NamedImportOriginIndex,
-    module_by_id: &'a FxHashMap<FileId, &'a ResolvedModule>,
-    existing_refs: &'a mut FxHashSet<(FileId, Option<ReferencePathId>)>,
+    binding_usage: &'a ImportBindingUsageIndex,
+    effective_exports: &'a super::effective_exports::EffectiveExportIndex,
+    existing_refs: &'a mut FxHashSet<RoutedReferenceKey>,
     synthetic_stubs: &'a mut FxHashSet<(FileId, String, bool)>,
+    declaration_routes: &'a mut EffectiveDeclarationRouteCache,
+    scratch: &'a mut NamedPropagationScratch,
     reference_paths: &'a mut ReferencePathInterner,
 }
 
@@ -111,7 +114,6 @@ struct ReExportFixpointInput<'a> {
     re_export_info: &'a [ReExportTuple],
     entry_star_targets: &'a FxHashSet<FileId>,
     edges_by_target: &'a FxHashMap<FileId, Vec<usize>>,
-    named_import_origin_index: &'a NamedImportOriginIndex,
     module_by_id: &'a FxHashMap<FileId, &'a ResolvedModule>,
     reference_paths: &'a mut ReferencePathInterner,
 }
@@ -123,8 +125,8 @@ struct LegacyReExportFullScan<'a> {
     re_export_info: &'a [ReExportTuple],
     entry_star_targets: &'a FxHashSet<FileId>,
     edges_by_target: &'a FxHashMap<FileId, Vec<usize>>,
-    named_import_origin_index: &'a NamedImportOriginIndex,
     module_by_id: &'a FxHashMap<FileId, &'a ResolvedModule>,
+    effective_exports: &'a super::effective_exports::EffectiveExportIndex,
     reference_paths: &'a mut ReferencePathInterner,
 }
 
@@ -200,18 +202,11 @@ impl ModuleGraph {
 
         let entry_star_targets = self.collect_entry_star_targets();
         let edges_by_target = self.build_edges_by_target();
-        let named_import_origin_index =
-            if self.needs_named_import_origin_index(&re_export_info, &entry_star_targets) {
-                NamedImportOriginIndex::from_edges(&self.edges)
-            } else {
-                NamedImportOriginIndex::default()
-            };
 
         self.run_re_export_fixpoint(ReExportFixpointInput {
             re_export_info: &re_export_info,
             entry_star_targets: &entry_star_targets,
             edges_by_target: &edges_by_target,
-            named_import_origin_index: &named_import_origin_index,
             module_by_id,
             reference_paths,
         });
@@ -278,29 +273,12 @@ impl ModuleGraph {
         edges_by_target
     }
 
-    fn needs_named_import_origin_index(
-        &self,
-        re_export_info: &[ReExportTuple],
-        entry_star_targets: &FxHashSet<FileId>,
-    ) -> bool {
-        re_export_info.iter().any(|entry| {
-            if entry.exported_name != "*" || entry_star_targets.contains(&entry.barrel) {
-                return false;
-            }
-
-            self.modules
-                .get(entry.barrel.0 as usize)
-                .is_some_and(|barrel| !barrel.is_entry_point())
-        })
-    }
-
     /// Run monotone propagation, revisiting only tuples affected by new state.
     fn run_re_export_fixpoint(&mut self, input: ReExportFixpointInput<'_>) {
         let ReExportFixpointInput {
             re_export_info,
             entry_star_targets,
             edges_by_target,
-            named_import_origin_index,
             module_by_id,
             reference_paths,
         } = input;
@@ -319,8 +297,11 @@ impl ModuleGraph {
         let safety_cap = self.re_export_transition_safety_cap(re_export_info);
         let mut processed = 0usize;
         let mut plan = ReExportPropagationPlan::new(re_export_info);
-        let mut existing_refs: FxHashSet<(FileId, Option<ReferencePathId>)> = FxHashSet::default();
+        let mut existing_refs: FxHashSet<RoutedReferenceKey> = FxHashSet::default();
         let mut synthetic_stubs: FxHashSet<(FileId, String, bool)> = FxHashSet::default();
+        let binding_usage = ImportBindingUsageIndex::build(module_by_id);
+        let mut declaration_routes = EffectiveDeclarationRouteCache::default();
+        let mut scratch = NamedPropagationScratch::default();
 
         while let Some(entry_idx) = plan.pop_front() {
             if processed >= safety_cap {
@@ -339,10 +320,12 @@ impl ModuleGraph {
             let mut context = ReExportContext {
                 entry_star_targets,
                 edges_by_target,
-                named_import_origin_index,
-                module_by_id,
+                binding_usage: &binding_usage,
+                effective_exports: &self.effective_exports,
                 existing_refs: &mut existing_refs,
                 synthetic_stubs: &mut synthetic_stubs,
+                declaration_routes: &mut declaration_routes,
+                scratch: &mut scratch,
                 reference_paths,
             };
 
@@ -363,8 +346,8 @@ impl ModuleGraph {
                 re_export_info,
                 entry_star_targets,
                 edges_by_target,
-                named_import_origin_index,
                 module_by_id,
+                effective_exports: &self.effective_exports,
                 reference_paths,
             });
             assert_eq!(
@@ -442,8 +425,8 @@ impl ModuleGraph {
                 modules,
                 edges,
                 edges_by_target: context.edges_by_target,
-                named_import_origin_index: context.named_import_origin_index,
-                module_by_id: context.module_by_id,
+                binding_usage: context.binding_usage,
+                effective_exports: context.effective_exports,
                 barrel_id: entry.barrel,
                 barrel_idx,
                 source_id: entry.source,
@@ -456,12 +439,17 @@ impl ModuleGraph {
         } else {
             propagate_named_re_export(NamedReExportPropagation {
                 modules,
+                effective_exports: context.effective_exports,
                 barrel_id: entry.barrel,
                 barrel_idx,
+                source_id: entry.source,
                 source_idx,
                 imported_name: &entry.imported_name,
                 exported_name: &entry.exported_name,
+                is_type_only: entry.is_type_only,
                 existing_refs: context.existing_refs,
+                declaration_routes: context.declaration_routes,
+                scratch: context.scratch,
                 reference_paths: context.reference_paths,
             })
         }
@@ -475,13 +463,16 @@ impl ModuleGraph {
             re_export_info,
             entry_star_targets,
             edges_by_target,
-            named_import_origin_index,
             module_by_id,
+            effective_exports,
             reference_paths,
         } = input;
         let max_iterations = re_export_info.len().saturating_add(1);
-        let mut existing_refs: FxHashSet<(FileId, Option<ReferencePathId>)> = FxHashSet::default();
+        let mut existing_refs: FxHashSet<RoutedReferenceKey> = FxHashSet::default();
         let mut synthetic_stubs: FxHashSet<(FileId, String, bool)> = FxHashSet::default();
+        let binding_usage = ImportBindingUsageIndex::build(module_by_id);
+        let mut declaration_routes = EffectiveDeclarationRouteCache::default();
+        let mut scratch = NamedPropagationScratch::default();
 
         for _ in 0..max_iterations {
             let mut changed = false;
@@ -489,10 +480,12 @@ impl ModuleGraph {
                 let mut context = ReExportContext {
                     entry_star_targets,
                     edges_by_target,
-                    named_import_origin_index,
-                    module_by_id,
+                    binding_usage: &binding_usage,
+                    effective_exports,
                     existing_refs: &mut existing_refs,
                     synthetic_stubs: &mut synthetic_stubs,
+                    declaration_routes: &mut declaration_routes,
+                    scratch: &mut scratch,
                     reference_paths,
                 };
                 changed |= Self::propagate_re_export_entry(modules, edges, entry, &mut context);

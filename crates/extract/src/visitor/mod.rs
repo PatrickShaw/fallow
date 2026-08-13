@@ -13,13 +13,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::suppress::ParsedSuppressions;
 use crate::{
     AngularComponentFieldArrayTypeFact, AngularTemplateMemberAccessFact, AngularThisSpreadFact,
-    ClassThisMemberAccessFact, ClassThisWholeObjectUseFact, DynamicCustomElementRenderFact,
-    DynamicImportInfo, DynamicImportPattern, ExportInfo, ExportName, FactoryCallMemberAccessFact,
-    FactoryFnMemberAccessFact, FactoryFnWholeObjectFact, FactoryReturnObjectPropertyAccessFact,
-    FluentChainMemberAccessFact, FluentChainNewMemberAccessFact, ImportInfo, ImportedName,
-    InstanceExportBindingFact, MemberAccess, MemberInfo, MemberKind, ModuleInfo,
-    PlaywrightFixtureAliasFact, PlaywrightFixtureDefinitionFact, PlaywrightFixtureTypeFact,
-    PlaywrightFixtureUseFact, ReExportInfo, RequireCallInfo, SemanticFact, TypeMemberTypeEntry,
+    ClassThisMemberAccessFact, ClassThisWholeObjectUseFact, ComputedEnumKeyUseFact,
+    DynamicCustomElementRenderFact, DynamicImportInfo, DynamicImportPattern, ExportInfo,
+    ExportName, FactoryCallMemberAccessFact, FactoryFnMemberAccessFact, FactoryFnWholeObjectFact,
+    FactoryReturnObjectPropertyAccessFact, FluentChainMemberAccessFact,
+    FluentChainNewMemberAccessFact, ImportInfo, ImportedName, InstanceExportBindingFact,
+    MemberAccess, MemberInfo, MemberKind, ModuleInfo, PlaywrightFixtureAliasFact,
+    PlaywrightFixtureDefinitionFact, PlaywrightFixtureTypeFact, PlaywrightFixtureUseFact,
+    ReExportInfo, RequireCallInfo, SemanticFact, TypeMemberTypeEntry,
     TypedPropertyMemberAccessFact, VisibilityTag,
 };
 use fallow_types::extract::{
@@ -88,6 +89,12 @@ struct PendingLocalExportSpecifier {
 }
 
 #[derive(Debug, Clone)]
+struct PendingComputedEnumKeyUse {
+    fact: ComputedEnumKeyUseFact,
+    key_object_span: Span,
+}
+
+#[derive(Debug, Clone)]
 struct StructuralParameterUse {
     type_name: String,
     members: FxHashSet<String>,
@@ -96,6 +103,17 @@ struct StructuralParameterUse {
 #[derive(Debug, Clone, Default)]
 struct LocalStructuralFunction {
     params: FxHashMap<usize, StructuralParameterUse>,
+}
+
+struct ContextualParameterTypes {
+    parameters: Vec<Option<String>>,
+    type_parameters: Vec<String>,
+}
+
+enum FunctionTypeAliasBinding {
+    Function(ContextualParameterTypes),
+    ClassSelf,
+    NonFunction,
 }
 
 #[derive(Debug, Clone)]
@@ -173,13 +191,17 @@ pub(crate) enum BindingTarget {
         callee_object: String,
         callee_method: String,
     },
+    /// The same unqualified binding name could not be proven to have one target
+    /// across lexical scopes or assignments. Module-flat fallback resolution
+    /// must abstain; scope-owned extraction records precise parameter accesses.
+    Ambiguous,
 }
 
 impl BindingTarget {
     pub(crate) fn class_name(&self) -> Option<&str> {
         match self {
             Self::Class(name) => Some(name),
-            Self::FactoryCall { .. } => None,
+            Self::FactoryCall { .. } | Self::Ambiguous => None,
         }
     }
 
@@ -308,6 +330,7 @@ pub(crate) struct ModuleInfoExtractor {
     package_path_references: Vec<String>,
     pub(crate) member_accesses: Vec<MemberAccess>,
     semantic_facts: Vec<SemanticFact>,
+    pending_computed_enum_key_uses: Vec<PendingComputedEnumKeyUse>,
     pending_vitest_mock_operations: Vec<PendingVitestMockOperation>,
     pub(crate) whole_object_uses: Vec<String>,
     has_cjs_exports: bool,
@@ -316,6 +339,16 @@ pub(crate) struct ModuleInfoExtractor {
     handled_import_spans: FxHashSet<Span>,
     namespace_binding_names: Vec<String>,
     binding_target_names: FxHashMap<String, BindingTarget>,
+    /// The class each binding name most recently named at this point in the walk,
+    /// never poisoned to `Ambiguous`. `binding_target_names` is module-flat, so a
+    /// name bound to two classes in sibling scopes abstains there; this map keeps
+    /// the walk-order answer, which is the correct one for the scope the access
+    /// was written in.
+    walk_order_class_bindings: FxHashMap<String, String>,
+    /// `(binding, class, member)` for member accesses read off a binding that named
+    /// a class at that point in the walk. Only the ones whose binding ends up
+    /// `Ambiguous` are credited, so an unambiguous binding is never double-counted.
+    walk_order_member_accesses: Vec<(String, String, String)>,
     interface_property_types: FxHashMap<String, FxHashMap<String, String>>,
     pending_typed_destructures: Vec<(String, String, String)>,
     iterable_element_types: FxHashMap<String, String>,
@@ -349,6 +382,19 @@ pub(crate) struct ModuleInfoExtractor {
     local_declaration_names: FxHashSet<String>,
     pending_local_export_specifiers: Vec<PendingLocalExportSpecifier>,
     local_structural_functions: FxHashMap<String, LocalStructuralFunction>,
+    /// Parameter types declared by module-local function type aliases, used to
+    /// recover contextual types for unannotated arrow/function expressions.
+    function_type_alias_params: FxHashMap<String, ContextualParameterTypes>,
+    /// Nearest lexical type alias declarations for function bodies and blocks.
+    /// A `NonFunction` binding still shadows an outer function alias. Transient
+    /// visitor state; never persisted.
+    function_type_alias_scopes: Vec<FxHashMap<String, FunctionTypeAliasBinding>>,
+    /// Local function bodies pre-scanned by `record_local_structural_function`.
+    /// Prevents a second AST walk when the ordinary visitor reaches the body.
+    scoped_typed_parameter_body_spans: FxHashSet<Span>,
+    /// Module-local const aliases proven to select the browser-global
+    /// `HTMLElement` when it exists, with an SSR-only class fallback.
+    native_html_element_alias_candidates: FxHashSet<String>,
     structural_class_call_candidates: Vec<StructuralClassCallCandidate>,
     namespace_depth: u32,
     pending_namespace_members: Vec<MemberInfo>,
@@ -781,6 +827,25 @@ impl ModuleInfoExtractor {
         self.route_load_harvest_mode = mode;
     }
 
+    pub(crate) fn computed_enum_key_reference_spans(&self) -> FxHashSet<Span> {
+        self.pending_computed_enum_key_uses
+            .iter()
+            .map(|usage| usage.key_object_span)
+            .collect()
+    }
+
+    pub(crate) fn resolve_computed_enum_key_uses(
+        &mut self,
+        module_binding_references: &FxHashSet<Span>,
+    ) {
+        self.semantic_facts.extend(
+            self.pending_computed_enum_key_uses
+                .drain(..)
+                .filter(|usage| module_binding_references.contains(&usage.key_object_span))
+                .map(|usage| SemanticFact::ComputedEnumKeyUse(usage.fact)),
+        );
+    }
+
     fn record_local_class_export(&mut self, name: String, info: LocalClassExportInfo) {
         self.local_class_exports.insert(name, info);
     }
@@ -937,14 +1002,59 @@ impl ModuleInfoExtractor {
     }
 
     fn insert_class_binding_target(&mut self, binding: String, target: String) {
+        self.walk_order_class_bindings
+            .insert(binding.clone(), target.clone());
+        let target = BindingTarget::Class(target);
         self.binding_target_names
-            .insert(binding, BindingTarget::Class(target));
+            .entry(binding)
+            .and_modify(|existing| {
+                if *existing != target {
+                    *existing = BindingTarget::Ambiguous;
+                }
+            })
+            .or_insert(target);
     }
 
     fn insert_class_binding_target_if_absent(&mut self, binding: String, target: String) {
+        if !self.binding_target_names.contains_key(&binding) {
+            self.walk_order_class_bindings
+                .insert(binding.clone(), target.clone());
+        }
         self.binding_target_names
             .entry(binding)
             .or_insert(BindingTarget::Class(target));
+    }
+
+    /// Remember the class a receiver named at this point in the walk, so an
+    /// access written in one scope survives the same name being rebound to a
+    /// different class in a sibling scope.
+    fn record_walk_order_member_access(&mut self, object: &str, member: &str) {
+        if let Some(class) = self.walk_order_class_bindings.get(object) {
+            self.walk_order_member_accesses.push((
+                object.to_string(),
+                class.clone(),
+                member.to_string(),
+            ));
+        }
+    }
+
+    /// Credit the walk-order resolution for receivers whose module-flat binding
+    /// ended up `Ambiguous`. Without this, two sibling scopes binding the same
+    /// local name to different classes credit neither, reporting genuinely used
+    /// members as unused.
+    fn resolve_ambiguous_walk_order_member_accesses(&mut self) {
+        let pending = std::mem::take(&mut self.walk_order_member_accesses);
+        let additional: Vec<MemberAccess> = pending
+            .into_iter()
+            .filter(|(binding, _, _)| {
+                matches!(
+                    self.binding_target_names.get(binding),
+                    Some(BindingTarget::Ambiguous)
+                )
+            })
+            .map(|(_, object, member)| MemberAccess { object, member })
+            .collect();
+        self.member_accesses.extend(additional);
     }
 
     fn record_angular_template_member_fact(&mut self, member: String) {
@@ -2005,7 +2115,7 @@ impl ModuleInfoExtractor {
                         | TypedPropertyExpansion::Opaque => None,
                     }
                 }
-                BindingTarget::FactoryCall { .. } => None,
+                BindingTarget::FactoryCall { .. } | BindingTarget::Ambiguous => None,
             },
         }
     }
@@ -2210,6 +2320,7 @@ impl ModuleInfoExtractor {
                     callee_object,
                     callee_method,
                 } => additional_facts.push((callee_object, callee_method, access.member.clone())),
+                BindingTarget::Ambiguous => {}
             }
         }
         let additional_whole: Vec<String> =
@@ -2462,6 +2573,7 @@ impl ModuleInfoExtractor {
     fn finalize_resolution_phase(&mut self) -> Vec<fallow_types::extract::NamespaceObjectAlias> {
         self.resolve_typed_destructure_bindings();
         self.resolve_pending_local_export_specifiers();
+        self.resolve_native_html_element_aliases();
         self.enrich_local_class_exports();
         self.enrich_store_exports();
         self.finalize_di_key_sites();
@@ -2487,6 +2599,9 @@ impl ModuleInfoExtractor {
         self.resolve_factory_call_candidates();
         self.resolve_playwright_factory_call_definitions();
         self.resolve_structural_class_calls();
+        // Before `resolve_bound_member_accesses` so the re-emitted accesses reach
+        // the same typed-property expansion as unambiguous ones.
+        self.resolve_ambiguous_walk_order_member_accesses();
         self.resolve_bound_member_accesses();
         // AFTER `resolve_bound_member_accesses`, which is what materializes the
         // class-qualified accesses for `const s = new Sub(); s.member`. Running

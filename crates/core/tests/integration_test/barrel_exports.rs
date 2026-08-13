@@ -16,6 +16,10 @@ fn barrel_exports_resolves_through_barrel() {
         unused_export_names.contains(&"fooUnused"),
         "fooUnused should be unused, found: {unused_export_names:?}"
     );
+    assert!(
+        !unused_export_names.contains(&"join"),
+        "a consumed external named re-export must stay live: {unused_export_names:?}"
+    );
 }
 
 #[test]
@@ -80,6 +84,53 @@ fn barrel_re_export_propagates_to_source_module() {
 }
 
 #[test]
+fn barrel_type_usage_credits_legal_declaration_merges_only() {
+    let root = fixture_path("declaration-merge");
+    let config = create_config(root);
+    let results = fallow_core::analyze(&config).expect("analysis should succeed");
+    let unused_exports: Vec<_> = results
+        .unused_exports
+        .iter()
+        .map(|finding| finding.export.export_name.as_str())
+        .collect();
+    let unused_types: Vec<_> = results
+        .unused_types
+        .iter()
+        .map(|finding| finding.export.export_name.as_str())
+        .collect();
+
+    assert!(!unused_exports.contains(&"Merged"));
+    assert!(!unused_types.contains(&"Merged"));
+    assert!(!unused_exports.contains(&"NamedMerged"));
+    assert!(!unused_types.contains(&"NamedMerged"));
+    assert!(unused_exports.contains(&"Independent"));
+    assert!(!unused_types.contains(&"Independent"));
+    assert!(unused_types.contains(&"UnusedControl"));
+}
+
+#[test]
+fn renamed_exports_route_through_star_only_surfaces() {
+    let root = fixture_path("renamed-star-surface");
+    let config = create_config(root);
+    let results = fallow_core::analyze(&config).expect("analysis should succeed");
+    let unused_exports: Vec<_> = results
+        .unused_exports
+        .iter()
+        .map(|finding| finding.export.export_name.as_str())
+        .collect();
+    let unused_types: Vec<_> = results
+        .unused_types
+        .iter()
+        .map(|finding| finding.export.export_name.as_str())
+        .collect();
+
+    assert!(!unused_exports.contains(&"ValueMerged"));
+    assert!(!unused_types.contains(&"TypeMerged"));
+    assert!(unused_exports.contains(&"UnusedValueControl"));
+    assert!(unused_types.contains(&"UnusedTypeControl"));
+}
+
+#[test]
 fn source_order_independent_import_forwarding_is_re_export() {
     let root = fixture_path("source-order-re-export");
     let config = create_config(root);
@@ -108,6 +159,98 @@ fn source_order_independent_import_forwarding_is_re_export() {
     assert!(
         unused_export_names.contains(&"unused"),
         "genuinely unused source exports should still be reported, found: {unused_export_names:?}"
+    );
+}
+
+#[test]
+fn explicit_re_export_shadows_star_export_with_the_same_name() {
+    let root = fixture_path("effective-export-explicit-shadow");
+    let config = create_config(root);
+    let results = fallow_core::analyze(&config).expect("analysis should succeed");
+
+    let unused_exports: Vec<_> = results
+        .unused_exports
+        .iter()
+        .map(|finding| {
+            (
+                finding.export.path.to_string_lossy().replace('\\', "/"),
+                finding.export.export_name.as_str(),
+            )
+        })
+        .collect();
+
+    assert!(
+        unused_exports
+            .iter()
+            .any(|(path, name)| { path.ends_with("src/star-source.ts") && *name == "foo" }),
+        "the star source's shadowed foo must remain unused: {unused_exports:?}"
+    );
+    assert!(
+        !unused_exports
+            .iter()
+            .any(|(path, name)| { path.ends_with("src/explicit-source.ts") && *name == "foo" }),
+        "the explicit re-export is the effective foo binding: {unused_exports:?}"
+    );
+}
+
+#[test]
+fn shadowed_star_export_does_not_form_a_duplicate_export_group() {
+    let root = fixture_path("effective-export-explicit-shadow");
+    let config = create_config(root);
+    let results = fallow_core::analyze(&config).expect("analysis should succeed");
+
+    assert!(
+        results.duplicate_exports.is_empty(),
+        "the shadowed star export must not form a duplicate-export group: {:?}",
+        results.duplicate_exports
+    );
+}
+
+#[test]
+fn conflicting_star_exports_do_not_resolve_an_effective_binding() {
+    let root = fixture_path("effective-export-ambiguous-star");
+    let config = create_config(root);
+    let results = fallow_core::analyze(&config).expect("analysis should succeed");
+
+    let unused_foo_paths: Vec<_> = results
+        .unused_exports
+        .iter()
+        .filter(|finding| finding.export.export_name == "foo")
+        .map(|finding| finding.export.path.to_string_lossy().replace('\\', "/"))
+        .collect();
+
+    assert_eq!(
+        unused_foo_paths.len(),
+        2,
+        "an ambiguous barrel import must credit neither foo binding: {unused_foo_paths:?}"
+    );
+    assert!(
+        unused_foo_paths
+            .iter()
+            .any(|path| path.ends_with("src/left.ts")),
+        "left.foo must remain unused: {unused_foo_paths:?}"
+    );
+    assert!(
+        unused_foo_paths
+            .iter()
+            .any(|path| path.ends_with("src/right.ts")),
+        "right.foo must remain unused: {unused_foo_paths:?}"
+    );
+}
+
+#[test]
+fn convergent_star_exports_resolve_the_shared_original_binding() {
+    let root = fixture_path("effective-export-convergent-star");
+    let config = create_config(root);
+    let results = fallow_core::analyze(&config).expect("analysis should succeed");
+
+    assert!(
+        !results
+            .unused_exports
+            .iter()
+            .any(|finding| finding.export.export_name == "foo"),
+        "two star paths to one original binding are not ambiguous: {:?}",
+        results.unused_exports
     );
 }
 
@@ -553,5 +696,35 @@ fn explicit_default_reexport_alongside_star_still_credits_source_default() {
                     .ends_with("src/source.ts")
         }),
         "an explicit default re-export must still credit the source default"
+    );
+}
+
+/// A value and an interface of the same name, star-exported through one barrel
+/// (the codec plus companion-interface idiom), must each keep resolving in
+/// their own declaration space so neither is reported as unused.
+#[test]
+fn star_barrel_companion_type_and_value_are_both_credited() {
+    let root = fixture_path("barrel-star-companion-type");
+    let config = create_config(root);
+    let results = fallow_core::analyze(&config).expect("analysis should succeed");
+
+    let unused_types: Vec<&str> = results
+        .unused_types
+        .iter()
+        .map(|finding| finding.export.export_name.as_str())
+        .collect();
+    let unused_exports: Vec<&str> = results
+        .unused_exports
+        .iter()
+        .map(|finding| finding.export.export_name.as_str())
+        .collect();
+
+    assert!(
+        !unused_types.contains(&"User"),
+        "the companion interface reached through the barrel must stay used, found: {unused_types:?}"
+    );
+    assert!(
+        !unused_exports.contains(&"User"),
+        "the companion value reached through the barrel must stay used, found: {unused_exports:?}"
     );
 }

@@ -58,11 +58,51 @@ pub use store::GraphCacheStore;
 /// span and the source string-literal span used to anchor unresolved-import
 /// findings on the specifier. Warm 19 caches lack both spans.
 ///
-/// Bumped to 21 for issue #2213: speculative `__mocks__` sibling candidates
-/// that resolve to package space are no longer emitted, so warm 20 caches
+/// Bumped to 21: persisted module graphs now carry the canonical effective
+/// export index used for named and star re-export resolution. Warm 20 caches
+/// lack that index and would replay the previous propagation semantics.
+///
+/// Bumped to 22: effective export names are interned once per graph and type
+/// and value resolutions share one compact key. Warm 21 caches contain the
+/// allocation-heavy intermediate index layout.
+///
+/// Bumped to 23: effective bindings distinguish direct declarations,
+/// namespace objects, and implicit SFC default exports.
+///
+/// Bumped to 24: namespace-object bindings retain their source module so
+/// consumers can enumerate the namespace through the canonical index.
+///
+/// Bumped to 25: export references retain their semantic Type or Value
+/// namespace so one named re-export surface can route both without duplicate
+/// graph symbols.
+///
+/// Bumped to 26: the effective export index retains typed declaration merge
+/// groups for namespace-aware reference selection.
+///
+/// Bumped to 27: declaration merge groups are stored once and referenced by a
+/// compact per-slot group identifier instead of cloning every group per slot.
+///
+/// Bumped to 28: reference-site deduplication now includes the exact import
+/// span, so one consumer can retain multiple distinct imports of one binding.
+///
+/// Bumped to 29: resolved semantic facts retain directly required structural
+/// type members used to protect explicit interface implementations.
+///
+/// Bumped to 30: declaration-merge references now propagate through named and
+/// star barrel surfaces using the canonical effective binding group.
+///
+/// Bumped to 31 for issue #2213: speculative `__mocks__` sibling candidates
+/// that resolve to package space are no longer emitted, so warm 30 caches
 /// would keep replaying the phantom `@scope/__mocks__` package edges the
 /// resolver no longer produces.
-pub const GRAPH_CACHE_VERSION: u32 = 21;
+///
+/// Bumped to 32: the effective export index resolves the type namespace in two
+/// lanes (real declarations and value-derived fallbacks), stores a per-file
+/// name index, and retains opaque bindings for known external named and
+/// namespace re-export surfaces. Warm 31 payloads neither describe the same
+/// structure nor carry those external bindings, so a consumed barrel export
+/// could be falsely reported as unused.
+pub const GRAPH_CACHE_VERSION: u32 = 32;
 
 /// Cached form of a resolved target.
 ///

@@ -6,19 +6,15 @@
 //! resolves the set of export symbols reachable through that public surface and
 //! returns one stable `"<rel_path>::<name>"` key per public export.
 //!
-//! An export `(file, name)` is PUBLIC when its DECLARING module is part of the
-//! public surface, which is:
-//! - a public-API entry point module itself (its own exports, INCLUDING the
-//!   synthetic re-export stubs the graph materializes on a barrel for every
-//!   `export { x } from './impl'` and `export * from './impl'` it forwards), OR
-//! - a module in the `export *` closure rooted at public-API entries (a target
-//!   whose names are flattened straight into the public surface by `export *`).
+//! A name is public when it resolves to one unique value binding on a public-API
+//! entry point. Candidates come from the entry's own exports and its `export *`
+//! closure. Shadowed and ambiguous star names are not public bindings.
 //!
 //! Keying on the surface AS EXPOSED (the entry's own name, e.g. `index.js::pub`),
 //! not the origin's internal name (`src/impl.ts::pub`), is what makes the delta
 //! exports-aware and avoids double-counting one symbol on both the barrel and
 //! the origin. A symbol re-exported only through an INTERNAL barrel that is not
-//! in `exports` never lands on a public entry or a star-target, so it produces
+//! in `exports` never resolves on a public entry, so it produces
 //! ZERO public-API delta (the Aisha repro); one re-exported through the
 //! `exports`-mapped entry lands on that entry once (exactly one). This mirrors
 //! the exports-aware reachability the `unprovided-inject` and
@@ -30,7 +26,28 @@ use std::path::{Path, PathBuf};
 use fallow_types::discover::FileId;
 use rustc_hash::FxHashSet;
 
-use super::ModuleGraph;
+use super::{EffectiveExportBinding, EffectiveExportResolution, ExportNamespace, ModuleGraph};
+
+/// Direct declaration exposed through at least one public package entry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PublicExportOrigin {
+    file_id: FileId,
+    export_name: String,
+}
+
+impl PublicExportOrigin {
+    /// Module that owns the public declaration.
+    #[must_use]
+    pub const fn file_id(&self) -> FileId {
+        self.file_id
+    }
+
+    /// Name of the declaration in its owning module.
+    #[must_use]
+    pub fn export_name(&self) -> &str {
+        &self.export_name
+    }
+}
 
 impl ModuleGraph {
     /// Compute the set of public-export keys reachable through the given
@@ -45,36 +62,153 @@ impl ModuleGraph {
         public_api_entry_points: &FxHashSet<FileId>,
         root: &Path,
     ) -> FxHashSet<String> {
-        let star_targets = self.public_star_re_export_targets(public_api_entry_points);
+        let candidate_names = self.public_value_export_names(public_api_entry_points);
         let mut keys: FxHashSet<String> = FxHashSet::default();
 
-        for module in &self.modules {
-            // The public surface is the exports DECLARED ON a public entry (its
-            // own + the synthetic re-export stubs the graph put there) plus the
-            // exports of any `export *` target reached from a public entry. The
-            // origin module of a NAMED re-export is internal, so its own copy of
-            // the symbol is intentionally NOT keyed (avoids double-counting and
-            // keeps an internal-barrel-only symbol out of the surface).
-            let module_is_public = public_api_entry_points.contains(&module.file_id)
-                || star_targets.contains(&module.file_id);
-            if !module_is_public {
+        for entry_id in public_api_entry_points {
+            let Some(entry) = self.modules.get(entry_id.0 as usize) else {
                 continue;
-            }
-            let rel = relativize(&module.path, root);
-            for export in &module.exports {
-                if export.is_type_only {
-                    continue;
+            };
+            let rel = relativize(&entry.path, root);
+            for name in &candidate_names {
+                if matches!(
+                    self.resolve_export(*entry_id, name, ExportNamespace::Value),
+                    EffectiveExportResolution::Unique(_)
+                ) {
+                    keys.insert(format!("{rel}::{name}"));
                 }
-                keys.insert(format!("{rel}::{}", export.name));
             }
         }
         keys
     }
 
+    /// Resolve the direct declarations exposed through public package entries.
+    /// Shadowed and ambiguous star candidates contribute no origins.
+    #[must_use]
+    pub fn public_export_origins(
+        &self,
+        public_api_entry_points: &FxHashSet<FileId>,
+    ) -> FxHashSet<PublicExportOrigin> {
+        self.public_export_origins_in_namespace(public_api_entry_points, ExportNamespace::Value)
+    }
+
+    /// Resolve direct declarations exposed through public package entries in
+    /// one export namespace.
+    ///
+    /// Type-only public surfaces matter to structural consumers such as class
+    /// member analysis, while runtime consumers can continue to request only
+    /// the value namespace.
+    #[must_use]
+    pub fn public_export_origins_in_namespace(
+        &self,
+        public_api_entry_points: &FxHashSet<FileId>,
+        namespace: ExportNamespace,
+    ) -> FxHashSet<PublicExportOrigin> {
+        self.public_export_declaration_bindings_in_namespace(public_api_entry_points, namespace)
+            .into_iter()
+            .filter_map(|binding| self.export_binding_origin(binding))
+            .map(|origin| PublicExportOrigin {
+                file_id: origin.file_id(),
+                export_name: origin.export().name.to_string(),
+            })
+            .collect()
+    }
+
+    /// Unique value bindings exposed through at least one public package entry.
+    #[must_use]
+    pub fn public_export_bindings(
+        &self,
+        public_api_entry_points: &FxHashSet<FileId>,
+    ) -> FxHashSet<EffectiveExportBinding> {
+        self.public_export_bindings_in_namespace(public_api_entry_points, ExportNamespace::Value)
+    }
+
+    fn public_export_bindings_in_namespace(
+        &self,
+        public_api_entry_points: &FxHashSet<FileId>,
+        namespace: ExportNamespace,
+    ) -> FxHashSet<EffectiveExportBinding> {
+        let candidate_names = self.public_export_names(public_api_entry_points, namespace);
+        public_api_entry_points
+            .iter()
+            .flat_map(|entry| {
+                candidate_names.iter().filter_map(|name| {
+                    match self.resolve_export(*entry, name, namespace) {
+                        EffectiveExportResolution::Unique(binding) => Some(binding),
+                        EffectiveExportResolution::Missing
+                        | EffectiveExportResolution::Ambiguous => None,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Direct declaration bindings exposed through public entries, including
+    /// declarations nested under public namespace-object exports.
+    #[must_use]
+    pub fn public_export_declaration_bindings(
+        &self,
+        public_api_entry_points: &FxHashSet<FileId>,
+    ) -> FxHashSet<EffectiveExportBinding> {
+        self.public_export_declaration_bindings_in_namespace(
+            public_api_entry_points,
+            ExportNamespace::Value,
+        )
+    }
+
+    fn public_export_declaration_bindings_in_namespace(
+        &self,
+        public_api_entry_points: &FxHashSet<FileId>,
+        namespace: ExportNamespace,
+    ) -> FxHashSet<EffectiveExportBinding> {
+        let mut declarations = FxHashSet::default();
+        let mut visited = FxHashSet::default();
+        let mut stack: Vec<_> = self
+            .public_export_bindings_in_namespace(public_api_entry_points, namespace)
+            .into_iter()
+            .collect();
+        while let Some(binding) = stack.pop() {
+            if !visited.insert(binding) {
+                continue;
+            }
+            if let Some(source) = binding.namespace_source() {
+                stack.extend(self.unique_export_bindings(source, namespace));
+            } else if self.export_binding_origin(binding).is_some() {
+                declarations.insert(binding);
+            }
+        }
+        declarations
+    }
+
+    fn public_value_export_names(
+        &self,
+        public_api_entry_points: &FxHashSet<FileId>,
+    ) -> FxHashSet<String> {
+        self.public_export_names(public_api_entry_points, ExportNamespace::Value)
+    }
+
+    fn public_export_names(
+        &self,
+        public_api_entry_points: &FxHashSet<FileId>,
+        namespace: ExportNamespace,
+    ) -> FxHashSet<String> {
+        let star_targets = self.public_star_re_export_targets(public_api_entry_points);
+        let mut names: FxHashSet<String> = public_api_entry_points
+            .iter()
+            .chain(star_targets.iter())
+            .filter_map(|id| self.modules.get(id.0 as usize))
+            .flat_map(|module| &module.exports)
+            .filter(|export| namespace == ExportNamespace::Type || !export.is_type_only)
+            .map(|export| export.name.to_string())
+            .collect();
+        names.insert("default".to_string());
+        names
+    }
+
     /// The `export *` closure rooted at the public-API entry points: every module
     /// reachable through a chain of `export * from './x'` edges starting from a
-    /// public entry. Such modules' exports are part of the public surface even
-    /// though the entry never names them.
+    /// public entry. Their exported names are candidates for effective
+    /// resolution on each public entry.
     fn public_star_re_export_targets(
         &self,
         public_api_entry_points: &FxHashSet<FileId>,
@@ -351,5 +485,194 @@ mod tests {
         let keys = graph.public_export_keys(&public_entries, Path::new("/p"));
         assert!(keys.contains("index.ts::v"));
         assert!(!keys.contains("index.ts::T"), "type-only export skipped");
+
+        let type_origins =
+            graph.public_export_origins_in_namespace(&public_entries, ExportNamespace::Type);
+        assert!(
+            type_origins
+                .iter()
+                .any(|origin| origin.export_name() == "T"),
+            "type namespace keeps the public declaration"
+        );
+        assert!(
+            graph
+                .public_export_origins(&public_entries)
+                .iter()
+                .all(|origin| origin.export_name() != "T"),
+            "value-only consumers still exclude type-only declarations"
+        );
+    }
+
+    #[test]
+    fn public_namespace_objects_expand_to_declaration_bindings() {
+        let (graph, public_entries) = build_star_surface_graph(
+            vec![re_export("*", "SDK", FileId(1))],
+            vec![ResolvedModule {
+                file_id: FileId(1),
+                path: PathBuf::from("/p/sdk.ts"),
+                exports: vec![named_export("Client")].into(),
+                ..Default::default()
+            }],
+        );
+
+        let declarations = graph.public_export_declaration_bindings(&public_entries);
+
+        assert_eq!(declarations.len(), 1);
+        let binding = *declarations.iter().next().expect("public Client binding");
+        let origin = graph.export_binding_origin(binding).expect("direct origin");
+        assert_eq!(origin.file_id(), FileId(1));
+        assert_eq!(origin.export().name.to_string(), "Client");
+    }
+
+    fn build_star_surface_graph(
+        entry_re_exports: Vec<ResolvedReExport>,
+        source_modules: Vec<ResolvedModule>,
+    ) -> (ModuleGraph, FxHashSet<FileId>) {
+        let mut files = vec![file(0, "/p/index.ts")];
+        files.extend(source_modules.iter().map(|module| {
+            file(
+                module.file_id.0,
+                module.path.to_str().expect("test path is UTF-8"),
+            )
+        }));
+        let entry_points = vec![EntryPoint {
+            path: PathBuf::from("/p/index.ts"),
+            source: EntryPointSource::PackageJsonExports,
+        }];
+        let mut resolved = vec![ResolvedModule {
+            file_id: FileId(0),
+            path: PathBuf::from("/p/index.ts"),
+            re_exports: entry_re_exports,
+            ..Default::default()
+        }];
+        resolved.extend(source_modules);
+        let graph = ModuleGraph::build(&resolved, &entry_points, &files);
+        (graph, std::iter::once(FileId(0)).collect())
+    }
+
+    #[test]
+    fn explicit_export_hides_shadowed_star_binding_from_public_surface() {
+        let (graph, public_entries) = build_star_surface_graph(
+            vec![
+                re_export("*", "*", FileId(1)),
+                re_export("foo", "foo", FileId(2)),
+            ],
+            vec![
+                ResolvedModule {
+                    file_id: FileId(1),
+                    path: PathBuf::from("/p/star-source.ts"),
+                    exports: vec![named_export("foo")].into(),
+                    ..Default::default()
+                },
+                ResolvedModule {
+                    file_id: FileId(2),
+                    path: PathBuf::from("/p/explicit-source.ts"),
+                    exports: vec![named_export("foo")].into(),
+                    ..Default::default()
+                },
+            ],
+        );
+
+        let keys = graph.public_export_keys(&public_entries, Path::new("/p"));
+
+        assert_eq!(keys, FxHashSet::from_iter(["index.ts::foo".to_string()]));
+    }
+
+    #[test]
+    fn ambiguous_star_binding_is_absent_from_public_surface() {
+        let (graph, public_entries) = build_star_surface_graph(
+            vec![
+                re_export("*", "*", FileId(1)),
+                re_export("*", "*", FileId(2)),
+            ],
+            vec![
+                ResolvedModule {
+                    file_id: FileId(1),
+                    path: PathBuf::from("/p/left.ts"),
+                    exports: vec![named_export("foo")].into(),
+                    ..Default::default()
+                },
+                ResolvedModule {
+                    file_id: FileId(2),
+                    path: PathBuf::from("/p/right.ts"),
+                    exports: vec![named_export("foo")].into(),
+                    ..Default::default()
+                },
+            ],
+        );
+
+        let keys = graph.public_export_keys(&public_entries, Path::new("/p"));
+
+        assert!(
+            keys.is_empty(),
+            "ambiguous foo is not a public binding: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn convergent_star_diamond_has_one_exposed_public_key() {
+        let (graph, public_entries) = build_star_surface_graph(
+            vec![
+                re_export("*", "*", FileId(1)),
+                re_export("*", "*", FileId(2)),
+            ],
+            vec![
+                ResolvedModule {
+                    file_id: FileId(1),
+                    path: PathBuf::from("/p/left.ts"),
+                    re_exports: vec![re_export("*", "*", FileId(3))],
+                    ..Default::default()
+                },
+                ResolvedModule {
+                    file_id: FileId(2),
+                    path: PathBuf::from("/p/right.ts"),
+                    re_exports: vec![re_export("*", "*", FileId(3))],
+                    ..Default::default()
+                },
+                ResolvedModule {
+                    file_id: FileId(3),
+                    path: PathBuf::from("/p/source.ts"),
+                    exports: vec![named_export("foo")].into(),
+                    ..Default::default()
+                },
+            ],
+        );
+
+        let keys = graph.public_export_keys(&public_entries, Path::new("/p"));
+
+        assert_eq!(keys, FxHashSet::from_iter(["index.ts::foo".to_string()]));
+    }
+
+    #[test]
+    fn public_surface_preserves_aliases_default_and_value_namespace() {
+        let mut default_export = named_export("Widget");
+        default_export.name = ExportName::Default;
+        let mut type_export = named_export("T");
+        type_export.is_type_only = true;
+        let mut type_re_export = re_export("T", "PublicType", FileId(1));
+        type_re_export.info.is_type_only = true;
+        let (graph, public_entries) = build_star_surface_graph(
+            vec![
+                re_export("default", "default", FileId(1)),
+                re_export("default", "Widget", FileId(1)),
+                type_re_export,
+            ],
+            vec![ResolvedModule {
+                file_id: FileId(1),
+                path: PathBuf::from("/p/widget.ts"),
+                exports: vec![default_export, type_export].into(),
+                ..Default::default()
+            }],
+        );
+
+        let keys = graph.public_export_keys(&public_entries, Path::new("/p"));
+
+        assert_eq!(
+            keys,
+            FxHashSet::from_iter([
+                "index.ts::default".to_string(),
+                "index.ts::Widget".to_string(),
+            ])
+        );
     }
 }

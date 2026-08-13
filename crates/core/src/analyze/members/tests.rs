@@ -225,6 +225,53 @@ fn make_export_with_members(
     }
 }
 
+#[test]
+fn shadowed_computed_enum_key_does_not_credit_class_member() {
+    let mut graph = build_graph(&[("/src/entry.ts", true), ("/src/classes.ts", false)]);
+    set_exports(
+        &mut graph,
+        1,
+        &[make_export_with_members(
+            "Protocol",
+            vec![make_member("__shadowed", MemberKind::ClassProperty)],
+            Some(0),
+        )],
+    );
+    let module = fallow_extract::parse_source_to_module(
+        FileId(0),
+        std::path::Path::new("/src/entry.ts"),
+        r"
+        enum ProtocolKey { Protocol = '__shadowed' }
+        export function read(
+            target: Record<string, unknown>,
+            ProtocolKey: { Protocol: string },
+        ): unknown {
+            return target[ProtocolKey.Protocol]
+        }
+        ",
+        0,
+        false,
+    );
+    graph.resolved_modules[0].semantic_facts = std::sync::Arc::clone(&module.semantic_facts);
+
+    let (_, class_members) = find_unused_members(
+        &graph,
+        &graph.resolved_modules,
+        &[module],
+        &SuppressionContext::empty(),
+        &FxHashMap::default(),
+        &[],
+        &[],
+    );
+
+    assert!(
+        class_members.iter().any(|member| {
+            member.parent_name == "Protocol" && member.member_name == "__shadowed"
+        }),
+        "a parameter-shadowed enum key must not credit the matching class member: {class_members:?}"
+    );
+}
+
 /// Add canonical resolver inputs before the fixture builds its graph.
 fn set_exports(graph: &mut TestGraphFixture, target: usize, exports: &[TestExport]) {
     graph.assert_configuring();
@@ -943,15 +990,9 @@ fn accessed_enum_member_via_re_export_not_flagged() {
     graph.set_reachable(1);
     graph.set_reachable(2);
 
-    set_exports(
-        &mut graph,
-        1,
-        &[make_export_with_members(
-            "Status",
-            vec![],
-            Some(0), // referenced from consumer
-        )],
-    );
+    graph.resolved_modules[0]
+        .resolved_imports
+        .push(make_resolved_import("./index", "Status", "Status", 1));
     graph.set_re_exports(
         1,
         vec![crate::graph::ReExportEdge {
@@ -1031,11 +1072,14 @@ fn accessed_class_static_member_via_re_export_not_flagged() {
     graph.set_reachable(1);
     graph.set_reachable(2);
 
-    set_exports(
-        &mut graph,
-        1,
-        &[make_export_with_members("StringUtils", vec![], Some(0))],
-    );
+    graph.resolved_modules[0]
+        .resolved_imports
+        .push(make_resolved_import(
+            "./index",
+            "StringUtils",
+            "StringUtils",
+            1,
+        ));
     graph.set_re_exports(
         1,
         vec![crate::graph::ReExportEdge {
@@ -1107,11 +1151,9 @@ fn accessed_member_via_renamed_re_export_not_flagged() {
     graph.set_reachable(1);
     graph.set_reachable(2);
 
-    set_exports(
-        &mut graph,
-        1,
-        &[make_export_with_members("Renamed", vec![], Some(0))],
-    );
+    graph.resolved_modules[0]
+        .resolved_imports
+        .push(make_resolved_import("./index", "Renamed", "Renamed", 1));
     graph.set_re_exports(
         1,
         vec![crate::graph::ReExportEdge {
@@ -2848,6 +2890,168 @@ fn same_named_exports_do_not_share_member_usage() {
         !unused_members.contains(&("/src/one.ts".to_string(), "Widget.refresh".to_string())),
         "member usage from /src/one.ts should not leak into /src/two.ts: {unused_members:?}"
     );
+}
+
+#[test]
+fn ambiguous_star_re_exports_have_no_unique_member_origin() {
+    let mut graph = build_graph(&[
+        ("/src/barrel.ts", false),
+        ("/src/left.ts", false),
+        ("/src/right.ts", false),
+    ]);
+    set_exports(
+        &mut graph,
+        1,
+        &[make_export_with_members(
+            "Widget",
+            vec![make_member("left", MemberKind::ClassMethod)],
+            None,
+        )],
+    );
+    set_exports(
+        &mut graph,
+        2,
+        &[make_export_with_members(
+            "Widget",
+            vec![make_member("right", MemberKind::ClassMethod)],
+            None,
+        )],
+    );
+    graph.set_re_exports(
+        0,
+        vec![
+            crate::graph::ReExportEdge {
+                source_file: FileId(1),
+                imported_name: "*".to_string(),
+                exported_name: "*".to_string(),
+                is_type_only: false,
+                span: Span::default(),
+            },
+            crate::graph::ReExportEdge {
+                source_file: FileId(2),
+                imported_name: "*".to_string(),
+                exported_name: "*".to_string(),
+                is_type_only: false,
+                span: Span::default(),
+            },
+        ],
+    );
+
+    assert!(walk_re_export_origins(&graph, FileId(0), "Widget").is_empty());
+}
+
+#[test]
+fn shadowed_star_class_is_not_a_public_api_export() {
+    let mut graph = build_graph(&[
+        ("/src/index.ts", true),
+        ("/src/hidden.ts", false),
+        ("/src/public.ts", false),
+    ]);
+    set_exports(
+        &mut graph,
+        1,
+        &[make_export_with_members(
+            "Widget",
+            vec![make_member("hidden", MemberKind::ClassMethod)],
+            None,
+        )],
+    );
+    set_exports(
+        &mut graph,
+        2,
+        &[make_export_with_members("Widget", vec![], None)],
+    );
+    graph.set_re_exports(
+        0,
+        vec![
+            crate::graph::ReExportEdge {
+                source_file: FileId(1),
+                imported_name: "*".to_string(),
+                exported_name: "*".to_string(),
+                is_type_only: false,
+                span: Span::default(),
+            },
+            crate::graph::ReExportEdge {
+                source_file: FileId(2),
+                imported_name: "Widget".to_string(),
+                exported_name: "Widget".to_string(),
+                is_type_only: false,
+                span: Span::default(),
+            },
+        ],
+    );
+    let public_entries = FxHashSet::from_iter([FileId(0)]);
+    let public_class_exports = public_class_export_origin_keys(&graph, &public_entries);
+
+    assert!(!is_entry_point_public_class_export(
+        &graph.modules[1],
+        &graph.modules[1].exports[0],
+        &public_class_exports,
+    ));
+}
+
+#[test]
+fn class_exposed_through_public_namespace_is_public_api() {
+    let mut graph = build_graph(&[("/src/index.ts", true), ("/src/sdk.ts", false)]);
+    set_exports(
+        &mut graph,
+        1,
+        &[make_export_with_members(
+            "Client",
+            vec![make_member("request", MemberKind::ClassMethod)],
+            None,
+        )],
+    );
+    graph.set_re_exports(
+        0,
+        vec![crate::graph::ReExportEdge {
+            source_file: FileId(1),
+            imported_name: "*".to_string(),
+            exported_name: "SDK".to_string(),
+            is_type_only: false,
+            span: Span::default(),
+        }],
+    );
+    let public_entries = FxHashSet::from_iter([FileId(0)]);
+    let public_class_exports = public_class_export_origin_keys(&graph, &public_entries);
+
+    assert!(is_entry_point_public_class_export(
+        &graph.modules[1],
+        &graph.modules[1].exports[0],
+        &public_class_exports,
+    ));
+}
+
+#[test]
+fn class_exposed_through_type_only_public_re_export_is_public_api() {
+    let mut graph = build_graph(&[("/src/index.ts", true), ("/src/context.ts", false)]);
+    set_exports(
+        &mut graph,
+        1,
+        &[make_export_with_members(
+            "Context",
+            vec![make_member("field", MemberKind::ClassProperty)],
+            None,
+        )],
+    );
+    graph.set_re_exports(
+        0,
+        vec![crate::graph::ReExportEdge {
+            source_file: FileId(1),
+            imported_name: "Context".to_string(),
+            exported_name: "Context".to_string(),
+            is_type_only: true,
+            span: Span::default(),
+        }],
+    );
+    let public_entries = FxHashSet::from_iter([FileId(0)]);
+    let public_class_exports = public_class_export_origin_keys(&graph, &public_entries);
+
+    assert!(is_entry_point_public_class_export(
+        &graph.modules[1],
+        &graph.modules[1].exports[0],
+        &public_class_exports,
+    ));
 }
 
 #[test]

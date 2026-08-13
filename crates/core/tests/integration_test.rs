@@ -109,6 +109,8 @@ mod sfc_parsing;
 mod svelte_dead_event;
 #[path = "integration_test/symlink_root_containment.rs"]
 mod symlink_root_containment;
+#[path = "integration_test/typed_receiver_scoping.rs"]
+mod typed_receiver_scoping;
 #[path = "integration_test/unreachable_exports.rs"]
 mod unreachable_exports;
 #[path = "integration_test/workspaces.rs"]
@@ -118,6 +120,8 @@ mod workspaces;
 mod boundary_violations;
 #[path = "integration_test/capability_e_route_exports.rs"]
 mod capability_e_route_exports;
+#[path = "integration_test/computed_enum_key_members.rs"]
+mod computed_enum_key_members;
 #[path = "integration_test/config_file_loading.rs"]
 mod config_file_loading;
 #[path = "integration_test/css_modules_unused.rs"]

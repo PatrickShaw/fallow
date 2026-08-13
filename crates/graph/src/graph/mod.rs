@@ -5,6 +5,8 @@
 
 mod build;
 mod cycles;
+mod effective_exports;
+mod effective_re_exports;
 mod fan_io;
 mod impact_closure;
 mod namespace_aliases;
@@ -27,15 +29,88 @@ use fallow_types::discover::{DiscoveredFile, EntryPoint, FileId};
 use fallow_types::extract::{ImportedName, ModuleLoadMechanism};
 use types::{ReferencePathInterner, ReferencePathNode, ReferenceRouteNodeId, ReferenceRoutes};
 
+pub use effective_exports::{EffectiveExportBinding, EffectiveExportResolution, ExportNamespace};
+pub use effective_re_exports::EffectiveReExportRoute;
 pub use fan_io::{FocusFileFacts, FocusFileFactsPaths};
 pub use impact_closure::{
     CoordinationGap, CoordinationGapPaths, ImpactClosure, ImpactClosurePaths,
 };
 pub use partition_order::{PartitionOrder, PartitionOrderPaths, ReviewUnit, ReviewUnitPaths};
+pub use public_exports::PublicExportOrigin;
 pub use re_exports::GraphReExportCycle;
 pub use types::{
     ExportSymbol, ModuleNode, ReExportEdge, ReferenceKind, ReferencePathId, SymbolReference,
 };
+
+/// Direct declaration selected by one unique effective export binding.
+#[derive(Debug, Clone, Copy)]
+pub struct EffectiveExportOrigin<'graph> {
+    file_id: FileId,
+    export: &'graph ExportSymbol,
+}
+
+/// One namespace-specific export exposed by a module and its effective binding.
+#[derive(Debug, Clone, Copy)]
+pub struct EffectiveExportSurface<'graph> {
+    binding: EffectiveExportBinding,
+    namespace: ExportNamespace,
+    export: Option<&'graph ExportSymbol>,
+    origin: Option<EffectiveExportOrigin<'graph>>,
+    local_export: bool,
+}
+
+impl<'graph> EffectiveExportSurface<'graph> {
+    /// Canonical binding exposed by the requested module/name/namespace.
+    #[must_use]
+    pub const fn binding(self) -> EffectiveExportBinding {
+        self.binding
+    }
+
+    /// Namespace selected for this surface.
+    #[must_use]
+    pub const fn namespace(self) -> ExportNamespace {
+        self.namespace
+    }
+
+    /// Reference-bearing graph export selected for this surface.
+    ///
+    /// Direct declarations use their origin export. Named re-exports use their
+    /// single barrel surface while references remain namespace-specific;
+    /// namespace objects and implicit SFC defaults have no declaration export.
+    #[must_use]
+    pub const fn export(self) -> Option<&'graph ExportSymbol> {
+        self.export
+    }
+
+    /// Direct declaration that owns this binding, when one exists.
+    #[must_use]
+    pub const fn origin(self) -> Option<EffectiveExportOrigin<'graph>> {
+        self.origin
+    }
+
+    /// Whether the requested module owns a concrete export surface.
+    ///
+    /// Named re-exports have a local export-specifier identity. Star-only
+    /// surfaces do not, so semantic consumers must use the origin declaration.
+    #[must_use]
+    pub const fn has_local_export(self) -> bool {
+        self.local_export
+    }
+}
+
+impl<'graph> EffectiveExportOrigin<'graph> {
+    /// Module that owns the selected declaration.
+    #[must_use]
+    pub const fn file_id(self) -> FileId {
+        self.file_id
+    }
+
+    /// Selected declaration in its owning module.
+    #[must_use]
+    pub const fn export(self) -> &'graph ExportSymbol {
+        self.export
+    }
+}
 
 /// True when the path's final component looks like a TypeScript declaration
 /// file (`.d.ts`, `.d.mts`, `.d.cts`). Used to seed declaration files as
@@ -111,6 +186,8 @@ pub struct ModuleGraph {
     /// `re_exports::find_re_export_cycles` and consumed by the analysis
     /// backend, which wraps each entry in a typed `ReExportCycleFinding`.
     pub re_export_cycles: Vec<GraphReExportCycle>,
+    /// Canonical direct and transitive export binding resolution.
+    effective_exports: effective_exports::EffectiveExportIndex,
 }
 
 /// An edge in the module graph.
@@ -560,6 +637,7 @@ impl ModuleGraph {
             module_count,
             total_capacity,
         });
+        graph.effective_exports = effective_exports::EffectiveExportIndex::build(resolved_modules);
 
         let test_reachability_plan = reachability::TestReachabilityPlan::new(
             &test_entry_point_ids,
@@ -722,6 +800,274 @@ impl ModuleGraph {
             }
         }
         self.namespace_imported = bitset;
+    }
+
+    /// Resolve the effective declaration exported under `name` in one namespace.
+    ///
+    /// This is the canonical graph contract for direct exports and every named
+    /// or star re-export path. Missing and ambiguous bindings are explicit so
+    /// consumers cannot accidentally credit an arbitrary source declaration.
+    #[must_use]
+    pub fn resolve_export(
+        &self,
+        file_id: FileId,
+        name: &str,
+        namespace: ExportNamespace,
+    ) -> EffectiveExportResolution {
+        self.effective_exports.resolve(file_id, name, namespace)
+    }
+
+    /// Resolve one exported name to its unique direct declaration.
+    ///
+    /// Missing and ambiguous bindings return `None`. Namespace-object exports
+    /// are bindings in their own right rather than direct declarations, so
+    /// they also have no declaration origin.
+    #[must_use]
+    pub fn resolve_export_origin(
+        &self,
+        file_id: FileId,
+        name: &str,
+        namespace: ExportNamespace,
+    ) -> Option<EffectiveExportOrigin<'_>> {
+        let EffectiveExportResolution::Unique(binding) =
+            self.resolve_export(file_id, name, namespace)
+        else {
+            return None;
+        };
+        self.export_binding_origin(binding)
+    }
+
+    /// Resolve one module surface to its canonical binding and reference-bearing
+    /// graph export. Value and type namespaces are selected independently.
+    #[must_use]
+    pub fn effective_export_surface(
+        &self,
+        file_id: FileId,
+        name: &str,
+        namespace: ExportNamespace,
+    ) -> Option<EffectiveExportSurface<'_>> {
+        let EffectiveExportResolution::Unique(binding) =
+            self.resolve_export(file_id, name, namespace)
+        else {
+            return None;
+        };
+        let module = self.modules.get(file_id.0 as usize)?;
+        let exact_surface = module.exports.iter().find(|export| {
+            export.name.matches_str(name)
+                && match namespace {
+                    ExportNamespace::Type => export.is_type_only,
+                    ExportNamespace::Value => !export.is_type_only,
+                }
+        });
+        let surface_export = exact_surface.or_else(|| {
+            module
+                .exports
+                .iter()
+                .find(|export| export.name.matches_str(name))
+        });
+        let origin = self.export_binding_origin(binding);
+        let export = surface_export.or_else(|| origin.map(|o| o.export));
+        Some(EffectiveExportSurface {
+            binding,
+            namespace,
+            export,
+            origin,
+            local_export: surface_export.is_some(),
+        })
+    }
+
+    /// Local re-export specifier that owns one effective module surface.
+    ///
+    /// Direct declarations and star-only forwarded surfaces return `None`.
+    /// Named and namespace re-exports return the namespace-compatible edge
+    /// whose source resolves to the same canonical binding.
+    #[must_use]
+    pub fn effective_export_surface_re_export(
+        &self,
+        file_id: FileId,
+        name: &str,
+        namespace: ExportNamespace,
+    ) -> Option<&ReExportEdge> {
+        let EffectiveExportResolution::Unique(binding) =
+            self.resolve_export(file_id, name, namespace)
+        else {
+            return None;
+        };
+        self.modules
+            .get(file_id.0 as usize)?
+            .re_exports
+            .iter()
+            .find(|re_export| {
+                re_export.exported_name == name
+                    && (namespace == ExportNamespace::Type || !re_export.is_type_only)
+                    && if re_export.imported_name == "*" {
+                        binding.namespace_source() == Some(re_export.source_file)
+                    } else {
+                        self.resolve_export(
+                            re_export.source_file,
+                            &re_export.imported_name,
+                            namespace,
+                        ) == EffectiveExportResolution::Unique(binding)
+                    }
+            })
+    }
+
+    /// References that reach one exact module export surface.
+    ///
+    /// Star-only surfaces share their declaration with other barrels, so their
+    /// origin references are filtered by recorded provenance instead of being
+    /// borrowed wholesale from the declaration.
+    #[must_use]
+    pub fn effective_export_surface_references(
+        &self,
+        file_id: FileId,
+        name: &str,
+        namespace: ExportNamespace,
+    ) -> Vec<&SymbolReference> {
+        let Some(surface) = self.effective_export_surface(file_id, name, namespace) else {
+            return Vec::new();
+        };
+        let Some(export) = surface.export() else {
+            return Vec::new();
+        };
+        if surface.local_export
+            || surface
+                .origin()
+                .is_none_or(|origin| origin.file_id() == file_id)
+        {
+            return export.references_in(namespace).collect();
+        }
+        let mut exposed: FxHashMap<FileId, FxHashSet<String>> = FxHashMap::default();
+        exposed.entry(file_id).or_default().insert(name.to_string());
+        for route in self.effective_re_export_routes(file_id, name, namespace) {
+            exposed
+                .entry(route.barrel_file())
+                .or_default()
+                .insert(route.exported_name().to_string());
+        }
+        export
+            .references
+            .iter()
+            .filter(|reference| {
+                reference.namespace == namespace
+                    && self.reference_reaches_surface(reference, &exposed, namespace)
+            })
+            .collect()
+    }
+
+    fn reference_reaches_surface(
+        &self,
+        reference: &SymbolReference,
+        exposed: &FxHashMap<FileId, FxHashSet<String>>,
+        namespace: ExportNamespace,
+    ) -> bool {
+        if reference.kind == ReferenceKind::ReExport && exposed.contains_key(&reference.from_file) {
+            return true;
+        }
+        self.outgoing_symbol_edges(reference.from_file)
+            .any(|(target, symbols)| {
+                let Some(names) = exposed.get(&target) else {
+                    return false;
+                };
+                symbols.iter().any(|symbol| {
+                    symbol.import_span == reference.import_span
+                        && (namespace == ExportNamespace::Type || !symbol.is_type_only)
+                        && match &symbol.imported_name {
+                            ImportedName::Named(imported) => names.contains(imported.as_str()),
+                            ImportedName::Default => names.contains("default"),
+                            ImportedName::Namespace => true,
+                            ImportedName::SideEffect => false,
+                        }
+                })
+            })
+    }
+
+    /// Resolve a unique binding to its direct declaration, when it has one.
+    #[must_use]
+    pub fn export_binding_origin(
+        &self,
+        binding: EffectiveExportBinding,
+    ) -> Option<EffectiveExportOrigin<'_>> {
+        let origin_file = binding.origin_file();
+        let export = self
+            .modules
+            .get(origin_file.0 as usize)?
+            .exports
+            .get(binding.origin_slot()?)?;
+        Some(EffectiveExportOrigin {
+            file_id: origin_file,
+            export,
+        })
+    }
+
+    /// Unique bindings exposed by a module in one namespace.
+    ///
+    /// Multiple names that resolve to the same declaration are deduplicated;
+    /// missing and ambiguous exports are excluded.
+    #[must_use]
+    pub fn unique_export_bindings(
+        &self,
+        file_id: FileId,
+        namespace: ExportNamespace,
+    ) -> FxHashSet<EffectiveExportBinding> {
+        self.effective_exports.unique_bindings(file_id, namespace)
+    }
+
+    /// Whether `importer` connects to `source` as an origin of `name`.
+    ///
+    /// Any direct import connects the two modules for duplicate-export
+    /// grouping, even when it imports a different symbol. A re-export-only edge
+    /// connects them only when it contributes this binding, including each
+    /// contributor to an ambiguous star export and excluding star bindings
+    /// shadowed by an explicit export.
+    #[must_use]
+    pub fn importer_connects_export_origin(
+        &self,
+        importer: FileId,
+        source: FileId,
+        name: &str,
+        namespace: ExportNamespace,
+    ) -> bool {
+        let Some(importer_module) = self.modules.get(importer.0 as usize) else {
+            return false;
+        };
+        let re_export_count = importer_module
+            .re_exports
+            .iter()
+            .filter(|re_export| re_export.source_file == source)
+            .count();
+        if self.edges[importer_module.edge_range.clone()]
+            .iter()
+            .any(|edge| edge.target == source && edge.symbols.len() > re_export_count)
+        {
+            return true;
+        }
+
+        importer_module.re_exports.iter().any(|re_export| {
+            if re_export.source_file != source
+                || (namespace == ExportNamespace::Value && re_export.is_type_only)
+            {
+                return false;
+            }
+            let exported_name = if re_export.imported_name == "*" {
+                if re_export.exported_name != "*" || name == "default" {
+                    return false;
+                }
+                name
+            } else {
+                if re_export.imported_name != name {
+                    return false;
+                }
+                &re_export.exported_name
+            };
+            self.effective_exports.contributes_through(
+                importer,
+                exported_name,
+                source,
+                name,
+                namespace,
+            )
+        })
     }
 
     /// Check if any importer uses `import * as ns` for this module.

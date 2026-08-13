@@ -875,7 +875,56 @@ use crate::MemberKind;
 /// (`{#await promise then value}` / `{#await promise catch error}`) now retain
 /// their continuation contribution instead of being cached with only `Await`,
 /// and template-expression regex literals no longer hide later contributions.
-pub(super) const CACHE_VERSION: u32 = 255;
+///
+/// Bumped to 256: semantic facts now retain legal TypeScript declaration merge
+/// groups so warm extraction results preserve the same export identity.
+///
+/// Bumped to 257: typed parameter member accesses are now resolved within their
+/// function body instead of relying solely on a module-flat binding fallback.
+/// Warm 256 caches can retain a sibling function's target for both scopes.
+///
+/// Bumped to 258: type aliases now retain direct receiver-surface target facts.
+/// Warm 257 caches cannot propagate member access through those surfaces.
+///
+/// Bumped to 259: string enum member values and computed enum-key uses are now
+/// persisted for exact protocol-member credit. Warm 258 caches lack both facts.
+///
+/// Bumped to 260: SSR-safe aliases of the browser-global `HTMLElement` are now
+/// canonicalized in persisted class heritage. Warm 259 caches retain the alias.
+///
+/// Bumped to 261: member accesses through explicit TypeScript assertion
+/// receivers are now persisted against the asserted type. Warm 260 caches omit
+/// those accesses.
+///
+/// Bumped to 262: nullable conditional bindings retain a uniquely asserted
+/// non-null receiver type. Warm 261 caches omit accesses through those bindings.
+///
+/// Bumped to 263: scoped typed-parameter collection now persists property-chain
+/// accesses, including destructured aliases. Warm 262 caches omit those facts.
+///
+/// Bumped to 264: locals initialized from typed instance fields retain the
+/// field's receiver type. Warm 263 caches omit accesses through those locals.
+///
+/// Bumped to 265: contextually typed function expressions retain parameter
+/// receiver types from local function aliases. Warm 264 caches omit those uses.
+///
+/// Bumped to 266: named structural types retain their required members. Warm
+/// 265 caches can report contract-required implementer members as removable.
+///
+/// Bumped to 267: contextually typed function expressions now resolve the
+/// nearest lexical function alias. Warm 266 caches can retain receiver facts
+/// from a shadowed outer alias and omit facts from the selected local alias.
+///
+/// Bumped to 268: generic alias substitution and lexical type/value provenance
+/// now change persisted member accesses, signature references, and semantic
+/// facts. Computed enum-key uses also require a proven module binding. Warm 267
+/// caches can therefore retain false receiver/key credits or omit the concrete
+/// generic receiver selected by the current parse.
+///
+/// Bumped to 269: a class's own lexical type binding now retains member accesses
+/// against that class while generic and nested type shadows still fail closed.
+/// Warm 268 caches can omit self-typed class member uses.
+pub(super) const CACHE_VERSION: u32 = 269;
 
 /// Duplication token cache version. Bump when duplicate tokenization,
 /// normalization, or the on-disk token cache schema changes.

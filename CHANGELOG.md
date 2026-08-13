@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.16.0] - 2026-08-13
+
 ### Fixed
 
+- **Windows: `--gate new-only` no longer reports pre-existing findings as
+  introduced.** The base-snapshot focus set is built from
+  `git rev-parse --show-toplevel`, whose spelling can differ from the
+  canonicalized project root (8.3 path components, drive-letter case), so no
+  path mapped into the base worktree and the base dead-code results were
+  filtered away entirely. Every inherited finding then looked introduced and
+  failed the gate. Path matching now compares simplified and canonicalized
+  forms, and a base run whose focus set cannot be expressed leaves its results
+  unfiltered instead of filtering them against an empty set.
 - **`thresholdOverrides` and `maxCrap` now reach file scores and refactoring
   targets** (Closes [#2228](https://github.com/fallow-rs/fallow/issues/2228)).
   File scoring and the target rules previously compared CRAP against a fixed
@@ -5843,7 +5854,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.15.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.16.0...HEAD
+[3.16.0]: https://github.com/fallow-rs/fallow/compare/v3.15.0...v3.16.0
 [3.15.0]: https://github.com/fallow-rs/fallow/compare/v3.14.0...v3.15.0
 [3.14.0]: https://github.com/fallow-rs/fallow/compare/v3.13.0...v3.14.0
 [3.13.0]: https://github.com/fallow-rs/fallow/compare/v3.12.0...v3.13.0

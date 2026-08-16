@@ -153,6 +153,10 @@ test("type-aware manifest keeps every runtime and package surface in parity", ()
   );
   const vscodeWorkspace = readFileSync("editors/vscode/pnpm-workspace.yaml", "utf8");
   const vscodePackage = readJson("editors/vscode/package.json");
+  const windowsCandidateSmoke = readFileSync(
+    "scripts/type-aware-windows-candidate-smoke.mjs",
+    "utf8",
+  );
   const bundledBackends = [
     "@typescript/typescript-darwin-arm64",
     "@typescript/typescript-darwin-x64",
@@ -204,6 +208,8 @@ test("type-aware manifest keeps every runtime and package surface in parity", ()
   assert.match(vscodeWorkspace, /- win32/u);
   assert.match(vscodeWorkspace, /- darwin/u);
   assert.match(vscodeWorkspace, /- linux/u);
+  assert.match(windowsCandidateSmoke, /platformPackage\.replace\("@fallow-cli\/", ""\)/u);
+  assert.match(windowsCandidateSmoke, /join\(temporaryRoot, platformPack\)/u);
 });
 
 test("type-aware public surfaces expose only the stable protocol", () => {

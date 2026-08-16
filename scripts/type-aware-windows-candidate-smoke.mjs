@@ -12,12 +12,18 @@ const SUCCESS_OR_FINDINGS_EXIT_CODES = [0, 1];
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const candidateBinary = process.env.FALLOW_CANDIDATE_BIN;
 const npmCli = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+const require = createRequire(import.meta.url);
+const { getPlatformPackage } = require(
+  join(repoRoot, "npm", "fallow", "scripts", "platform-package.js"),
+);
+const platformPackage = getPlatformPackage(process.platform, process.arch);
 const backendVersion = JSON.parse(
   readFileSync(join(repoRoot, "crates", "api", "type-aware-protocol.json"), "utf8"),
 ).backend.version;
 
 if (process.platform !== "win32") throw new Error("Windows candidate smoke requires win32");
 if (!candidateBinary) throw new Error("FALLOW_CANDIDATE_BIN is required");
+assert.ok(platformPackage);
 accessSync(npmCli);
 
 const run = (command, args, { acceptedExitCodes = [0], ...options } = {}) => {
@@ -57,6 +63,15 @@ try {
       "--json",
     ]),
   )[0].filename;
+  const platformPack = JSON.parse(
+    runNpm([
+      "pack",
+      join(repoRoot, "npm", platformPackage.replace("@fallow-cli/", "")),
+      "--pack-destination",
+      temporaryRoot,
+      "--json",
+    ]),
+  )[0].filename;
   runNpm([
     "install",
     "--prefix",
@@ -66,13 +81,10 @@ try {
     "--no-fund",
     join(temporaryRoot, wrapperPack),
     join(temporaryRoot, sidecarPack),
+    join(temporaryRoot, platformPack),
   ]);
 
   const installedFallow = join(temporaryRoot, "node_modules", "fallow");
-  const require = createRequire(import.meta.url);
-  const { getPlatformPackage } = require(join(installedFallow, "scripts", "platform-package.js"));
-  const platformPackage = getPlatformPackage(process.platform, process.arch);
-  assert.ok(platformPackage);
   const platformManifest = require.resolve(`${platformPackage}/package.json`, {
     paths: [installedFallow],
   });

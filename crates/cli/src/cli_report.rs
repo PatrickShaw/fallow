@@ -3,8 +3,9 @@
 //! flow: `fallow --format json -o results.json`, then one `report` call per
 //! rendered surface).
 //!
-//! Supports the GitHub-native text formats plus CodeClimate and SARIF. Dispatch is on
-//! the envelope's `kind` field, so any envelope produced by `--format json`
+//! Supports GitHub-native text, CodeClimate, SARIF, and GitHub/GitLab PR
+//! feedback formats. Dispatch is on the envelope's `kind` field, so any envelope
+//! produced by `--format json`
 //! (dead-code, dupes, health, audit, security, or the bare combined run)
 //! renders byte-identically to the direct `--format` run. The `fallow fix`
 //! envelope carries no `kind`; it is detected by its top-level fields and
@@ -14,8 +15,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use fallow_config::{FallowConfig, OutputFormat};
-use fallow_output::GroupByMode;
+use fallow_output::{GroupByMode, PrDecisionConclusion};
 
+use crate::report::ci::pr_comment::Provider;
 use crate::report::github_annotations::{self, EnvelopeKind};
 use crate::report::github_summary;
 use crate::telemetry;
@@ -42,9 +44,13 @@ pub fn run_report(
         OutputFormat::GithubSummary => ReportTarget::GithubSummary,
         OutputFormat::CodeClimate => ReportTarget::CodeClimate,
         OutputFormat::Sarif => ReportTarget::Sarif,
+        OutputFormat::PrCommentGithub => ReportTarget::PrComment(Provider::Github),
+        OutputFormat::PrCommentGitlab => ReportTarget::PrComment(Provider::Gitlab),
+        OutputFormat::ReviewGithub => ReportTarget::Review(Provider::Github),
+        OutputFormat::ReviewGitlab => ReportTarget::Review(Provider::Gitlab),
         _ => {
             return crate::emit_known_failure(
-                "fallow report supports --format github-annotations, github-summary, codeclimate, or sarif only",
+                "fallow report supports --format github-annotations, github-summary, codeclimate, sarif, pr-comment-github, pr-comment-gitlab, review-github, or review-gitlab only",
                 2,
                 output,
                 telemetry::FailureReason::UnsupportedFormat,
@@ -55,18 +61,24 @@ pub fn run_report(
         Ok(envelope) => envelope,
         Err(code) => return code,
     };
-    let saved = normalize_saved_envelope(envelope);
+    let saved = match prepare_saved_envelope(envelope, output) {
+        Ok(saved) => saved,
+        Err(code) => return code,
+    };
     let kind = match envelope_kind(&saved.envelope, from, output) {
         Ok(kind) => kind,
         Err(code) => return code,
     };
-    if matches!(target, ReportTarget::CodeClimate) && kind == EnvelopeKind::Security {
+    if let Err(error) = validate_report_target(target, kind) {
         return crate::emit_known_failure(
-            "fallow security supports --format human, json, sarif, github-annotations, or github-summary only.",
+            &error,
             2,
             output,
             telemetry::FailureReason::UnsupportedFormat,
         );
+    }
+    if let Err(error) = validate_saved_report_envelope(kind, &saved.envelope) {
+        return crate::emit_known_failure(&error, 2, output, telemetry::FailureReason::Validation);
     }
     let resolver = match saved_group_resolver(saved.grouped_by, root, config_path, output) {
         Ok(resolver) => resolver,
@@ -93,39 +105,239 @@ pub fn run_report(
             config_path,
             resolver.as_ref(),
         ),
+        ReportTarget::PrComment(provider) | ReportTarget::Review(provider) => {
+            render_saved_ci_target(
+                target,
+                provider,
+                kind,
+                &saved.envelope,
+                root,
+                config_path,
+                resolver.as_ref(),
+                output,
+            )
+        }
     }
 }
 
+fn validate_report_target(target: ReportTarget, kind: EnvelopeKind) -> Result<(), String> {
+    if matches!(target, ReportTarget::CodeClimate) && kind == EnvelopeKind::Security {
+        return Err(
+            "fallow security supports --format human, json, sarif, github-annotations, or github-summary only."
+                .to_owned(),
+        );
+    }
+    if matches!(target, ReportTarget::PrComment(_) | ReportTarget::Review(_))
+        && matches!(kind, EnvelopeKind::Security | EnvelopeKind::Fix)
+    {
+        return Err(format!(
+            "saved {} envelopes do not support --format {}",
+            command_label(kind),
+            report_target_label(target)
+        ));
+    }
+    Ok(())
+}
+
+fn validate_saved_report_envelope(
+    kind: EnvelopeKind,
+    envelope: &serde_json::Value,
+) -> Result<(), String> {
+    match kind {
+        EnvelopeKind::Security => fallow_output::validate_saved_security_envelope(envelope),
+        EnvelopeKind::Fix => Ok(()),
+        _ => crate::report::codeclimate::validate_saved_schema(kind, envelope),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "saved CI dispatch carries the parsed envelope context without rebuilding it"
+)]
+fn render_saved_ci_target(
+    target: ReportTarget,
+    provider: Provider,
+    kind: EnvelopeKind,
+    envelope: &serde_json::Value,
+    root: &Path,
+    config_path: Option<&Path>,
+    resolver: Option<&crate::report::OwnershipResolver>,
+    output: OutputFormat,
+) -> ExitCode {
+    let issues = match crate::report::codeclimate::envelope_codeclimate_issues_with_config(
+        kind,
+        envelope,
+        root,
+        config_path,
+        resolver,
+    ) {
+        Ok(issues) => issues,
+        Err(error) => {
+            return crate::emit_known_failure(
+                &error,
+                2,
+                output,
+                telemetry::FailureReason::Validation,
+            );
+        }
+    };
+    let (conclusion, status_message) = match saved_ci_conclusion(kind, envelope) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::emit_known_failure(
+                &error,
+                2,
+                output,
+                telemetry::FailureReason::Validation,
+            );
+        }
+    };
+    let command = command_label(kind);
+    match target {
+        ReportTarget::PrComment(_) => {
+            crate::report::ci::pr_comment::print_pr_comment_from_codeclimate_issues(
+                command,
+                provider,
+                &issues,
+                conclusion,
+                status_message,
+            )
+        }
+        ReportTarget::Review(_) => match conclusion {
+            Some(conclusion) => {
+                crate::report::ci::review::print_review_envelope_from_codeclimate_issues_with_conclusion(
+                    command,
+                    provider,
+                    &issues,
+                    conclusion,
+                    status_message,
+                )
+            }
+            None => crate::report::ci::review::print_review_envelope_from_codeclimate_issues(
+                command, provider, &issues,
+            ),
+        },
+        _ => unreachable!("saved CI target dispatch only accepts comment and review targets"),
+    }
+}
+
+fn saved_ci_conclusion(
+    kind: EnvelopeKind,
+    envelope: &serde_json::Value,
+) -> Result<(Option<PrDecisionConclusion>, Option<&'static str>), String> {
+    let type_aware = crate::report::ci::saved_type_aware_metadata(envelope)?;
+    if type_aware
+        .iter()
+        .any(|meta| crate::report::ci::required_type_aware_incomplete(Some(meta)))
+    {
+        return Ok((
+            Some(PrDecisionConclusion::Failure),
+            Some(crate::report::ci::TYPE_AWARE_INCOMPLETE_MESSAGE),
+        ));
+    }
+    if kind != EnvelopeKind::Audit {
+        return Ok((None, None));
+    }
+    let verdict = envelope
+        .get("verdict")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "saved audit envelope is missing its `verdict`".to_owned())?;
+    let conclusion = match verdict {
+        "pass" => PrDecisionConclusion::Success,
+        "warn" => PrDecisionConclusion::Neutral,
+        "fail" => PrDecisionConclusion::Failure,
+        other => {
+            return Err(format!(
+                "saved audit envelope has unsupported verdict `{other}`"
+            ));
+        }
+    };
+    Ok((Some(conclusion), None))
+}
+
+const fn command_label(kind: EnvelopeKind) -> &'static str {
+    match kind {
+        EnvelopeKind::DeadCode => "dead-code",
+        EnvelopeKind::Dupes => "dupes",
+        EnvelopeKind::Health => "health",
+        EnvelopeKind::Audit => "audit",
+        EnvelopeKind::Combined => "combined",
+        EnvelopeKind::Security => "security",
+        EnvelopeKind::Fix => "fix",
+    }
+}
+
+const fn report_target_label(target: ReportTarget) -> &'static str {
+    match target {
+        ReportTarget::PrComment(Provider::Github) => "pr-comment-github",
+        ReportTarget::PrComment(Provider::Gitlab) => "pr-comment-gitlab",
+        ReportTarget::Review(Provider::Github) => "review-github",
+        ReportTarget::Review(Provider::Gitlab) => "review-gitlab",
+        ReportTarget::GithubAnnotations => "github-annotations",
+        ReportTarget::GithubSummary => "github-summary",
+        ReportTarget::CodeClimate => "codeclimate",
+        ReportTarget::Sarif => "sarif",
+    }
+}
+
+#[derive(Debug)]
 struct SavedEnvelope {
     envelope: serde_json::Value,
     grouped_by: Option<GroupByMode>,
 }
 
-fn normalize_saved_envelope(mut envelope: serde_json::Value) -> SavedEnvelope {
+pub const NORMALIZED_GROUPED_DEAD_CODE_MARKER: &str = "_fallow_report_normalized_grouped_dead_code";
+
+fn prepare_saved_envelope(
+    envelope: serde_json::Value,
+    output: OutputFormat,
+) -> Result<SavedEnvelope, ExitCode> {
+    normalize_saved_envelope(envelope).map_err(|error| {
+        crate::emit_known_failure(&error, 2, output, telemetry::FailureReason::Validation)
+    })
+}
+
+fn normalize_saved_envelope(mut envelope: serde_json::Value) -> Result<SavedEnvelope, String> {
+    if let Some(root) = envelope.as_object_mut() {
+        root.remove(NORMALIZED_GROUPED_DEAD_CODE_MARKER);
+    }
     let grouped_by = envelope
         .get("grouped_by")
         .and_then(serde_json::Value::as_str)
         .and_then(parse_group_by_mode);
     if envelope.get("kind").and_then(serde_json::Value::as_str) != Some("dead-code-grouped") {
-        return SavedEnvelope {
+        return Ok(SavedEnvelope {
             envelope,
             grouped_by,
-        };
+        });
     }
     let Some(root) = envelope.as_object_mut() else {
-        return SavedEnvelope {
-            envelope,
-            grouped_by,
-        };
+        return Err("saved grouped dead-code envelope must be an object".to_owned());
     };
-    let groups = root
-        .remove("groups")
-        .and_then(|groups| groups.as_array().cloned())
-        .unwrap_or_default();
+    let grouped_by = grouped_by.ok_or_else(|| {
+        "saved grouped dead-code envelope has an unsupported or missing `grouped_by`".to_owned()
+    })?;
+    let groups_value = root.remove("groups").ok_or_else(|| {
+        "saved grouped dead-code envelope is missing required field `groups`".to_owned()
+    })?;
+    let groups = groups_value.as_array().ok_or_else(|| {
+        "saved grouped dead-code envelope field `groups` must be an array".to_owned()
+    })?;
+    let current_schema = root
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(u64::from(fallow_output::CHECK_SCHEMA_VERSION));
+    if current_schema {
+        validate_current_grouped_dead_code(root, groups)?;
+    }
     root.remove("grouped_by");
     root.insert(
         "kind".to_string(),
         serde_json::Value::String("dead-code".to_string()),
+    );
+    root.insert(
+        NORMALIZED_GROUPED_DEAD_CODE_MARKER.to_string(),
+        serde_json::Value::Bool(true),
     );
     for group in groups {
         let Some(group) = group.as_object() else {
@@ -146,10 +358,67 @@ fn normalize_saved_envelope(mut envelope: serde_json::Value) -> SavedEnvelope {
             }
         }
     }
-    SavedEnvelope {
+    Ok(SavedEnvelope {
         envelope,
-        grouped_by,
+        grouped_by: Some(grouped_by),
+    })
+}
+
+fn validate_current_grouped_dead_code(
+    root: &serde_json::Map<String, serde_json::Value>,
+    groups: &[serde_json::Value],
+) -> Result<(), String> {
+    let root_total = root
+        .get("total_issues")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            "saved grouped dead-code envelope is missing a non-negative integer `total_issues`"
+                .to_owned()
+        })?;
+    let mut grouped_total = 0_u64;
+    for (index, group) in groups.iter().enumerate() {
+        let Some(group_object) = group.as_object() else {
+            return Err(format!(
+                "saved grouped dead-code envelope group {index} must be an object"
+            ));
+        };
+        if !group_object
+            .get("key")
+            .is_some_and(serde_json::Value::is_string)
+        {
+            return Err(format!(
+                "saved grouped dead-code envelope group {index} is missing a string `key`"
+            ));
+        }
+        let declared_total = group_object
+            .get("total_issues")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                format!(
+                    "saved grouped dead-code envelope group {index} is missing a non-negative integer `total_issues`"
+                )
+            })?;
+        let results =
+            serde_json::from_value::<fallow_types::results::AnalysisResults>(group.clone())
+                .map_err(|error| {
+                    format!(
+                        "saved grouped dead-code envelope group {index} is incompatible with this Fallow version: {error}"
+                    )
+                })?;
+        let actual_total = u64::try_from(results.total_issues()).unwrap_or(u64::MAX);
+        if declared_total != actual_total {
+            return Err(format!(
+                "saved grouped dead-code envelope group {index} declares {declared_total} findings but contains {actual_total}"
+            ));
+        }
+        grouped_total = grouped_total.saturating_add(actual_total);
     }
+    if root_total != grouped_total {
+        return Err(format!(
+            "saved grouped dead-code envelope declares {root_total} findings but its groups contain {grouped_total}"
+        ));
+    }
+    Ok(())
 }
 
 fn parse_group_by_mode(value: &str) -> Option<GroupByMode> {
@@ -191,6 +460,8 @@ enum ReportTarget {
     GithubSummary,
     CodeClimate,
     Sarif,
+    PrComment(Provider),
+    Review(Provider),
 }
 
 fn load_envelope(from: &Path, output: OutputFormat) -> Result<serde_json::Value, ExitCode> {
@@ -313,6 +584,82 @@ mod tests {
     }
 
     #[test]
+    fn saved_audit_verdict_maps_to_ci_conclusion() {
+        for (verdict, expected) in [
+            ("pass", PrDecisionConclusion::Success),
+            ("warn", PrDecisionConclusion::Neutral),
+            ("fail", PrDecisionConclusion::Failure),
+        ] {
+            let envelope = serde_json::json!({ "verdict": verdict });
+            let (conclusion, status) =
+                saved_ci_conclusion(EnvelopeKind::Audit, &envelope).expect("audit verdict");
+            assert_eq!(conclusion, Some(expected));
+            assert_eq!(status, None);
+        }
+    }
+
+    #[test]
+    fn saved_required_incomplete_type_aware_result_fails_closed() {
+        let identity = fallow_types::semantic::SemanticAnalysisIdentity {
+            completeness: fallow_types::semantic::SemanticCompleteness::Partial,
+            ..fallow_types::semantic::SemanticAnalysisIdentity::default()
+        };
+        let meta = fallow_types::envelope::TypeAwareMeta {
+            identity: Some(identity),
+            required_completeness: Some(
+                fallow_types::semantic::SemanticCompletenessRequirement::Complete,
+            ),
+            ..fallow_types::envelope::TypeAwareMeta::default()
+        };
+        let envelope = serde_json::json!({
+            "verdict": "pass",
+            "_meta": { "type_aware": meta }
+        });
+        let (conclusion, status) =
+            saved_ci_conclusion(EnvelopeKind::Audit, &envelope).expect("type-aware gate");
+        assert_eq!(conclusion, Some(PrDecisionConclusion::Failure));
+        assert_eq!(
+            status,
+            Some(crate::report::ci::TYPE_AWARE_INCOMPLETE_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn saved_required_type_aware_result_without_identity_fails_closed() {
+        let meta = fallow_types::envelope::TypeAwareMeta {
+            required_completeness: Some(
+                fallow_types::semantic::SemanticCompletenessRequirement::Complete,
+            ),
+            ..fallow_types::envelope::TypeAwareMeta::default()
+        };
+        let envelope = serde_json::json!({
+            "_meta": { "type_aware": meta }
+        });
+        let (conclusion, status) =
+            saved_ci_conclusion(EnvelopeKind::DeadCode, &envelope).expect("missing identity gate");
+        assert_eq!(conclusion, Some(PrDecisionConclusion::Failure));
+        assert_eq!(
+            status,
+            Some(crate::report::ci::TYPE_AWARE_INCOMPLETE_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn malformed_saved_type_aware_metadata_is_rejected() {
+        let mut meta = serde_json::to_value(fallow_types::envelope::TypeAwareMeta::default())
+            .expect("serialize type-aware metadata");
+        meta["queries"] = serde_json::json!("not-an-array");
+        let envelope = serde_json::json!({
+            "_meta": { "type_aware": meta }
+        });
+
+        let error = saved_ci_conclusion(EnvelopeKind::DeadCode, &envelope)
+            .expect_err("malformed type-aware metadata must fail closed");
+        assert!(error.contains("saved type-aware metadata at `/_meta/type_aware`"));
+        assert!(error.contains("invalid type"));
+    }
+
+    #[test]
     fn grouped_dead_code_is_flattened_for_saved_renderers() {
         let normalized = normalize_saved_envelope(serde_json::json!({
             "kind": "dead-code-grouped",
@@ -324,7 +671,8 @@ mod tests {
                 "total_issues": 1,
                 "unused_files": [{"path": "src/dead.ts", "actions": []}]
             }]
-        }));
+        }))
+        .expect("valid grouped envelope");
 
         assert_eq!(normalized.grouped_by, Some(GroupByMode::Owner));
         assert_eq!(normalized.envelope["kind"], "dead-code");
@@ -334,6 +682,31 @@ mod tests {
         );
         assert!(normalized.envelope.get("groups").is_none());
         assert!(normalized.envelope.get("grouped_by").is_none());
+        assert_eq!(
+            normalized.envelope[NORMALIZED_GROUPED_DEAD_CODE_MARKER],
+            true
+        );
+    }
+
+    #[test]
+    fn malformed_current_grouped_dead_code_fails_before_flattening() {
+        let error = normalize_saved_envelope(serde_json::json!({
+            "kind": "dead-code-grouped",
+            "schema_version": fallow_output::CHECK_SCHEMA_VERSION,
+            "version": env!("CARGO_PKG_VERSION"),
+            "elapsed_ms": 0,
+            "grouped_by": "owner",
+            "total_issues": 1,
+            "groups": [{
+                "key": "@team",
+                "total_issues": 1,
+                "unused_files": [{"path": "src/dead.ts", "actions": []}],
+                "unused_exports": "invalid"
+            }]
+        }))
+        .expect_err("malformed current group must fail closed");
+
+        assert!(error.contains("group 0 is incompatible with this Fallow version"));
     }
 
     #[test]

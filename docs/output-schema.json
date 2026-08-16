@@ -8186,6 +8186,11 @@
           "type": "string",
           "const": "fallow-review-envelope/v2",
           "description": "Issue #528 review envelope format."
+        },
+        {
+          "type": "string",
+          "const": "fallow-review-envelope/v3",
+          "description": "Gate-aware conclusion semantics, including failures without findings."
         }
       ],
       "description": "Schema-version discriminator for the review envelope."
@@ -8210,7 +8215,7 @@
         {
           "type": "string",
           "const": "success",
-          "description": "No findings."
+          "description": "The gate passed, whether or not inline findings were selected."
         },
         {
           "type": "string",
@@ -8220,7 +8225,7 @@
         {
           "type": "string",
           "const": "failure",
-          "description": "At least one finding gated as failure."
+          "description": "The gate failed, including failures without an inline finding."
         }
       ],
       "description": "`meta.check_conclusion` for the GitHub review envelope. Maps to the\nGitHub Checks API conclusion field."

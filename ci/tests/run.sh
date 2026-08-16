@@ -233,12 +233,23 @@ RUNNER_TMP="$INSTALL_TMP/runner"
 mkdir -p "$RUNNER_TMP/bin" "$RUNNER_TMP/root"
 cat > "$RUNNER_TMP/bin/fallow" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FALLOW_TEST_LOG:-}" ]; then
+  printf 'fallow %s\n' "$*" >> "$FALLOW_TEST_LOG"
+fi
 if [ -n "${FALLOW_TEST_ENV_FILE:-}" ]; then
   printf '%s\n' \
     "FALLOW_TYPE_AWARE=${FALLOW_TYPE_AWARE:-}" \
     "FALLOW_TYPE_AWARE_PROJECTS=${FALLOW_TYPE_AWARE_PROJECTS:-}" \
     "FALLOW_TYPE_AWARE_REQUIRE=${FALLOW_TYPE_AWARE_REQUIRE:-}" \
     > "$FALLOW_TEST_ENV_FILE"
+fi
+if [ "${1:-}" = "report" ]; then
+  printf '[]\n'
+  exit 0
+fi
+if [ "${MOCK_TYPE_AWARE_INCOMPLETE:-}" = "1" ]; then
+  printf '%s\n' '{"kind":"dead-code","schema_version":9,"version":"test","total_issues":0,"_meta":{"type_aware":{"required_completeness":"complete","identity":{"completeness":"partial"},"queries":[]}}}'
+  exit 1
 fi
 printf '{"total_issues":0}\n'
 SH
@@ -329,7 +340,10 @@ if [ "$cmd_status" -eq 0 ] && [ -s "$RUNNER_TMP/fallow-results.json" ]; then
 else
   fail "run writer: generated analysis script runs with empty extra args" "$OUT"
 fi
-ARGS=$(cat "$RUNNER_TMP/fallow-analysis-args.sh")
+ARGS=""
+while IFS= read -r -d '' arg; do
+  ARGS+="${arg} "
+done < "$RUNNER_TMP/fallow-analysis-args.bin"
 assert_contains "$ARGS" "--coverage coverage/coverage-final.json" "run writer: forwards coverage to default combined command"
 assert_contains "$ARGS" "--coverage-root /ci/workspace" "run writer: forwards coverage-root to default combined command"
 TYPE_AWARE_ENV=$(cat "$RUNNER_TMP/type-aware-env")
@@ -339,6 +353,63 @@ assert_contains "$ARGS" "--type-aware-project tsconfig.test.json" "run writer: f
 assert_contains "$ARGS" "--type-aware-require complete" "run writer: forwards type-aware completeness policy"
 assert_contains "$TYPE_AWARE_ENV" "FALLOW_TYPE_AWARE_PROJECTS=" "run writer: clears project env after CLI translation"
 assert_contains "$TYPE_AWARE_ENV" "FALLOW_TYPE_AWARE_REQUIRE=" "run writer: clears require env after CLI translation"
+
+run_generated_gitlab_fixture() {
+  local work=$1
+  shift
+  local defaults=()
+  local name
+  while IFS= read -r name; do
+    defaults+=("${name}=")
+  done < <(grep -oE '\$FALLOW_[A-Z0-9_]+' /tmp/fallow-run.sh | tr -d '$' | sort -u)
+  (
+    cd "$work" || exit 1
+    env "${defaults[@]}" \
+      PATH="$RUNNER_TMP/bin:$PATH" \
+      FALLOW_COMMAND=check \
+      FALLOW_ROOT="$RUNNER_TMP/root" \
+      FALLOW_FAIL_ON_ISSUES=false \
+      FALLOW_DUPES_MODE=mild \
+      FALLOW_DRY_RUN=true \
+      FALLOW_MAX_COMMENTS=50 \
+      "$@" \
+      bash /tmp/fallow-run.sh 2>&1
+  )
+}
+
+INCOMPLETE_WORK="$RUNNER_TMP/type-aware-incomplete"
+mkdir -p "$INCOMPLETE_WORK"
+OUT=$(run_generated_gitlab_fixture "$INCOMPLETE_WORK" \
+  MOCK_TYPE_AWARE_INCOMPLETE=1 \
+  FALLOW_COMMENT=true \
+  FALLOW_REVIEW=true \
+  CI_MERGE_REQUEST_IID=123)
+cmd_status=$?
+if [ "$cmd_status" -eq 1 ]; then
+  pass "run writer: required incomplete type-aware analysis still fails closed"
+else
+  fail "run writer: required incomplete type-aware analysis still fails closed" "expected exit 1, got $cmd_status"
+fi
+assert_contains "$OUT" "comment" "run writer: required incomplete analysis renders MR comment before failing"
+assert_contains "$OUT" "review" "run writer: required incomplete analysis renders MR review before failing"
+assert_contains "$OUT" "Type-aware completeness gate failed" "run writer: deferred completeness failure remains explicit"
+
+CODEQUALITY_WORK="$RUNNER_TMP/codequality-prefix"
+CODEQUALITY_LOG="$CODEQUALITY_WORK/fallow.log"
+mkdir -p "$CODEQUALITY_WORK"
+OUT=$(run_generated_gitlab_fixture "$CODEQUALITY_WORK" \
+  FALLOW_CODEQUALITY=true \
+  FALLOW_ARGS="--report-path-prefix custom/base" \
+  FALLOW_TEST_LOG="$CODEQUALITY_LOG")
+cmd_status=$?
+if [ "$cmd_status" -eq 0 ]; then
+  pass "run writer: Code Quality prefix fixture succeeds"
+else
+  fail "run writer: Code Quality prefix fixture succeeds" "$OUT"
+fi
+assert_contains "$(cat "$CODEQUALITY_LOG")" \
+  "report --from fallow-results.json --root $RUNNER_TMP/root --format codeclimate --quiet --report-path-prefix custom/base" \
+  "run writer: Code Quality rendering preserves explicit path prefix"
 
 # =========================================================================
 # Behavioral parity between action/scripts/install.sh and ci/gitlab-ci.yml
@@ -1066,6 +1137,8 @@ assert_contains "$(cat "$CI_YAML")" 'FALLOW_TYPE_AWARE: ""' "GitLab defaults def
 assert_contains "$(cat "$CI_YAML")" 'FALLOW_TYPE_AWARE_REQUIRE: ""' "GitLab defaults defer completeness policy to repository config"
 assert_contains "$(cat "$CI_YAML")" 'unset FALLOW_TYPE_AWARE_PROJECTS FALLOW_TYPE_AWARE_REQUIRE' "GitLab removes empty env overrides before analysis"
 assert_contains "$(cat "$CI_YAML")" 'Type-aware completeness gate failed' "GitLab preserves semantic completeness failures from valid JSON"
+assert_contains "$(cat "$CI_YAML")" 'FALLOW_RENDER_PATH_PREFIX_SET' "GitLab separates renderer path prefixes from JSON analysis"
+assert_contains "$(cat "$CI_YAML")" 'FILTERED_EXTRA_ARGS' "GitLab preserves non-presentation extra arguments"
 assert_contains "$(cat "$CI_YAML")" "FALLOW_REVIEW" "has FALLOW_REVIEW variable"
 assert_contains "$(cat "$CI_YAML")" "FALLOW_REVIEW_GUIDANCE" "has FALLOW_REVIEW_GUIDANCE variable"
 assert_contains "$(cat "$CI_YAML")" "FALLOW_REVIEW_ID" "has FALLOW_REVIEW_ID variable"
@@ -1115,6 +1188,7 @@ assert_contains "$(cat "$SCRIPTS_DIR/comment.sh")" "FALLOW_PR_COMMENT_ENVELOPE_F
 assert_contains "$(cat "$SCRIPTS_DIR/comment.sh")" "--envelope" "comment.sh passes typed PR comment envelope when present"
 assert_contains "$(cat "$SCRIPTS_DIR/comment.sh")" "gitlab_common.sh" "loads shared GitLab API helpers"
 assert_contains "$GITLAB_COMMON" "curl_retry" "wraps GitLab API calls with retry"
+assert_not_contains "$GITLAB_COMMON" "source fallow-analysis-args" "legacy render fallback does not source workspace shell"
 assert_contains "$GITLAB_COMMON" "rate limit response; retrying" "retries GitLab rate-limit responses"
 assert_not_contains "$GITLAB_COMMON" "curl_paginate" "does not ship an unused pagination helper"
 
@@ -1202,6 +1276,14 @@ if [ "${1:-}" = "ci" ]; then
   fi
   exit 0
 fi
+if [ "${MOCK_RENDER_FAILURE:-}" = "1" ]; then
+  echo 'saved audit envelope is missing required field `version`' >&2
+  exit 2
+fi
+if [ "${MOCK_SAVED_RENDER_UNSUPPORTED:-}" = "1" ] && [ "${1:-}" = "report" ]; then
+  echo 'Error: fallow report supports --format github-annotations, github-summary, codeclimate, or sarif only' >&2
+  exit 2
+fi
 format=""
 previous=""
 for arg in "$@"; do
@@ -1267,7 +1349,8 @@ esac
 SH
 chmod +x "$CI_TYPED_BIN/curl"
 
-printf 'FALLOW_ANALYSIS_ARGS=(check --format json --root .)\n' > "$CI_TYPED_WORK/fallow-analysis-args.sh"
+printf '{"kind":"dead-code","schema_version":9}\n' > "$CI_TYPED_WORK/fallow-results.json"
+printf '%s\0' check --format json --root . > "$CI_TYPED_WORK/fallow-analysis-args.bin"
 (
   cd "$CI_TYPED_WORK"
   PATH="$CI_TYPED_BIN:$PATH" \
@@ -1277,6 +1360,8 @@ printf 'FALLOW_ANALYSIS_ARGS=(check --format json --root .)\n' > "$CI_TYPED_WORK
     CI_PROJECT_ID="18" \
     CI_MERGE_REQUEST_IID="123" \
     FALLOW_COMMAND="check" \
+    FALLOW_RENDER_PATH_PREFIX_SET="1" \
+    FALLOW_RENDER_PATH_PREFIX="custom/base" \
     FALLOW_SUMMARY_SCOPE="diff" \
     bash "$SCRIPTS_DIR/comment.sh" > /dev/null
   PATH="$CI_TYPED_BIN:$PATH" \
@@ -1287,6 +1372,8 @@ printf 'FALLOW_ANALYSIS_ARGS=(check --format json --root .)\n' > "$CI_TYPED_WORK
     CI_MERGE_REQUEST_IID="123" \
     CI_COMMIT_SHA="abcdef1234567890" \
     FALLOW_COMMAND="check" \
+    FALLOW_RENDER_PATH_PREFIX_SET="1" \
+    FALLOW_RENDER_PATH_PREFIX="custom/base" \
     FALLOW_ROOT="." \
     MAX_COMMENTS="5" \
     bash "$SCRIPTS_DIR/review.sh" > "$CI_TYPED_WORK/review-clean.out"
@@ -1327,10 +1414,63 @@ printf 'FALLOW_ANALYSIS_ARGS=(check --format json --root .)\n' > "$CI_TYPED_WORK
     FALLOW_ROOT="." \
     MAX_COMMENTS="5" \
     bash "$SCRIPTS_DIR/review.sh" > "$CI_TYPED_WORK/review-post-error.out"
+  PATH="$CI_TYPED_BIN:$PATH" \
+    MOCK_LOG="$CI_TYPED_LOG" \
+    MOCK_RENDER_FAILURE="1" \
+    GITLAB_TOKEN="test" \
+    CI_API_V4_URL="https://gitlab.example/api/v4" \
+    CI_PROJECT_ID="18" \
+    CI_MERGE_REQUEST_IID="123" \
+    FALLOW_COMMAND="check" \
+    bash "$SCRIPTS_DIR/comment.sh" > "$CI_TYPED_WORK/comment-render-failure.out"
+  PATH="$CI_TYPED_BIN:$PATH" \
+    MOCK_LOG="$CI_TYPED_LOG" \
+    MOCK_RENDER_FAILURE="1" \
+    GITLAB_TOKEN="test" \
+    CI_API_V4_URL="https://gitlab.example/api/v4" \
+    CI_PROJECT_ID="18" \
+    CI_MERGE_REQUEST_IID="123" \
+    CI_COMMIT_SHA="abcdef1234567890" \
+    FALLOW_COMMAND="check" \
+    FALLOW_DIFF_FILE="$CI_TYPED_WORK/fallow-mr.diff" \
+    bash "$SCRIPTS_DIR/review.sh" > "$CI_TYPED_WORK/review-render-failure.out"
+  PATH="$CI_TYPED_BIN:$PATH" \
+    MOCK_LOG="$CI_TYPED_LOG" \
+    MOCK_SAVED_RENDER_UNSUPPORTED="1" \
+    GITLAB_TOKEN="test" \
+    CI_API_V4_URL="https://gitlab.example/api/v4" \
+    CI_PROJECT_ID="18" \
+    CI_MERGE_REQUEST_IID="123" \
+    FALLOW_COMMAND="check" \
+    FALLOW_RENDER_PATH_PREFIX_SET="1" \
+    FALLOW_RENDER_PATH_PREFIX="legacy/base" \
+    bash "$SCRIPTS_DIR/comment.sh" > "$CI_TYPED_WORK/comment-legacy-fallback.out"
+  PATH="$CI_TYPED_BIN:$PATH" \
+    MOCK_LOG="$CI_TYPED_LOG" \
+    MOCK_SAVED_RENDER_UNSUPPORTED="1" \
+    GITLAB_TOKEN="test" \
+    CI_API_V4_URL="https://gitlab.example/api/v4" \
+    CI_PROJECT_ID="18" \
+    CI_MERGE_REQUEST_IID="123" \
+    CI_COMMIT_SHA="abcdef1234567890" \
+    FALLOW_COMMAND="check" \
+    FALLOW_ROOT="." \
+    MAX_COMMENTS="5" \
+    bash "$SCRIPTS_DIR/review.sh" > "$CI_TYPED_WORK/review-legacy-fallback.out"
 )
 CI_TYPED_OUT=$(cat "$CI_TYPED_LOG")
 assert_contains "$CI_TYPED_OUT" "--format pr-comment-gitlab" "comment.sh invokes typed MR comment format"
 assert_contains "$CI_TYPED_OUT" "--format review-gitlab" "review.sh invokes typed GitLab review format"
+assert_contains "$CI_TYPED_OUT" "report --from fallow-results.json" "GitLab renderers reuse the saved analysis envelope"
+assert_contains "$CI_TYPED_OUT" "--report-path-prefix custom/base" "GitLab renderers preserve presentation path prefixes"
+assert_contains "$CI_TYPED_OUT" "fallow check --format pr-comment-gitlab --root . --report-path-prefix legacy/base" \
+  "comment.sh safely falls back to direct rendering for older pinned fallow"
+assert_contains "$CI_TYPED_OUT" "fallow check --format review-gitlab --root ." \
+  "review.sh safely falls back to direct rendering for older pinned fallow"
+assert_contains "$(cat "$CI_TYPED_WORK/comment-legacy-fallback.out")" "compatible direct rendering" \
+  "comment.sh discloses older-binary fallback"
+assert_contains "$(cat "$CI_TYPED_WORK/review-legacy-fallback.out")" "compatible direct rendering" \
+  "review.sh discloses older-binary fallback"
 assert_contains "$CI_TYPED_OUT" "fallow ci post-pr-comment --provider gitlab" "comment.sh invokes GitLab MR comment post command"
 assert_contains "$CI_TYPED_OUT" "summary_scope=diff" "comment.sh passes FALLOW_SUMMARY_SCOPE to typed MR comment render"
 assert_contains "$(cat "$SCRIPTS_DIR/comment.sh")" "FALLOW_PR_DECISION_FILE" "comment.sh asks fallow for typed MR decision sidecar"
@@ -1353,6 +1493,12 @@ assert_contains "$(cat "$CI_TYPED_WORK/review-apply-error.out")" \
 assert_contains "$(cat "$CI_TYPED_WORK/review-post-error.out")" \
   "WARNING: fallow post-review incomplete: rerun the job" \
   "review.sh warns when posting review comments is incomplete"
+assert_contains "$(cat "$CI_TYPED_WORK/comment-render-failure.out")" \
+  'saved audit envelope is missing required field `version`' \
+  "comment.sh surfaces saved-render stderr"
+assert_contains "$(cat "$CI_TYPED_WORK/review-render-failure.out")" \
+  'saved audit envelope is missing required field `version`' \
+  "review.sh surfaces saved-render stderr"
 rm -rf "$CI_TYPED_WORK"
 
 # =========================================================================
@@ -1469,7 +1615,7 @@ ci_api_fail_review_run() {
   local stderr_var=$3
   local mock_zero=$4   # "1" for summary-only path
   write_ci_api_fail_mocks
-  printf 'FALLOW_ANALYSIS_ARGS=(check --format json --root .)\n' > "$CI_API_FAIL_WORK/fallow-analysis-args.sh"
+  printf '{"kind":"dead-code","schema_version":9}\n' > "$CI_API_FAIL_WORK/fallow-results.json"
   : > "$CI_API_FAIL_WORK/mock.log"
   rm -f "$CI_API_FAIL_WORK/fallow-skip-reason.txt"
   local _stderr _status
@@ -1570,7 +1716,7 @@ esac
 SH
 chmod +x "$CI_API_FAIL_BIN/curl"
 
-printf 'FALLOW_ANALYSIS_ARGS=(check --format json --root .)\n' > "$CI_API_FAIL_WORK/fallow-analysis-args.sh"
+printf '{"kind":"dead-code","schema_version":9}\n' > "$CI_API_FAIL_WORK/fallow-results.json"
 : > "$CI_API_FAIL_WORK/mock.log"
 R8B_STDERR=$(cd "$CI_API_FAIL_WORK" \
   && PATH="$CI_API_FAIL_BIN:$PATH" \
@@ -1592,7 +1738,7 @@ assert_contains "$(cat "$CI_API_FAIL_WORK/mock.log")" "fallow ci post-review --p
 # job step. comment.sh no longer writes this marker, but downstream jobs can
 # still create it before review.sh runs.
 write_ci_api_fail_mocks
-printf 'FALLOW_ANALYSIS_ARGS=(check --format json --root .)\n' > "$CI_API_FAIL_WORK/fallow-analysis-args.sh"
+printf '{"kind":"dead-code","schema_version":9}\n' > "$CI_API_FAIL_WORK/fallow-results.json"
 : > "$CI_API_FAIL_WORK/mock.log"
 printf 'true\n' > "$CI_API_FAIL_WORK/fallow-dedup-lookup-failed.txt"
 
@@ -1619,7 +1765,7 @@ fi
 # Test 9: comment.sh delegates sticky MR posting to Rust and leaves the dedup
 # marker false when the Rust post command succeeds.
 write_ci_api_fail_mocks
-printf 'FALLOW_ANALYSIS_ARGS=(check --format json --root .)\n' > "$CI_API_FAIL_WORK/fallow-analysis-args.sh"
+printf '{"kind":"dead-code","schema_version":9}\n' > "$CI_API_FAIL_WORK/fallow-results.json"
 : > "$CI_API_FAIL_WORK/mock.log"
 rm -f "$CI_API_FAIL_WORK/fallow-skip-reason.txt" "$CI_API_FAIL_WORK/fallow-dedup-lookup-failed.txt"
 (cd "$CI_API_FAIL_WORK" \

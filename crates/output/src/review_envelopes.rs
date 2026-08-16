@@ -403,6 +403,9 @@ pub enum ReviewEnvelopeSchema {
     /// Issue #528 review envelope format.
     #[serde(rename = "fallow-review-envelope/v2")]
     V2,
+    /// Gate-aware conclusion semantics, including failures without findings.
+    #[serde(rename = "fallow-review-envelope/v3")]
+    V3,
 }
 
 /// Review-envelope provider tag.
@@ -422,11 +425,11 @@ pub enum ReviewProvider {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ReviewCheckConclusion {
-    /// No findings.
+    /// The gate passed, whether or not inline findings were selected.
     Success,
     /// Findings but none gated as failure.
     Neutral,
-    /// At least one finding gated as failure.
+    /// The gate failed, including failures without an inline finding.
     Failure,
 }
 

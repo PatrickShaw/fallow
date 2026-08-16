@@ -446,12 +446,8 @@ variables:
       # inside the diff. Project-level findings (unused deps, catalog,
       # override) bypass the filter and pass through unchanged.
       # GitLab CI runs each script line in the same shell, so an exported
-      # variable is visible to the analysis below; for the comment /
-      # review jobs (separate jobs in the pipeline) we rely on the
-      # `dotenv` artifact written by the shared helper that lives in
-      # ci/scripts/. Today comment.sh / review.sh re-derive the diff
-      # themselves when FALLOW_DIFF_FILE is unset, so this block only
-      # affects the analysis job and is purely an upgrade.
+      # variable is visible to the saved-envelope comment/review renderers.
+      # They derive the diff themselves only when FALLOW_DIFF_FILE is unset.
       if [ -n "$FALLOW_CHANGED_SINCE" ] && [ -z "$FALLOW_DIFF_FILE" ]; then
         if git diff --unified=0 "${FALLOW_CHANGED_SINCE}..HEAD" > fallow-mr.diff 2>/dev/null && [ -s fallow-mr.diff ]; then
           export FALLOW_DIFF_FILE="$PWD/fallow-mr.diff"
@@ -618,15 +614,42 @@ variables:
       RUN_ARGS=("${ARGS[@]}")
       if [ -n "$FALLOW_ARGS" ]; then
         read -ra EXTRA_ARGS <<< "$FALLOW_ARGS"
+      fi
+
+      # Path-prefix options belong to saved-envelope presentation, not the
+      # JSON analysis invocation. Preserve an explicit empty prefix too.
+      export FALLOW_RENDER_PATH_PREFIX_SET=0
+      export FALLOW_RENDER_PATH_PREFIX=""
+      FILTERED_EXTRA_ARGS=()
+      for ((i = 0; i < ${#EXTRA_ARGS[@]}; i++)); do
+        arg="${EXTRA_ARGS[$i]}"
+        case "$arg" in
+          --report-path-prefix|--annotations-path-prefix)
+            if [ $((i + 1)) -ge "${#EXTRA_ARGS[@]}" ]; then
+              echo "ERROR: ${arg} requires a prefix value"
+              exit 2
+            fi
+            i=$((i + 1))
+            export FALLOW_RENDER_PATH_PREFIX="${EXTRA_ARGS[$i]}"
+            export FALLOW_RENDER_PATH_PREFIX_SET=1
+            ;;
+          --report-path-prefix=*|--annotations-path-prefix=*)
+            export FALLOW_RENDER_PATH_PREFIX="${arg#*=}"
+            export FALLOW_RENDER_PATH_PREFIX_SET=1
+            ;;
+          *) FILTERED_EXTRA_ARGS+=("$arg") ;;
+        esac
+      done
+      EXTRA_ARGS=()
+      if [ "${#FILTERED_EXTRA_ARGS[@]}" -gt 0 ]; then
+        EXTRA_ARGS=("${FILTERED_EXTRA_ARGS[@]}")
         RUN_ARGS+=("${EXTRA_ARGS[@]}")
       fi
 
       # ── Run analysis ─────────────────────────────────────────────────
       {
-        printf 'FALLOW_ANALYSIS_ARGS=('
-        printf '%q ' "${RUN_ARGS[@]}"
-        printf ')\n'
-      } > fallow-analysis-args.sh
+        printf '%s\0' "${RUN_ARGS[@]}"
+      } > fallow-analysis-args.bin
 
       echo "Running: fallow ${RUN_ARGS[*]}"
       set +e
@@ -647,6 +670,7 @@ variables:
         exit "$EXIT_CODE"
       fi
 
+      TYPE_AWARE_COMPLETENESS_FAILED=false
       if [ "$FALLOW_EXIT_CODE" -ne 0 ] && jq -e '
         (
           ._meta.type_aware
@@ -661,8 +685,7 @@ variables:
             or ([ $type_aware.queries[]? | select(.status != "complete") ] | length > 0)
           )
       ' fallow-results.json > /dev/null 2>&1; then
-        echo "ERROR: Type-aware completeness gate failed because semantic analysis was unavailable or partial."
-        exit 1
+        TYPE_AWARE_COMPLETENESS_FAILED=true
       fi
 
       if [ -s fallow-stderr.log ]; then
@@ -703,6 +726,9 @@ variables:
         echo "Generating Code Quality report..."
         REPORT_ARGS=(report --from fallow-results.json --root "$FALLOW_ROOT" --format codeclimate --quiet)
         [ -n "$FALLOW_CONFIG" ] && REPORT_ARGS+=(--config "$FALLOW_CONFIG")
+        [ -n "$FALLOW_WORKSPACE" ] && REPORT_ARGS+=(--workspace "$FALLOW_WORKSPACE")
+        [ "$FALLOW_RENDER_PATH_PREFIX_SET" = "1" ] \
+          && REPORT_ARGS+=(--report-path-prefix "${FALLOW_RENDER_PATH_PREFIX:-}")
         set +e
         fallow "${REPORT_ARGS[@]}" > gl-code-quality-report.json 2> fallow-codequality-stderr.log
         CODEQUALITY_EXIT=$?
@@ -741,6 +767,11 @@ variables:
         else
           echo "WARNING: review.sh not available, skipping MR review"
         fi
+      fi
+
+      if [ "$TYPE_AWARE_COMPLETENESS_FAILED" = "true" ]; then
+        echo "ERROR: Type-aware completeness gate failed because semantic analysis was unavailable or partial."
+        exit 1
       fi
 
       # ── Fail check ───────────────────────────────────────────────────
@@ -782,7 +813,7 @@ variables:
     when: always
     paths:
       - fallow-results.json
-      - fallow-analysis-args.sh
+      - fallow-analysis-args.bin
       - fallow-mr-comment.md
       - fallow-mr-comment-envelope.json
       - fallow-mr-comment-plan.json

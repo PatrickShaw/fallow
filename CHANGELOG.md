@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.17.0] - 2026-08-16
+
 ### Added
 
 - **Type-aware `check` and `audit` results now render directly as GitHub or
@@ -29,11 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   execute its `.mjs` file directly. The VS Code package now includes every
   supported TypeScript-Go backend, and Windows child processes stay hidden
   while preserving the existing process-tree controls.
-
-## [3.16.0] - 2026-08-13
-
-### Fixed
-
 - **Type-aware public-signature scans no longer expand every property behind an
   external generic constraint**
   (Closes [#2269](https://github.com/fallow-rs/fallow/issues/2269)). A public
@@ -48,6 +45,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   return the stable `svelte-virtual-module-exports` gap reason with guidance to
   validate framework diagnostics through `svelte-check`. Default-only imports
   and declaration-backed named exports remain supported.
+- **Ambiguous `export *` collisions no longer create misleading findings
+  against their contributing source files**
+  ([#2268](https://github.com/fallow-rs/fallow/pull/2268),
+  [#2283](https://github.com/fallow-rs/fallow/pull/2283)). Fallow suppresses
+  ambiguity-attributable unused declaration, unused member, unrendered
+  component, and unprovided injection findings. `fallow trace` exposes the
+  additive `star_export_ambiguity` field with the contributing origins and
+  namespaces.
+- **The bundled GitHub Action now bounds installed-binary verification with a
+  hard deadline** (Closes
+  [#2273](https://github.com/fallow-rs/fallow/issues/2273)). Verification runs
+  from a file under a supervising process, preserves normal verifier exit
+  statuses, and exits with status 124 plus one focused workflow error on
+  timeout.
+
+### Changed
+
+- **Type-aware wire protocol 7 and semantic schema 3 add the closed
+  `svelte-virtual-module-exports` reason.** Every versioned JSON root that can
+  embed this contract advances its schema version. Strict machine-readable
+  consumers should regenerate validators from the current output schema;
+  unversioned trace and inspect roots are unchanged.
+
+### Performance
+
+- **Named-export propagation reserves its transient index up front**, avoiding
+  repeated hash-table growth in re-export-heavy graphs.
+- **Root JSON discriminators are inserted in place**, avoiding a temporary
+  rebuild of the complete object for explain and related envelopes.
+- **Clone spread calculation uses one-pass insertion-ordered bucketing**
+  instead of sorting every occurrence path while preserving report order and
+  spread semantics.
+- **Local TypeScript and Vue declaration deduplication happens once at module
+  emission**, preserving first-declaration spans and source order without a
+  second owned name per declaration.
+
+## [3.16.0] - 2026-08-13
+
+### Fixed
+
 - **Windows: `--gate new-only` no longer reports pre-existing findings as
   introduced.** The base-snapshot focus set is built from
   `git rev-parse --show-toplevel`, whose spelling can differ from the
@@ -5891,7 +5928,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.16.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.17.0...HEAD
+[3.17.0]: https://github.com/fallow-rs/fallow/compare/v3.16.0...v3.17.0
 [3.16.0]: https://github.com/fallow-rs/fallow/compare/v3.15.0...v3.16.0
 [3.15.0]: https://github.com/fallow-rs/fallow/compare/v3.14.0...v3.15.0
 [3.14.0]: https://github.com/fallow-rs/fallow/compare/v3.13.0...v3.14.0

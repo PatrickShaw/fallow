@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Declarations inside `declare module '...'` augmentation and ambient-module
+  bodies are no longer reported as unused exports of the containing file**
+  (Closes [#2349](https://github.com/fallow-rs/fallow/issues/2349)). An
+  `export interface` inside a module augmentation describes the augmented
+  module, so following the previous remove-export advice broke type checking.
+  Named re-exports inside ambient bodies still credit their target symbols and
+  keep the source file reachable. The extraction cache version was bumped, so
+  the first run after upgrading performs one cold re-extract (relevant to CI
+  cache sizing). Existing `fallow-ignore` suppressions placed above
+  augmentation-scoped declarations as a workaround now surface as
+  stale-suppression findings (warn by default) and can be removed.
+
 - **`fallow audit` now scores the base attribution pass with the same Istanbul
   coverage map as the head pass.** The base worktree pass previously matched no
   coverage entry (the map records head-checkout paths), silently fell back to

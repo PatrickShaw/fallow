@@ -226,6 +226,28 @@ pub struct ImportedSymbol {
     mechanism: ModuleLoadMechanism,
 }
 
+impl ImportedSymbol {
+    /// Whether this symbol is the whole-module shape of `export *` or
+    /// `export * as ns` inside a `declare module '...'` body (issue #2357):
+    /// type-only, bound to no local name, and naming the module namespace or
+    /// its `default` member (recorded for the `export * as ns` form).
+    ///
+    /// The ambient body is erased at runtime, so package usage stays
+    /// type-only, but the star forwards every export of the target in both
+    /// meanings, so the graph credits the type and the value namespace. Every
+    /// other type-only symbol, bound (`import type { x }`) or not (an ambient
+    /// named re-export, an `import()` type reference), credits type space only.
+    #[must_use]
+    pub(crate) fn is_ambient_star(&self) -> bool {
+        self.is_type_only
+            && self.local_name.is_empty()
+            && matches!(
+                self.imported_name,
+                ImportedName::Namespace | ImportedName::Default
+            )
+    }
+}
+
 /// Flat bitset index mapping files to the test profiles that reach them.
 ///
 /// Each file owns `words_per_file` contiguous reachable-profile words. Masks are
@@ -973,7 +995,9 @@ impl ModuleGraph {
                 };
                 symbols.iter().any(|symbol| {
                     symbol.import_span == reference.import_span
-                        && (namespace == ExportNamespace::Type || !symbol.is_type_only)
+                        && (namespace == ExportNamespace::Type
+                            || !symbol.is_type_only
+                            || symbol.is_ambient_star())
                         && match &symbol.imported_name {
                             ImportedName::Named(imported) => names.contains(imported.as_str()),
                             ImportedName::Default => names.contains("default"),

@@ -76,6 +76,22 @@ error by suppressing a downstream detector.
   `ModuleGraph::ambiguous_star_exports` exposes collisions for reporting, while
   `ModuleGraph::ambiguity_participants` identifies their canonical declarations
   for detector gates.
+- An ambient-module star re-export (`export *` or `export * as ns` inside a
+  `declare module '...'` body, recorded as a type-only namespace import
+  without a local binding) credits the full ES star surface of its target:
+  every named export in both the type and the value namespace, never the
+  target's `default`, and, through the ambient star closure
+  (`ModuleGraph::collect_ambient_star_targets`), the same surface of every
+  module the target reaches through its own `export *` chain plus every
+  export (`default` included) of each `export * as sub` source along that
+  chain, recursively. `export * as ns` adds a type-only default import for
+  `ns.default`. Every other type-only import credits type space only: a bound
+  `import type { x }`, the ambient named re-export (#2349), explicitly
+  type-only ambient re-exports, and `import()` type references in TypeScript
+  and JSDoc, so the value half of a same-name type and value pair reached only
+  that way still reports. Runtime whole-module edges (dynamic-import patterns)
+  credit the module namespace object, `default` included, and only the
+  target's direct exports.
 - Styling and CSS-in-JS extraction must preserve source line mapping.
 - Duplication token or normalization changes require the duplication cache
   version to move with the changed semantics.

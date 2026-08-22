@@ -44,7 +44,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   jobs, while a credential-free gate downloads and validates the exact
   universal and platform-specific payloads from both registries.
 
+- **Re-exports from a bare specifier inside a `declare module '...'` body are
+  classified as type-only package usage.** An ambient body is erased at
+  runtime, so `declare module 'shim' { export { A } from 'some-dep' }` and
+  `declare module 'shim' { export * from 'some-dep' }` reference `some-dep`
+  in type space only. A production dependency referenced solely through such a
+  re-export now yields the existing type-only-dependency finding in
+  `--production` mode (the named form has done so since
+  [#2349](https://github.com/fallow-rs/fallow/issues/2349); the star form
+  previously counted as runtime usage). Move the package to
+  `devDependencies`, or add it to `ignoreDependencies` when the ambient
+  declaration intentionally describes a runtime package.
+
 ### Fixed
+
+- **Star re-exports inside `declare module '...'` bodies credit the full ES
+  star surface of their target without adding to the declaring file's export
+  surface** (Closes [#2357](https://github.com/fallow-rs/fallow/issues/2357)).
+  `declare module 'pkg' { export * from './impl' }` and the
+  `export * as ns from './impl'` form were still recorded as file-level star
+  re-exports, so when the declaring `.d.ts` was an entry point every export of
+  `./impl` was laundered into that entry's public surface, and when it was
+  not, nothing in `./impl` was credited at all. The ambient declaration states
+  that all of `./impl` is reachable through `pkg`, so the two star forms now
+  credit `./impl`'s full ES star surface directly. That surface is every
+  named export of `./impl` in both the type and the value namespace (so
+  `interface User` plus `const User`, or a zod-style `const User` plus
+  `type User`, keep both halves), including names `./impl` only exposes
+  through its own `export *` and `export * as sub` chains, recursively, and
+  every export of such a `sub` namespace, `default` included, because
+  `sub.default` is reachable. Plain `export *` never forwards `default`, so an
+  otherwise unused default export of `./impl` or of one of its `export *`
+  sources keeps reporting, while `export * as ns` exposes `ns.default` and
+  credits it. The declaring file exposes no star re-export (visible in
+  `inspect --file` and `dead-code --trace`), and genuinely unused exports in
+  unrelated modules keep reporting. Every other ambient form is unchanged:
+  the named re-export from
+  [#2349](https://github.com/fallow-rs/fallow/issues/2349)
+  (`export { User } from './impl'`), explicitly type-only re-exports
+  (`export type { User } from`, `export { type User } from`,
+  `export type * from`), and `import('./impl').User` type references in
+  TypeScript and JSDoc keep crediting type space only. An unreferenced `.ts`
+  file whose only content is an ambient star declaration is now reported as
+  an unused file while its ambient star still credits the target's exports
+  (the laundered star re-export edge previously kept such a shim off the
+  unused-file list; the named ambient form already reported this way). Both
+  the extraction and graph cache versions were bumped, so the first run after
+  upgrading performs one cold re-analysis.
 
 - **JSX member-expression tags (`<SC.Wrapper />`) now credit the referenced
   export** (Closes

@@ -184,10 +184,28 @@ pub(super) fn mark_all_exports_referenced_at_site(
     exports: &mut [ExportSymbol],
     context: &mut NamespaceMarkContext<'_>,
 ) {
+    mark_exports_referenced_at_site(exports, context, true);
+}
+
+/// Mark every named export as referenced: the surface an ES `export *`
+/// forwards, which never includes `default`.
+pub(super) fn mark_star_surface_referenced_at_site(
+    exports: &mut [ExportSymbol],
+    context: &mut NamespaceMarkContext<'_>,
+) {
+    mark_exports_referenced_at_site(exports, context, false);
+}
+
+fn mark_exports_referenced_at_site(
+    exports: &mut [ExportSymbol],
+    context: &mut NamespaceMarkContext<'_>,
+    include_default: bool,
+) {
     for idx in 0..exports.len() {
         let name = match &exports[idx].name {
             fallow_types::extract::ExportName::Named(name) => name.as_str(),
-            fallow_types::extract::ExportName::Default => "default",
+            fallow_types::extract::ExportName::Default if include_default => "default",
+            fallow_types::extract::ExportName::Default => continue,
         };
         if !context.effective_exports.is_declaration_slot(
             exports,
@@ -640,6 +658,13 @@ impl ImportNamespaceUse {
 }
 
 /// Decide which semantic namespaces the imported binding uses.
+///
+/// A type-only import credits type space: `import type { x }` narrows its
+/// binding with the `type` keyword, and a type-only import without a binding
+/// (an ambient named re-export, an `import()` type reference) stays there as
+/// well. The one exception is the ambient star form (issue #2357): `export *`
+/// inside a `declare module '...'` body forwards every export of the target in
+/// both meanings, so it credits both namespaces.
 fn desired_import_namespaces(
     sym: &ImportedSymbol,
     source_mod: Option<&&ResolvedModule>,
@@ -647,7 +672,7 @@ fn desired_import_namespaces(
     if sym.is_type_only {
         return ImportNamespaceUse {
             uses_type: true,
-            uses_value: false,
+            uses_value: sym.is_ambient_star(),
             classified: true,
         };
     }
@@ -714,6 +739,12 @@ pub(super) fn attach_symbol_reference(
 
     if matches!(sym.imported_name, ImportedName::Namespace) {
         if sym.local_name.is_empty() {
+            // A runtime whole-module edge (a dynamic-import pattern) hands the
+            // consumer the module namespace object, `default` included. The
+            // type-only form is `export *` inside an ambient module body
+            // (issue #2357), which forwards the ES star surface: every named
+            // export and never `default`. The `export * as ns` form records
+            // the namespace object's `default` member as a separate import.
             let namespaces = desired_import_namespaces(sym, source_mod).namespaces();
             for (namespace, is_used) in [
                 (ExportNamespace::Type, namespaces.0),
@@ -728,7 +759,11 @@ pub(super) fn attach_symbol_reference(
                         effective_exports: ctx.effective_exports,
                         dedup: ctx.dedup,
                     };
-                    mark_all_exports_referenced_at_site(&mut target_module.exports, &mut mark);
+                    if sym.is_ambient_star() {
+                        mark_star_surface_referenced_at_site(&mut target_module.exports, &mut mark);
+                    } else {
+                        mark_all_exports_referenced_at_site(&mut target_module.exports, &mut mark);
+                    }
                 }
             }
         } else {
@@ -761,7 +796,7 @@ mod tests {
     use super::*;
     use crate::resolve::{ResolveResult, ResolvedImport, ResolvedModule};
     use fallow_types::discover::{DiscoveredFile, FileId};
-    use fallow_types::extract::{ExportName, VisibilityTag};
+    use fallow_types::extract::{ExportInfo, ExportName, ImportInfo, VisibilityTag};
 
     use super::super::ModuleGraph;
 
@@ -1469,6 +1504,203 @@ mod tests {
                 export.name
             );
         }
+    }
+
+    /// A type-only import with no local binding: the shape of a re-export
+    /// inside a `declare module '...'` body (issue #2357).
+    fn unbound_type_only_symbol(imported_name: ImportedName) -> ImportedSymbol {
+        ImportedSymbol {
+            imported_name,
+            local_name: String::new(),
+            import_span: oxc_span::Span::new(0, 10),
+            is_type_only: true,
+            mechanism: ModuleLoadMechanism::EsModule,
+        }
+    }
+
+    #[test]
+    fn desired_import_namespaces_credits_both_lanes_only_for_the_ambient_star() {
+        for imported_name in [ImportedName::Namespace, ImportedName::Default] {
+            let star = unbound_type_only_symbol(imported_name.clone());
+            assert_eq!(
+                desired_import_namespaces(&star, None).namespaces(),
+                (true, true),
+                "the ambient star surface ({imported_name:?}) forwards both meanings"
+            );
+        }
+
+        let named = unbound_type_only_symbol(ImportedName::Named("Foo".to_string()));
+        assert_eq!(
+            desired_import_namespaces(&named, None).namespaces(),
+            (true, false),
+            "an ambient named re-export or an `import()` type reference stays in type space"
+        );
+
+        let bound = ImportedSymbol {
+            local_name: "Foo".to_string(),
+            ..unbound_type_only_symbol(ImportedName::Named("Foo".to_string()))
+        };
+        assert_eq!(
+            desired_import_namespaces(&bound, None).namespaces(),
+            (true, false),
+            "`import type {{ Foo }}` restricts its binding to type space"
+        );
+    }
+
+    /// Target module for the ambient star tests: `Foo` is both an interface
+    /// and a const, `bar` is a plain value, and there is a default export.
+    fn type_value_pair_module(file_id: FileId) -> ResolvedModule {
+        let export = |name: ExportName, is_type_only: bool, start: u32| ExportInfo {
+            name,
+            local_name: Some("x".to_string()),
+            is_type_only,
+            visibility: VisibilityTag::None,
+            expected_unused_reason: None,
+            span: oxc_span::Span::new(start, start + 10),
+            members: vec![],
+            is_side_effect_used: false,
+            super_class: None,
+        };
+        ResolvedModule {
+            file_id,
+            path: std::path::PathBuf::from("/project/impl.ts"),
+            exports: vec![
+                export(ExportName::Named("Foo".to_string()), true, 0),
+                export(ExportName::Named("Foo".to_string()), false, 20),
+                export(ExportName::Named("bar".to_string()), false, 40),
+                export(ExportName::Default, false, 60),
+            ]
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    fn ambient_star_graph(imports: Vec<ImportInfo>) -> ModuleGraph {
+        let files = vec![
+            DiscoveredFile {
+                id: FileId(0),
+                path: std::path::PathBuf::from("/project/ambient.d.ts"),
+                size_bytes: 100,
+            },
+            DiscoveredFile {
+                id: FileId(1),
+                path: std::path::PathBuf::from("/project/impl.ts"),
+                size_bytes: 100,
+            },
+        ];
+        let resolved_modules = vec![
+            ResolvedModule {
+                file_id: FileId(0),
+                path: std::path::PathBuf::from("/project/ambient.d.ts"),
+                resolved_imports: imports
+                    .into_iter()
+                    .map(|info| ResolvedImport {
+                        info,
+                        target: ResolveResult::InternalModule(FileId(1)),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            type_value_pair_module(FileId(1)),
+        ];
+        ModuleGraph::build(&resolved_modules, &[], &files)
+    }
+
+    fn ambient_import(imported_name: ImportedName) -> ImportInfo {
+        ImportInfo {
+            source: "./impl".to_string(),
+            imported_name,
+            local_name: String::new(),
+            is_type_only: true,
+            from_style: false,
+            span: oxc_span::Span::new(0, 10),
+            source_span: oxc_span::Span::default(),
+        }
+    }
+
+    fn lanes_of(
+        graph: &ModuleGraph,
+        name: &str,
+        is_type_only: bool,
+    ) -> Vec<(ReferenceKind, ExportNamespace)> {
+        graph.modules[1]
+            .exports
+            .iter()
+            .find(|e| e.name.matches_str(name) && e.is_type_only == is_type_only)
+            .unwrap_or_else(|| panic!("impl.ts must export `{name}` (type-only: {is_type_only})"))
+            .references
+            .iter()
+            .map(|r| (r.kind, r.namespace))
+            .collect()
+    }
+
+    #[test]
+    fn attach_ref_ambient_star_credits_both_declarations_and_skips_default() {
+        // `declare module 'pkg' { export * from './impl' }`: the star surface
+        // forwards `Foo` in both meanings and never forwards `default`.
+        let graph = ambient_star_graph(vec![ambient_import(ImportedName::Namespace)]);
+
+        assert_eq!(
+            lanes_of(&graph, "Foo", true),
+            vec![(ReferenceKind::NamespaceImport, ExportNamespace::Type)],
+            "the interface half is credited in the type namespace"
+        );
+        assert_eq!(
+            lanes_of(&graph, "Foo", false),
+            vec![(ReferenceKind::NamespaceImport, ExportNamespace::Value)],
+            "the const half is credited in the value namespace"
+        );
+        let bar_lanes = lanes_of(&graph, "bar", false);
+        assert!(
+            bar_lanes.contains(&(ReferenceKind::NamespaceImport, ExportNamespace::Value)),
+            "a plain value export is credited in the value namespace, found {bar_lanes:?}"
+        );
+        assert!(
+            lanes_of(&graph, "default", false).is_empty(),
+            "ES `export *` never forwards `default`"
+        );
+    }
+
+    #[test]
+    fn attach_ref_ambient_namespace_star_credits_default_through_its_own_import() {
+        // `declare module 'pkg' { export * as ns from './impl' }` records the
+        // namespace object's `default` member as a separate type-only import.
+        let graph = ambient_star_graph(vec![
+            ambient_import(ImportedName::Namespace),
+            ambient_import(ImportedName::Default),
+        ]);
+
+        let default_lanes = lanes_of(&graph, "default", false);
+        assert!(
+            default_lanes.contains(&(ReferenceKind::DefaultImport, ExportNamespace::Value)),
+            "`ns.default` reaches the default export in value space, found {default_lanes:?}"
+        );
+        assert_eq!(
+            lanes_of(&graph, "Foo", false),
+            vec![(ReferenceKind::NamespaceImport, ExportNamespace::Value)],
+            "the named surface is unchanged by the extra default import"
+        );
+    }
+
+    #[test]
+    fn attach_ref_unbound_named_type_only_import_credits_type_space_only() {
+        // `declare module 'pkg' { export { Foo } from './impl' }` (#2349) and
+        // `import('./impl').Foo` record an unbound type-only named import. It
+        // is not the star form, so it keeps its type-space credit: the
+        // interface half is referenced, the const half is not.
+        let graph =
+            ambient_star_graph(vec![ambient_import(ImportedName::Named("Foo".to_string()))]);
+
+        assert!(
+            lanes_of(&graph, "Foo", true)
+                .contains(&(ReferenceKind::NamedImport, ExportNamespace::Type)),
+            "the interface half is credited in the type namespace"
+        );
+        assert!(
+            !lanes_of(&graph, "Foo", false)
+                .contains(&(ReferenceKind::NamedImport, ExportNamespace::Value)),
+            "the const half must not be credited in the value namespace"
+        );
     }
 
     #[test]

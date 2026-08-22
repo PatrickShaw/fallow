@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A repo whose root `package.json` declares overrides next to bun's legacy
+  binary `bun.lockb` now explains why no unused-override findings are
+  reported** (Closes [#2358](https://github.com/fallow-rs/fallow/issues/2358)).
+  Since the bun.lock support the `unused-dependency-overrides` check skips
+  silently when `bun.lockb` sits next to the root `package.json` and no
+  parseable text lockfile (`bun.lock`, `pnpm-lock.yaml`, `package-lock.json`,
+  or `npm-shrinkwrap.json`) is there to use instead (a `yarn.lock` is never
+  consulted), because resolution ground truth is unreadable and
+  declaration-only analysis would flag every transitive-only pin. The skip
+  now records a `bun-lockb-override-resolution-skipped` workspace diagnostic
+  anchored at the root `package.json` (in the `dead-code`, `check`, and
+  `health` `workspace_diagnostics[]` JSON envelopes plus one deduplicated
+  stderr warning) with the hint to run `bun install --save-text-lockfile`
+  (bun 1.2 or newer) so a text `bun.lock` exists, or to delete the stale
+  `bun.lockb` in a repo that no longer uses bun. Manifests without overrides,
+  repos with a parseable text lockfile next to the `bun.lockb`, and repos
+  without any lockfile are unaffected. The bare combined `fallow` JSON
+  envelope does not carry analysis-stage workspace diagnostics (pre-existing,
+  shared with `malformed-pnpm-workspace-yaml`; the stderr warning still
+  appears there). The diagnostic kind is additive on the
+  `workspace_diagnostics[].kind` union; consumers that exhaustively match on
+  `kind` should treat unknown kinds as informational.
+
 - **The VS Code extension now publishes platform-specific packages for macOS,
   Linux, and Windows.** Each targeted VSIX carries only its matching semantic
   backend, reducing normal extension downloads by roughly 82 to 84 percent.

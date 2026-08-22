@@ -47,6 +47,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   augmentation-scoped declarations as a workaround now surface as
   stale-suppression findings (warn by default) and can be removed.
 
+- **`fallow audit` now honors `health.coverage` and `health.coverageRoot` from
+  config** (Closes
+  [#2359](https://github.com/fallow-rs/fallow/issues/2359)). Audit resolved
+  Istanbul coverage only from `--coverage`, `FALLOW_COVERAGE`, and the
+  auto-detected `coverage/coverage-final.json`, so a repository that
+  configured coverage once for `fallow health` still got estimate-based CRAP
+  attribution in audit while its health score used real coverage. Audit now
+  shares the health resolution order (CLI flag, then `FALLOW_COVERAGE` /
+  `FALLOW_COVERAGE_ROOT`, then the config keys, then auto-detection), and the
+  resolved map feeds both the head pass and the rebased base attribution
+  pass; its path and content participate in the base-snapshot cache key, so a
+  config change invalidates cached base snapshots. Behavior change:
+  `FALLOW_COVERAGE_ROOT` now applies to audit as well, an empty
+  `FALLOW_COVERAGE` is ignored instead of being read as a path, a
+  configured coverage file that does not exist fails audit with the same
+  structured exit 2 as `fallow health`, and a relative `health.coverageRoot`
+  is rejected with the same `--coverage-root expects an absolute path`
+  exit 2. The MCP `audit` and `check_health` tools are unchanged: their typed
+  route reads only the explicit `coverage` / `coverage_root` parameters and
+  consults the config keys only when a call falls back to the CLI; routing
+  that route through the same precedence is tracked as a follow-up.
+
 - **`fallow audit` now scores the base attribution pass with the same Istanbul
   coverage map as the head pass.** The base worktree pass previously matched no
   coverage entry (the map records head-checkout paths), silently fell back to

@@ -36,6 +36,26 @@ Do not hand-copy the complete tool list into durable prose. Read
   completion, cancellation, or timeout.
 - Never inherit unbounded environment or filesystem authority into code mode.
 - Keep tool ordering deterministic.
+- The `audit` and `check_health` typed routes resolve Istanbul coverage
+  through `fallow_api::coverage::resolve_coverage_inputs` with the CLI's
+  precedence (tool parameter, then `FALLOW_COVERAGE` / `FALLOW_COVERAGE_ROOT`,
+  then `health.coverage` / `health.coverageRoot`). `tools/api_runtime.rs`
+  reads the env vars once at the adapter boundary
+  (`resolve_typed_coverage_inputs` takes the layer as `None` on every
+  production call and injects it only in tests) and loads the config's
+  `health` section through `fallow_api::load_health_config` only when a higher
+  layer leaves an input unset, so a typed call and its CLI fallback score CRAP
+  from the same map (#2368). Three known costs of that boundary: the lazy load
+  parses the project config once more than the analysis context does (a second
+  remote fetch for a config using `extends` over HTTPS with
+  `allow_remote_extends`); `FALLOW_INVALID_COVERAGE_PATH` always reports
+  `context: health.coverage` because the existence check runs inside
+  `validate_complexity_options`, which does not receive the winning layer,
+  while the sibling `FALLOW_INVALID_COVERAGE_ROOT` names its layer; and
+  coverage resolution runs ahead of the `run_health` / `run_audit` option
+  validation, so a call that is invalid in two ways (a rejected coverage input
+  and, say, `threads: 0`) reports the coverage error, which is also the order
+  the CLI reports them in.
 - `trace_symbol` and `symbol_impact` expose exact TypeScript evidence for
   Fallow-owned project questions. They do not expose compiler diagnostics or
   typed lint findings.

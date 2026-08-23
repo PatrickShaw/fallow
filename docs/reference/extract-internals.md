@@ -95,6 +95,37 @@ Shared extraction result types live in `crates/types/src/extract.rs`.
   feed the security secret-source index, so MDX prose records a dotted chain
   only when its root is an import local of the file: prose never creates
   member accesses on foreign roots such as `process.env`.
+- The MDX line scan hands the statement lines of the whole file to the parser
+  as one program, and a rejected program is an empty program, so one
+  misclassified line would drop every import of the file. A line opens a
+  statement only when it carries a shape a real statement has: a source
+  clause, a brace specifier list, a star specifier, a string-literal
+  side-effect import, or, after `export`, a brace list, a star, or a
+  declaration keyword. Prose that merely opens with the word "import" or
+  "export" stays prose. The shape list is a fast path, not the definition of
+  the language: a line that opens with the keyword and matches nothing in it
+  is handed to the parser on its own, and a line that parses is a statement
+  whatever its shape, which keeps heads the list does not enumerate
+  (`import /* c */ './x'`, a spaced dynamic `import ('./x')`) out of prose. A
+  sentence cannot slip through that probe, because a sentence does not parse.
+  Classification is backed by a parse fallback in the other direction: the
+  scan keeps statement blocks (an opening line plus the continuation lines a
+  multi-line specifier list collected), and when the parser rejects the body,
+  every block it also rejects on its own is demoted to prose and the rest is
+  re-parsed, so a rejected line costs only itself. Demoted lines feed the
+  prose scan like any other body line, so the completeness guard above still
+  sees their mentions. A source clause is a `from` bounded by whitespace on
+  the left and followed by its specifier quote on the right, immediately or
+  after whitespace, so every whitespace form JavaScript accepts (`from\t'./x'`,
+  a no-break space, a multi-space run) names a source, while a `from` inside a
+  word or inside a string does not, and a multi-line block is never ended one
+  line early by prose in an object literal.
+- The parse fallback covers the dead-code path only. The duplication tokenizer
+  reads MDX through `extract_mdx_statements`, which returns the classified
+  statement body without a retry, so a line the classifier accepts and the
+  parser then rejects still costs that MDX file its whole token stream there.
+  Duplication findings inside such a file are missing rather than wrong, and
+  the classifier is what keeps the common prose sentence out of that path.
 
 ## Verification
 

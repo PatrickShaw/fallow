@@ -549,6 +549,7 @@ fn propagate_namespace_references(
     graph: &mut ModuleGraph,
     module_by_id: &FxHashMap<FileId, &ResolvedModule>,
     features: build::NamespaceFeatures,
+    exposed_namespace_targets: &re_exports::ExposedNamespaceTargets,
     reference_paths: &mut ReferencePathInterner,
 ) {
     let indexes = namespace_indexes::NamespacePropagationIndexes::new(graph, module_by_id);
@@ -561,7 +562,12 @@ fn propagate_namespace_references(
         );
     }
     if features.has_re_exports {
-        namespace_re_exports::propagate_namespace_re_exports(graph, &indexes, reference_paths);
+        namespace_re_exports::propagate_namespace_re_exports(
+            graph,
+            &indexes,
+            exposed_namespace_targets,
+            reference_paths,
+        );
     }
 }
 
@@ -671,26 +677,42 @@ impl ModuleGraph {
 
         let mut reference_paths =
             ReferencePathInterner::new(test_reachability_plan.requires_reference_provenance());
-        graph.populate_references(&module_by_id, &entry_point_ids, &mut reference_paths);
+        let whole_module_targets =
+            graph.populate_references(&module_by_id, &entry_point_ids, &mut reference_paths);
+        // Entry-point reachability depends on edges alone, so it is available
+        // here and is reused verbatim by `mark_reachable` below. The exposed
+        // namespace closure needs it to stay off modules the report already
+        // calls unused files.
+        let entry_reachable = graph.collect_reachable(&entry_point_ids, total_capacity);
+        let exposed_namespace_targets = graph.collect_exposed_namespace_targets(
+            &whole_module_targets,
+            &entry_reachable,
+            &module_by_id,
+        );
 
         if namespace_features.has_aliases || namespace_features.has_re_exports {
             propagate_namespace_references(
                 &mut graph,
                 &module_by_id,
                 namespace_features,
+                &exposed_namespace_targets,
                 &mut reference_paths,
             );
         }
 
         graph.mark_reachable(
+            &entry_reachable,
             &entry_point_ids,
             &runtime_entry_point_ids,
             test_reachability_plan,
             total_capacity,
         );
 
-        graph.re_export_cycles =
-            graph.resolve_re_export_chains(&module_by_id, &mut reference_paths);
+        graph.re_export_cycles = graph.resolve_re_export_chains(
+            &module_by_id,
+            &exposed_namespace_targets,
+            &mut reference_paths,
+        );
         let finalized_paths = reference_paths.finalize(&mut graph.modules);
         graph.reference_paths = finalized_paths.paths;
         graph.reference_routes = finalized_paths.routes;

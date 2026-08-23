@@ -57,9 +57,42 @@ pub(super) struct AttachContext<'a> {
     pub(super) export_index: &'a ExportNameIndex,
     pub(super) effective_exports: &'a super::effective_exports::EffectiveExportIndex,
     pub(super) dedup: &'a mut ReferenceDedup,
+    /// Targets whose whole namespace object a consumer observed in this pass
+    /// (issues #2357, #2372, #2373): every site that credits all exports of a
+    /// namespace target instead of narrowing to accessed members, except a
+    /// binding the namespace-object alias phase narrows on the consumer's
+    /// behalf. Seeds `ModuleGraph::collect_exposed_namespace_targets`, which
+    /// extends the credit to the names the target only exposes through its
+    /// own `export *` and `export * as ns` chains.
+    pub(super) whole_module_targets: &'a mut super::re_exports::WholeModuleObservations,
 }
 
 impl AttachContext<'_> {
+    /// Record that a consumer in this graph observed `target`'s whole
+    /// namespace object.
+    ///
+    /// Every namespace mark-all site must call this or
+    /// [`AttachContext::observe_ambient_namespace_object`] so the exposed
+    /// namespace closure sees the same seed set the marks credited; the one
+    /// deliberate exception is a binding the namespace-object alias phase
+    /// narrows on the consumer's behalf. The seed is namespace-agnostic on
+    /// purpose: the object exposes the same names in the type and value
+    /// namespaces, and `typeof ns.member` keeps a value declaration reachable
+    /// through a type-only observation.
+    fn observe_whole_namespace_object(&mut self, target: FileId) {
+        self.whole_module_targets.observe(target);
+    }
+
+    /// Record that an ambient `declare module '...'` body re-exports every
+    /// name of `target` under an external module id (issue #2357).
+    ///
+    /// Separate from [`AttachContext::observe_whole_namespace_object`]
+    /// because the observers live outside this graph: the seed stands however
+    /// the shim and the target sit in it.
+    fn observe_ambient_namespace_object(&mut self, target: FileId) {
+        self.whole_module_targets.observe_ambient(target);
+    }
+
     fn reborrow(&mut self) -> AttachContext<'_> {
         AttachContext {
             module_by_id: self.module_by_id,
@@ -67,6 +100,7 @@ impl AttachContext<'_> {
             export_index: self.export_index,
             effective_exports: self.effective_exports,
             dedup: self.dedup,
+            whole_module_targets: self.whole_module_targets,
         }
     }
 }
@@ -448,15 +482,43 @@ fn narrow_namespace_references(
     let is_whole_object =
         source_mod.is_some_and(|m| m.whole_object_uses.iter().any(|n| n == sym_local_name));
 
-    let is_re_exported_from_non_entry = source_mod.is_some_and(|m| {
+    // `export { ns }` hands the namespace object itself to consumers the graph
+    // cannot enumerate, on an entry point as much as on any other module: the
+    // binding is the public API there (issue #2373).
+    let is_re_exported = source_mod.is_some_and(|m| {
         m.exports
             .iter()
             .any(|e| e.local_name.as_deref() == Some(sym_local_name))
-    }) && !ctx.entry_point_ids.contains(&site.from_file);
+    });
 
     let is_entry_with_no_access = accessed_members.is_empty()
         && !is_whole_object
+        && !is_re_exported
         && ctx.entry_point_ids.contains(&site.from_file);
+
+    // The consumer observes the whole namespace object (a whole-object use,
+    // no member access the graph can narrow to, or a binding re-exported to
+    // consumers it cannot enumerate): every name on the object is credited,
+    // including the names the target only exposes through its own `export *`
+    // and `export * as ns` chains, which the exposed-namespace closure
+    // handles downstream (issue #2372). A binding placed in an exported
+    // object literal (`export const API = { ns }`) keeps the direct-export
+    // credit but never seeds that closure: the namespace-object alias phase
+    // follows `API.ns.<member>` accesses precisely, so the chain behind it
+    // stays narrowed unless the binding is also used as a whole object or
+    // exported under its own name.
+    let observes_whole_module = is_whole_object
+        || (!is_entry_with_no_access && (accessed_members.is_empty() || is_re_exported));
+    let is_alias_source = || {
+        source_mod.is_some_and(|m| {
+            m.namespace_object_aliases
+                .iter()
+                .any(|alias| alias.namespace_local == sym_local_name)
+        })
+    };
+    if observes_whole_module && (is_whole_object || is_re_exported || !is_alias_source()) {
+        ctx.observe_whole_namespace_object(module.file_id);
+    }
 
     for (namespace, is_used) in [
         (ExportNamespace::Type, namespaces.0),
@@ -473,10 +535,7 @@ fn narrow_namespace_references(
             effective_exports: ctx.effective_exports,
             dedup: ctx.dedup,
         };
-        if is_whole_object
-            || (!is_entry_with_no_access
-                && (accessed_members.is_empty() || is_re_exported_from_non_entry))
-        {
+        if observes_whole_module {
             mark_all_exports_referenced_at_site(&mut module.exports, &mut mark);
         } else {
             let found_members = mark_member_exports_referenced_at_site(
@@ -745,6 +804,17 @@ pub(super) fn attach_symbol_reference(
             // (issue #2357), which forwards the ES star surface: every named
             // export and never `default`. The `export * as ns` form records
             // the namespace object's `default` member as a separate import.
+            // Both observe the whole module, so the target's own `export *`
+            // and `export * as ns` chains are credited downstream through the
+            // exposed-namespace closure (issue #2372 for the runtime form).
+            // The ambient form seeds that closure at any reachability: its
+            // observers are importers of the declared module id, not files in
+            // this graph.
+            if sym.is_ambient_star() {
+                ctx.observe_ambient_namespace_object(target_module.file_id);
+            } else {
+                ctx.observe_whole_namespace_object(target_module.file_id);
+            }
             let namespaces = desired_import_namespaces(sym, source_mod).namespaces();
             for (namespace, is_used) in [
                 (ExportNamespace::Type, namespaces.0),

@@ -128,6 +128,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the environment-variable docs no longer tell MCP callers to pass the inputs
   explicitly.
 
+- **Whole-module consumers of a barrel now credit the exports the barrel only
+  exposes through its own `export *` and `export * as` chains** (Closes
+  [#2372](https://github.com/fallow-rs/fallow/issues/2372)). Five consumer
+  shapes credited the target's direct exports only: a namespace import the
+  graph cannot narrow to member accesses (`import * as ns from './barrel'`
+  used as a whole object in `Object.values(ns)`, a spread, or a destructure
+  with rest, or handed on without any member access), a namespace binding
+  exported under its own name (`export { ns }`, on an entry point as much as
+  on any other module), an `export * as sub` binding imported by name and used
+  as a whole object (`import { sub } from './barrel'` plus
+  `Object.values(sub)`), a dynamic-import pattern match (`import()` with a
+  template, `import.meta.glob`, `require.context`), and a bare side-effect
+  `require('./barrel')` with no binding. A name that reached the barrel
+  through `export * from './deep'` or `export * as sub from './sub'` was
+  reported as unused even though the consumer observes every name on the
+  namespace object. These consumers now seed the same closure the
+  ambient-module star form from
+  [#2357](https://github.com/fallow-rs/fallow/issues/2357) uses: the barrel's
+  `export *` sources credit their named exports (never `default`, which a
+  plain `export *` does not forward), its `export * as sub` sources credit
+  every export (`default` included, because `sub.default` is on the object),
+  and both rules recurse through sub's own chains. A member-narrowed namespace
+  import (`ns.one()`) keeps narrowing to the accessed members and credits
+  nothing else, and a binding placed in an exported object literal
+  (`export const API = { ns }`) keeps the precise `API.ns.<member>` crediting
+  of the alias phase unless it is also used as a whole object or exported
+  under its own name. A barrel no entry point reaches keeps reporting when one
+  of these five consumers is what observes it: that consumer is unreachable
+  too, the barrel is already an unused file, and crediting its chain would
+  only stack unused-export rows underneath that row. The ambient-module star
+  form is deliberately not gated that way, because the module id it declares
+  is imported from outside the graph: an unreachable `declare module` shim
+  keeps crediting its chain, which routinely runs back into modules an entry
+  point imports directly. A whole-object use inside an unreachable file still
+  suppresses the reachable target's chain, exactly as it already suppressed
+  that target's direct exports, so deleting the unused file the report names
+  brings the chain back on the next run.
+
+  Two properties of the seed are worth naming. `export type { ns }` seeds the
+  closure exactly like `export { ns }` and credits the chain in the value
+  namespace as well, because `typeof ns.member` keeps a value declaration
+  reachable through a type-only re-export. And a namespace binding exported
+  under its own name seeds the closure whether or not that export has a
+  consumer, so a report can call `m.ts:ns` unused while crediting the whole
+  chain behind it, the same self-inconsistency the unreachable-observer case
+  has. Fewer unused-export findings for star barrels consumed as whole
+  objects, through a named namespace binding, or through dynamic-import
+  patterns. The graph cache version was bumped, so the first run after
+  upgrading performs one cold re-analysis.
+
+- **`export * as sub` on the entry-point surface now credits sub's own
+  `export *` and `export * as` chains** (Closes
+  [#2373](https://github.com/fallow-rs/fallow/issues/2373)). For
+  `export * as sub from './sub'` on an entry point, on a barrel the entry
+  reaches through plain `export *`, or named by the entry through a chain of
+  named re-exports (`export { sub } from './barrel'`, renames included), every
+  direct export of `sub.ts` was credited but neither its
+  `export * from './deep'` sources nor its `export * as sub2` sources were:
+  the entry star closure walked plain `export *` edges only, and only entry
+  points counted as exposing a namespace object. Every name on sub's namespace
+  object is reachable through the entry, so sub now joins the same closure:
+  deep's named exports are credited (never deep's `default`), every export of
+  sub2 is credited (`default` included), and the rules recurse through any
+  further level. The entry surface is tracked by name, so a barrel the entry
+  reaches only through `export { one } from './barrel'` still exposes `one`
+  and nothing else; a barrel that declares its own `sub`, or that receives
+  `sub` from two `export *` sources at once, exports a different binding under
+  that name and stops the chain there, whether the entry names the barrel or
+  reaches it through a plain `export *`; a namespace re-export on a reachable
+  non-entry barrel that is off the entry surface and has no consumer still
+  exposes nothing; and the entry's plain `export *` still never forwards the
+  barrel's own `default`, so `export * as default` on such a barrel keeps
+  reporting while the same declaration on the entry point itself is credited.
+  Fewer unused-export findings for nested namespace re-exports behind an entry
+  point.
+
+  One shape reports one finding more. A plain `export *` hop inside a chain no
+  longer carries a downstream `export * as default` onward, because that star
+  never forwards `default`, so an
+  `export * from './barrel'` whose barrel does `export * from './mid'` over a
+  `mid` that does `export * as default from './target'` now reports target's
+  exports. That includes the ambient form from
+  [#2357](https://github.com/fallow-rs/fallow/issues/2357), where an
+  `export * as default` declared directly on the ambient star's own target
+  still credits its chain. Nothing else in the issue-2357 behaviour moves: an
+  ambient chain is seeded and walked at any reachability, exactly as it was.
+
 - **Star re-exports inside `declare module '...'` bodies credit the full ES
   star surface of their target without adding to the declaring file's export
   surface** (Closes [#2357](https://github.com/fallow-rs/fallow/issues/2357)).

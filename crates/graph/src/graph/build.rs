@@ -21,6 +21,10 @@ pub(super) struct PopulateEdgesInput<'a> {
     pub(super) total_capacity: usize,
 }
 
+/// The one importable name that both `ExportName` and `ImportedName` can
+/// spell either as their `Default` variant or as a `Named` string.
+const DEFAULT_EXPORT_NAME: &str = "default";
+
 #[derive(Clone, Copy, Default)]
 pub(super) struct NamespaceFeatures {
     pub(super) has_aliases: bool,
@@ -458,7 +462,12 @@ impl ModuleGraph {
                 let export_index = export_indices
                     .entry(target_idx)
                     .and_modify(|index| index.sync(&module.exports))
-                    .or_insert_with(|| ExportNameIndex::build(&module.exports));
+                    .or_insert_with(|| {
+                        ExportNameIndex::build(
+                            &module.exports,
+                            NamedDefaultSpelling::for_target(&module.path),
+                        )
+                    });
                 attach_symbol_reference(
                     module,
                     source_id,
@@ -479,20 +488,58 @@ impl ModuleGraph {
     }
 }
 
-/// Check if a path is a CSS Module file (`.module.css` or `.module.scss`).
-pub(super) fn is_css_module_path(path: &std::path::Path) -> bool {
+/// Whether a path carries the `.module` stem every CSS Module convention uses.
+fn has_css_module_stem(path: &std::path::Path) -> bool {
     path.file_stem()
         .and_then(|s| s.to_str())
         .is_some_and(|stem| stem.ends_with(".module"))
+}
+
+/// Check if a path is a CSS Module file (`.module.css` or `.module.scss`).
+pub(super) fn is_css_module_path(path: &std::path::Path) -> bool {
+    has_css_module_stem(path)
         && path
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|ext| ext == "css" || ext == "scss")
 }
 
+/// Check if a path is a CSS Module stylesheet in any syntax the extractor
+/// treats as one: `.module.css`, `.module.scss`, `.module.sass` or
+/// `.module.less`. This mirrors `fallow_extract`'s own `is_css_module_file`,
+/// which decides where the class-name export list comes from, so it answers
+/// "are this module's exports a class map?".
+///
+/// Deliberately wider than [`is_css_module_path`], which gates CSS member
+/// narrowing on the `.css` / `.scss` pair alone. Widening that one would start
+/// narrowing `.less` and `.sass` class references for every project, a
+/// behavior change well past crediting the default export (issue #2374).
+pub(super) fn is_css_module_stylesheet(path: &std::path::Path) -> bool {
+    has_css_module_stem(path)
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| matches!(ext, "css" | "scss" | "sass" | "less"))
+}
+
 /// Per-module index of exports by importable name: `ExportName::Named`
-/// matches `ImportedName::Named` with the same string, `Default` matches
-/// `Default`, and namespace or side-effect imports match nothing.
+/// matches `ImportedName::Named` with the same string, the default slot
+/// matches a default import, and namespace or side-effect imports match
+/// nothing.
+///
+/// `default` is one importable name spelled two ways on each side, so both
+/// spellings share the default slot (issue #2374). An export declares it as
+/// `ExportName::Default` (`export default x`) or as `ExportName::Named`
+/// (`export { x as default }`, which the extractor keeps under its written
+/// name); an import names it as `ImportedName::Default` (`import x from`) or
+/// as `ImportedName::Named` (`import { default as x } from`, and the ambient
+/// `declare module '<specifier>' { export { default } from './impl' }` form,
+/// which records one named type-space import per specifier). Keying those on
+/// the spelling left every mixed pairing uncredited, so the target's default
+/// export reported as unused.
+///
+/// That collapse holds only where a named `default` really is the module's
+/// default export, so `NamedDefaultSpelling` turns it off per target module.
 ///
 /// Built once per target module in `populate_references` and reused across
 /// all of that module's incoming edge symbols, so wide barrels stop paying a
@@ -504,14 +551,59 @@ pub(super) struct ExportNameIndex {
     named: FxHashMap<String, Vec<usize>>,
     default: Vec<usize>,
     indexed_len: usize,
+    named_default: NamedDefaultSpelling,
+}
+
+/// Whether a target module's `Named("default")` spells its default export.
+///
+/// It does for a JavaScript or TypeScript module: `export { x as default }`
+/// and `exports.default = x` both declare the binding `import x from './m'`
+/// reads, and the extractor keeps both under the written name.
+///
+/// It does not for a CSS Module, whose every export is a class name
+/// (`crates/extract/src/css.rs` emits one `ExportName::Named(class)` per rule
+/// and never an `ExportName::Default`). A class happens to be spelled
+/// `.default` no more meaningfully than it is spelled `.primary`, and a plain
+/// `import styles from './x.module.css'` binds the whole class map rather than
+/// any one class, so folding there credited a `.default` class unconditionally
+/// and silently dropped a real unused-class finding. Crediting for that import
+/// belongs to `narrow_css_module_references`, which reads the member accesses
+/// the consumer actually writes.
+///
+/// The stylesheet side is decided by [`is_css_module_stylesheet`], which
+/// tracks the extractor's own extension set (`.module.css`, `.module.scss`,
+/// `.module.sass`, `.module.less`) rather than the narrower pair that gates
+/// member narrowing, so every syntax that produces a class map is covered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum NamedDefaultSpelling {
+    /// `Named("default")` and `Default` share the default slot.
+    IsDefaultExport,
+    /// `Named("default")` stays an ordinary name in the string map.
+    IsOrdinaryName,
+}
+
+impl NamedDefaultSpelling {
+    /// Pick the rule for a target module from its path.
+    pub(super) fn for_target(path: &std::path::Path) -> Self {
+        if is_css_module_stylesheet(path) {
+            Self::IsOrdinaryName
+        } else {
+            Self::IsDefaultExport
+        }
+    }
+
+    const fn folds(self) -> bool {
+        matches!(self, Self::IsDefaultExport)
+    }
 }
 
 impl ExportNameIndex {
-    pub(super) fn build(exports: &[ExportSymbol]) -> Self {
+    pub(super) fn build(exports: &[ExportSymbol], named_default: NamedDefaultSpelling) -> Self {
         let mut index = Self {
             named: FxHashMap::default(),
             default: Vec::new(),
             indexed_len: 0,
+            named_default,
         };
         index.sync(exports);
         index
@@ -520,9 +612,20 @@ impl ExportNameIndex {
     /// Index exports appended since the last sync. Namespace narrowing pushes
     /// synthetic star re-export stubs mid-pass; exports are append-only, so
     /// picking up the tail keeps every per-name list complete and ascending.
+    ///
+    /// Under `NamedDefaultSpelling::IsDefaultExport`, `export { x as default }`
+    /// and `exports.default = x` land in the default slot rather than under the
+    /// string key, so the slot holds every export that declares the default in
+    /// ascending order and the named map never carries a `"default"` key.
+    /// Under `IsOrdinaryName` the name keeps its string key and the slot stays
+    /// empty, which is what a CSS Module target needs.
     pub(super) fn sync(&mut self, exports: &[ExportSymbol]) {
+        let folds = self.named_default.folds();
         for (idx, export) in exports.iter().enumerate().skip(self.indexed_len) {
             match &export.name {
+                ExportName::Named(name) if folds && name == DEFAULT_EXPORT_NAME => {
+                    self.default.push(idx);
+                }
                 ExportName::Named(name) => self.named.entry(name.clone()).or_default().push(idx),
                 ExportName::Default => self.default.push(idx),
             }
@@ -531,8 +634,18 @@ impl ExportNameIndex {
     }
 
     /// Indices of exports matching `import`, in ascending export order.
+    ///
+    /// A named import of `default` is a default import (`import { default as
+    /// x } from './m'` binds the same export as `import x from './m'`), so it
+    /// reads the default slot, unless the target spells `default` as an
+    /// ordinary name.
     pub(super) fn matches(&self, import: &ImportedName) -> &[usize] {
         match import {
+            ImportedName::Named(name)
+                if self.named_default.folds() && name == DEFAULT_EXPORT_NAME =>
+            {
+                &self.default
+            }
             ImportedName::Named(name) => self.named.get(name).map_or(&[], Vec::as_slice),
             ImportedName::Default => &self.default,
             ImportedName::Namespace | ImportedName::SideEffect => &[],
@@ -569,7 +682,7 @@ mod tests {
             make_export(ExportName::Named("foo".to_string())),
             make_export(ExportName::Named("bar".to_string())),
         ];
-        let index = ExportNameIndex::build(&exports);
+        let index = ExportNameIndex::build(&exports, NamedDefaultSpelling::IsDefaultExport);
 
         assert_eq!(
             index.matches(&ImportedName::Named("foo".to_string())),
@@ -584,13 +697,154 @@ mod tests {
         );
     }
 
+    /// Issue #2374: `default` is one importable name however each side spells
+    /// it, so both spellings read the same slot and that slot holds both
+    /// declaration forms in ascending export order.
+    #[test]
+    fn export_name_index_matches_default_under_both_spellings() {
+        let exports = vec![
+            make_export(ExportName::Named("foo".to_string())),
+            make_export(ExportName::Default),
+            make_export(ExportName::Named("default".to_string())),
+            make_export(ExportName::Named("bar".to_string())),
+        ];
+        let index = ExportNameIndex::build(&exports, NamedDefaultSpelling::IsDefaultExport);
+
+        assert_eq!(index.matches(&ImportedName::Default), &[1, 2]);
+        assert_eq!(
+            index.matches(&ImportedName::Named("default".to_string())),
+            &[1, 2]
+        );
+        // The default slot never leaks into an unrelated name lookup.
+        assert_eq!(index.matches(&ImportedName::Named("foo".to_string())), &[0]);
+        assert_eq!(index.matches(&ImportedName::Named("bar".to_string())), &[3]);
+    }
+
+    /// A module that only declares `export { x as default }` still answers a
+    /// plain `import x from './m'`.
+    #[test]
+    fn export_name_index_matches_default_declared_only_as_a_named_export() {
+        let exports = vec![make_export(ExportName::Named("default".to_string()))];
+        let index = ExportNameIndex::build(&exports, NamedDefaultSpelling::IsDefaultExport);
+
+        assert_eq!(index.matches(&ImportedName::Default), &[0]);
+        assert_eq!(
+            index.matches(&ImportedName::Named("default".to_string())),
+            &[0]
+        );
+    }
+
+    /// Issue #2374 review: a CSS Module exports class names, so a class
+    /// spelled `default` must stay an ordinary name. Folding it would let a
+    /// plain `import styles from './x.module.css'` credit that class without
+    /// the consumer ever writing `styles.default`, silently dropping a real
+    /// unused-class finding.
+    #[test]
+    fn export_name_index_keeps_a_named_default_ordinary_for_a_css_module() {
+        let exports = vec![
+            make_export(ExportName::Named("default".to_string())),
+            make_export(ExportName::Named("primary".to_string())),
+        ];
+        let index = ExportNameIndex::build(&exports, NamedDefaultSpelling::IsOrdinaryName);
+
+        assert!(
+            index.matches(&ImportedName::Default).is_empty(),
+            "a plain default import of a class map names no single class"
+        );
+        assert_eq!(
+            index.matches(&ImportedName::Named("default".to_string())),
+            &[0],
+            "the class keeps its own string key"
+        );
+        assert_eq!(
+            index.matches(&ImportedName::Named("primary".to_string())),
+            &[1]
+        );
+    }
+
+    /// Issue #2374 review round 2: the exception must cover every stylesheet
+    /// syntax the extractor treats as a CSS Module, not just the `.css` /
+    /// `.scss` pair that gates member narrowing. A `.module.less` or
+    /// `.module.sass` class map is built by the same extractor branch, so a
+    /// class spelled `.default` there is an ordinary class too.
+    #[test]
+    fn named_default_spelling_follows_the_target_path() {
+        for css in [
+            "Button.module.css",
+            "theme.module.scss",
+            "theme.module.sass",
+            "Button.module.less",
+        ] {
+            assert_eq!(
+                NamedDefaultSpelling::for_target(std::path::Path::new(css)),
+                NamedDefaultSpelling::IsOrdinaryName,
+                "{css}"
+            );
+        }
+        for code in [
+            "impl.ts",
+            "impl.js",
+            "Button.css",
+            "Button.less",
+            "theme.sass",
+            "styles.module.ts",
+        ] {
+            assert_eq!(
+                NamedDefaultSpelling::for_target(std::path::Path::new(code)),
+                NamedDefaultSpelling::IsDefaultExport,
+                "{code}"
+            );
+        }
+    }
+
+    /// The class-map predicate tracks the extractor while the narrowing gate
+    /// stays put, so widening one must never widen the other.
+    #[test]
+    fn css_module_stylesheet_covers_every_extractor_extension() {
+        for stylesheet in [
+            "Button.module.css",
+            "Button.module.scss",
+            "Button.module.sass",
+            "Button.module.less",
+            "/project/src/components/Button.module.less",
+        ] {
+            assert!(
+                is_css_module_stylesheet(std::path::Path::new(stylesheet)),
+                "{stylesheet}"
+            );
+        }
+        for other in [
+            "Button.css",
+            "Button.less",
+            "Button.module.ts",
+            "Button.module",
+            "Button.module.json",
+        ] {
+            assert!(
+                !is_css_module_stylesheet(std::path::Path::new(other)),
+                "{other}"
+            );
+        }
+    }
+
+    /// The narrowing gate keeps its narrower set: `.module.less` and
+    /// `.module.sass` classes are still not narrowed by member access.
+    #[test]
+    fn css_module_stylesheet_is_wider_than_the_narrowing_gate() {
+        for wider in ["Button.module.less", "Button.module.sass"] {
+            let path = std::path::Path::new(wider);
+            assert!(is_css_module_stylesheet(path), "{wider}");
+            assert!(!is_css_module_path(path), "{wider}");
+        }
+    }
+
     #[test]
     fn export_name_index_namespace_and_side_effect_match_nothing() {
         let exports = vec![
             make_export(ExportName::Named("foo".to_string())),
             make_export(ExportName::Default),
         ];
-        let index = ExportNameIndex::build(&exports);
+        let index = ExportNameIndex::build(&exports, NamedDefaultSpelling::IsDefaultExport);
 
         assert!(index.matches(&ImportedName::Namespace).is_empty());
         assert!(index.matches(&ImportedName::SideEffect).is_empty());
@@ -599,7 +853,7 @@ mod tests {
     #[test]
     fn export_name_index_sync_picks_up_appended_exports() {
         let mut exports = vec![make_export(ExportName::Named("foo".to_string()))];
-        let mut index = ExportNameIndex::build(&exports);
+        let mut index = ExportNameIndex::build(&exports, NamedDefaultSpelling::IsDefaultExport);
 
         exports.push(make_export(ExportName::Named("foo".to_string())));
         exports.push(make_export(ExportName::Default));

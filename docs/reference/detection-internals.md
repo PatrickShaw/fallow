@@ -76,6 +76,30 @@ error by suppressing a downstream detector.
   `ModuleGraph::ambiguous_star_exports` exposes collisions for reporting, while
   `ModuleGraph::ambiguity_participants` identifies their canonical declarations
   for detector gates.
+- `default` is one importable name that either side may spell two ways, and
+  reference attachment matches on the name, not on the spelling (issue #2374).
+  An export declares it as `export default x` or as `export { x as default }`;
+  an import names it as `import x from './impl'`, as
+  `import { default as x } from './impl'`, or as the ambient
+  `declare module '<specifier>' { export { default } from './impl' }` form,
+  which records one named type-space import per specifier. A CommonJS
+  `exports.default = x` declares the same binding and is recorded under the
+  same written name. Every pairing credits the target's default export, and a
+  `export { default } from` chain carries that credit hop by hop. A plain
+  `export *` still never forwards `default`, so the shape that reaches a
+  default through a star is the namespace object, not the star surface.
+- That name collapse is scoped to modules whose `default` really is a default
+  export. A CSS Module exports one `ExportName::Named` per class and never an
+  `ExportName::Default`, so a class spelled `.default` stays an ordinary name:
+  a plain `import styles from './x.module.css'` binds the whole class map and
+  names no single class, and `narrow_css_module_references` remains the only
+  thing that credits classes, from the member accesses the consumer writes.
+  `NamedDefaultSpelling::for_target` decides that from the target path with
+  `is_css_module_stylesheet`, which tracks the extractor's own CSS Module set
+  (`.module.css`, `.module.scss`, `.module.sass`, `.module.less`). The
+  narrowing gate `is_css_module_path` stays on the narrower `.css` / `.scss`
+  pair, so `.less` and `.sass` class maps keep their default slot empty without
+  gaining member narrowing.
 - An ambient-module star re-export (`export *` or `export * as ns` inside a
   `declare module '...'` body, recorded as a type-only namespace import
   without a local binding) credits the full ES star surface of its target:

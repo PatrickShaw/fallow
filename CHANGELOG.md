@@ -87,6 +87,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `default` import or re-export specifier now credits the target's default
+  export** (Closes
+  [#2374](https://github.com/fallow-rs/fallow/issues/2374)). `default` is one
+  importable name that either side may spell two ways, and the graph's
+  per-module export-name index keyed on the spelling instead of the name, so
+  no pairing that mixed the two spellings ever met and the target's default
+  export kept reporting as unused. Every producer that records `default` under
+  its written name is affected, including `import { default as X } from
+  './impl'`, an ambient `declare module 'pkg' { export { default } from
+  './impl' }` (and the mixed `export { default as Impl, Y as Z } from './impl'`,
+  where `Y` was credited and the default was not), a JSDoc
+  `import('./impl').default` type reference, a destructured
+  `const { default: X } = require('./impl')`, and a plain
+  `import x from './impl'` against a module whose default is written
+  `export { x as default }` or `exports.default = x`. A `export { default }
+  from` chain lost the credit at every hop when a `default` specifier consumed
+  it. The index now reads and writes a single default slot however each side
+  spells the name. Two shapes are deliberately unchanged: a plain
+  `export * from './impl'` still does not forward `default`, however the target
+  spells it, and a class spelled `.default` in a CSS Module (`.module.css`,
+  `.module.scss`, `.module.sass` or `.module.less`) is still an ordinary class,
+  credited only by the member accesses the consumer writes. One shape moves the
+  other way: a CommonJS `default` property is the binding a default import
+  reads, so a plain data key named `default` on a `module.exports` object
+  literal now stops reporting once anything default-imports that module.
+  Repositories using any of these shapes will see fewer unused-export findings.
+  A default export credited for the first time also becomes reachable, so
+  member-level detectors such as unused class members can now report on it
+  where the unused-export finding used to stand in its place. Warm graph caches
+  invalidate (`GRAPH_CACHE_VERSION` 39 to 40); the extract cache is untouched.
+
 - **The MCP `audit` and `check_health` tools now honor `health.coverage`,
   `health.coverageRoot`, `FALLOW_COVERAGE`, and `FALLOW_COVERAGE_ROOT` on
   their typed route** (Closes

@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { accessSync, copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import {
+  accessSync,
+  copyFileSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
@@ -17,6 +25,9 @@ const { getPlatformPackage } = require(
   join(repoRoot, "npm", "fallow", "scripts", "platform-package.js"),
 );
 const platformPackage = getPlatformPackage(process.platform, process.arch);
+const releaseVersion = JSON.parse(
+  readFileSync(join(repoRoot, "npm", "fallow", "package.json"), "utf8"),
+).version;
 const backendVersion = JSON.parse(
   readFileSync(join(repoRoot, "crates", "api", "type-aware-protocol.json"), "utf8"),
 ).backend.version;
@@ -88,6 +99,12 @@ try {
   const platformManifest = require.resolve(`${platformPackage}/package.json`, {
     paths: [installedFallow],
   });
+  const installedPlatformPackage = JSON.parse(readFileSync(platformManifest, "utf8"));
+  // Committed platform manifests intentionally stay at the last published
+  // version until release npm-prep stages the new packages. Mirror that
+  // staging here so the wrapper evaluates the candidate at the release version.
+  installedPlatformPackage.version = releaseVersion;
+  writeFileSync(platformManifest, `${JSON.stringify(installedPlatformPackage, null, 2)}\n`);
   const installedBinary = join(dirname(platformManifest), "fallow.exe");
   copyFileSync(resolve(candidateBinary), installedBinary);
   const wrapper = join(installedFallow, "bin", "fallow");

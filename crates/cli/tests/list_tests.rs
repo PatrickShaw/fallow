@@ -1031,3 +1031,311 @@ fn list_files_includes_plugin_scoped_hidden_dirs_for_remix() {
         "expected app/.server/db.ts in files: {files:?}"
     );
 }
+
+/// Issue #2366 follow-up: the `fallow workspaces` / `fallow list --workspaces`
+/// envelope has no post-serialization root-prefix strip, so its
+/// `workspace_diagnostics[].path` used to be the only absolute path in any
+/// fallow JSON envelope while the `workspaces[].path` next to it was relative.
+#[test]
+fn list_workspaces_json_emits_project_relative_diagnostic_paths() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("packages/inner/src")).expect("create inner package dir");
+    fs::create_dir_all(root.join("src")).expect("create source dir");
+    fs::write(
+        root.join("package.json"),
+        r#"{"name":"undeclared-workspace-root","private":true,"workspaces":["packages/declared"]}"#,
+    )
+    .expect("write root manifest");
+    fs::write(
+        root.join("packages/inner/package.json"),
+        r#"{"name":"inner-pkg","version":"1.0.0"}"#,
+    )
+    .expect("write inner manifest");
+    fs::write(root.join("src/index.ts"), "export const value = 1;\n").expect("write source");
+    fs::write(
+        root.join("packages/inner/src/index.ts"),
+        "export const inner = 2;\n",
+    )
+    .expect("write inner source");
+
+    for subcommand in ["list", "workspaces"] {
+        let args: Vec<&str> = if subcommand == "list" {
+            vec!["list", "--workspaces", "--format", "json", "--quiet"]
+        } else {
+            vec!["workspaces", "--format", "json", "--quiet"]
+        };
+        let output = run_fallow_combined_in_root(root, &args);
+        assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+
+        let json = parse_json(&output);
+        let diagnostics = json["workspace_diagnostics"]
+            .as_array()
+            .expect("workspace_diagnostics array");
+        let path = diagnostics
+            .iter()
+            .find(|entry| entry["kind"] == "undeclared-workspace")
+            .expect("the undeclared workspace is reported")["path"]
+            .as_str()
+            .expect("diagnostic path string");
+        assert_eq!(
+            path, "packages/inner",
+            "`fallow {subcommand}` must emit a project-relative diagnostic path, got {path}"
+        );
+    }
+}
+
+/// Issue #2366: bare `fallow list --format json` reads the engine session's
+/// diagnostics snapshot, whose fold is keyed on the whole diagnostic kind
+/// rather than its id. Two overlapping workspace globs report the same
+/// package-less directory once per `pattern`, and bare `list` used to collapse
+/// them into one while `list --workspaces`, which reads the workspace value
+/// directly, reported both. Pin the agreement between the two.
+#[test]
+fn list_json_keeps_both_overlapping_glob_diagnostics() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("pkgs/aaa")).expect("create package-less dir");
+    fs::create_dir_all(root.join("src")).expect("create source dir");
+    fs::write(
+        root.join("package.json"),
+        r#"{"name":"overlapping-glob-root","private":true,"workspaces":["pkgs/*","pkgs/a*"]}"#,
+    )
+    .expect("write root manifest");
+    fs::write(root.join("src/index.ts"), "export const value = 1;\n").expect("write source");
+    fs::write(root.join("pkgs/aaa/readme.txt"), "no package.json here\n").expect("write filler");
+
+    for args in [
+        ["list", "--format", "json", "--quiet"].as_slice(),
+        ["list", "--workspaces", "--format", "json", "--quiet"].as_slice(),
+    ] {
+        let output = run_fallow_combined_in_root(root, args);
+        assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+
+        let json = parse_json(&output);
+        let patterns: Vec<String> = json["workspace_diagnostics"]
+            .as_array()
+            .map(|diagnostics| {
+                diagnostics
+                    .iter()
+                    .filter(|entry| entry["kind"] == "glob-matched-no-package-json")
+                    .map(|entry| entry["pattern"].as_str().unwrap_or_default().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            patterns,
+            ["pkgs/*", "pkgs/a*"],
+            "`fallow {args:?}` reports the directory once per matching glob: {}",
+            json["workspace_diagnostics"]
+        );
+    }
+}
+
+/// Build the issue-2366 repository shape: one glob declared in both
+/// `package.json` (spelled `./pkgs/*`) and `pnpm-workspace.yaml` (spelled
+/// `pkgs/*`), over two directories that carry no `package.json`.
+fn write_two_manifest_glob_project(root: &std::path::Path) {
+    fs::create_dir_all(root.join("pkgs/aaa")).expect("create first package-less dir");
+    fs::create_dir_all(root.join("pkgs/bbb")).expect("create second package-less dir");
+    fs::create_dir_all(root.join("src")).expect("create source dir");
+    fs::write(
+        root.join("package.json"),
+        r#"{"name":"two-manifest-root","private":true,"workspaces":["./pkgs/*"]}"#,
+    )
+    .expect("write root manifest");
+    fs::write(
+        root.join("pnpm-workspace.yaml"),
+        "packages:\n  - \"pkgs/*\"\n",
+    )
+    .expect("write pnpm workspace manifest");
+    fs::write(root.join("src/index.ts"), "export const value = 1;\n").expect("write source");
+    fs::write(root.join("pkgs/aaa/readme.txt"), "no package.json here\n").expect("write filler");
+    fs::write(root.join("pkgs/bbb/readme.txt"), "no package.json here\n").expect("write filler");
+}
+
+/// Issue #2366: `package.json` `workspaces` and `pnpm-workspace.yaml`
+/// `packages` are additive, so one glob declared in both is walked twice.
+/// Every envelope that carries `workspace_diagnostics[]` must report one entry
+/// per distinct matching pattern, with the same project-relative path shape,
+/// whichever manifest happened to be read first.
+#[test]
+fn every_envelope_reports_one_entry_per_directory_for_a_glob_in_two_manifests() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let root = dir.path();
+    write_two_manifest_glob_project(root);
+
+    for args in [
+        ["--format", "json", "--quiet"].as_slice(),
+        ["--skip", "check", "--format", "json", "--quiet"].as_slice(),
+        ["--only", "health", "--format", "json", "--quiet"].as_slice(),
+        ["dead-code", "--format", "json", "--quiet"].as_slice(),
+        ["check", "--format", "json", "--quiet"].as_slice(),
+        ["health", "--format", "json", "--quiet"].as_slice(),
+        ["dupes", "--format", "json", "--quiet"].as_slice(),
+        ["list", "--format", "json", "--quiet"].as_slice(),
+        ["list", "--workspaces", "--format", "json", "--quiet"].as_slice(),
+        ["workspaces", "--format", "json", "--quiet"].as_slice(),
+    ] {
+        let output = run_fallow_combined_in_root(root, args);
+        assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+
+        let json = parse_json(&output);
+        let reported: Vec<(String, String)> = json["workspace_diagnostics"]
+            .as_array()
+            .expect("workspace_diagnostics array")
+            .iter()
+            .map(|entry| {
+                (
+                    entry["pattern"].as_str().unwrap_or_default().to_owned(),
+                    entry["path"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            reported,
+            vec![
+                ("pkgs/*".to_owned(), "pkgs/aaa".to_owned()),
+                ("pkgs/*".to_owned(), "pkgs/bbb".to_owned()),
+            ],
+            "`fallow {args:?}` reports each directory once, project-relative: {}",
+            json["workspace_diagnostics"]
+        );
+    }
+}
+
+/// The aggregated stderr warning is built from the same list, so a duplicated
+/// entry makes it claim a directory count the repository does not have and
+/// name one directory twice among its examples.
+#[test]
+fn two_manifest_glob_warning_names_the_true_directory_count_once_each() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let root = dir.path();
+    write_two_manifest_glob_project(root);
+
+    let output = Command::new(fallow_bin())
+        .arg("--root")
+        .arg(root)
+        .args(["workspaces", "--format", "json"])
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("failed to run fallow binary");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let warnings: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("no package.json"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "one glob is one summary line, whichever manifests declare it: {stderr}"
+    );
+    assert!(
+        warnings[0].contains(
+            "Glob 'pkgs/*' matched 2 directories with no package.json \
+             (e.g. pkgs/aaa, pkgs/bbb)"
+        ),
+        "the summary counts the directories once each: {}",
+        warnings[0]
+    );
+}
+
+/// The human workspace listing renders the same list as the JSON envelope, so
+/// the deduplication moves it too: its header counts the entries and its body
+/// prints one line each. This is the non-JSON surface the change reaches, and
+/// the CHANGELOG names it next to the aggregated warning.
+#[test]
+fn two_manifest_glob_human_listing_prints_each_directory_once() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let root = dir.path();
+    write_two_manifest_glob_project(root);
+
+    let output = run_fallow_combined_in_root(root, &["workspaces"]);
+    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+
+    assert!(
+        output.stderr.contains("2 workspace discovery diagnostics:"),
+        "the block header counts the deduplicated entries: {}",
+        output.stderr
+    );
+    let entries: Vec<&str> = output
+        .stderr
+        .lines()
+        .filter(|line| line.trim_start().starts_with("- Glob "))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "one line per directory, not one per manifest that declares the glob: {}",
+        output.stderr
+    );
+    for (entry, directory) in entries.iter().zip(["pkgs/aaa", "pkgs/bbb"]) {
+        assert!(
+            entry.contains(&format!("Glob 'pkgs/*' matched '{directory}'")),
+            "the block quotes the canonical glob spelling: {entry}"
+        );
+    }
+}
+
+/// Issue #2366: the `./` normalisation is independent of the deduplication.
+/// A repository that declares one glob, once, in one manifest still reports a
+/// different `pattern`, `path`, and `message` than before when that glob is
+/// spelled with a leading `./`, on the standalone envelopes as well. The
+/// CHANGELOG names this as one of the two shapes that move them, so pin it
+/// separately from the two-manifest fixture where the fold is also at work.
+#[test]
+fn a_dotted_glob_declared_once_reports_the_undotted_spelling_everywhere() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("pkgs/aaa")).expect("create package-less dir");
+    fs::create_dir_all(root.join("src")).expect("create source dir");
+    fs::write(
+        root.join("package.json"),
+        r#"{"name":"dotted-glob-root","private":true,"workspaces":["./pkgs/*"]}"#,
+    )
+    .expect("write root manifest");
+    fs::write(root.join("src/index.ts"), "export const value = 1;\n").expect("write source");
+    fs::write(root.join("pkgs/aaa/readme.txt"), "no package.json here\n").expect("write filler");
+
+    for args in [
+        ["dead-code", "--format", "json", "--quiet"].as_slice(),
+        ["check", "--format", "json", "--quiet"].as_slice(),
+        ["health", "--format", "json", "--quiet"].as_slice(),
+        ["dupes", "--format", "json", "--quiet"].as_slice(),
+        ["list", "--format", "json", "--quiet"].as_slice(),
+        ["list", "--workspaces", "--format", "json", "--quiet"].as_slice(),
+        ["workspaces", "--format", "json", "--quiet"].as_slice(),
+        ["--format", "json", "--quiet"].as_slice(),
+    ] {
+        let output = run_fallow_combined_in_root(root, args);
+        assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+
+        let json = parse_json(&output);
+        let diagnostics = json["workspace_diagnostics"]
+            .as_array()
+            .expect("workspace_diagnostics array");
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "`fallow {args:?}` reports the one matched directory once: {}",
+            json["workspace_diagnostics"]
+        );
+        assert_eq!(
+            diagnostics[0]["pattern"], "pkgs/*",
+            "`fallow {args:?}` drops the no-op `./` prefix from the pattern"
+        );
+        assert_eq!(
+            diagnostics[0]["path"], "pkgs/aaa",
+            "`fallow {args:?}` drops the matching no-op `.` component from the path"
+        );
+        assert!(
+            diagnostics[0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Glob 'pkgs/*' matched 'pkgs/aaa'"),
+            "`fallow {args:?}` quotes the canonical spelling in the message: {}",
+            diagnostics[0]["message"]
+        );
+    }
+}

@@ -26,9 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bun.lockb` in a repo that no longer uses bun. Manifests without overrides,
   repos with a parseable text lockfile next to the `bun.lockb`, and repos
   without any lockfile are unaffected. The bare combined `fallow` JSON
-  envelope does not carry analysis-stage workspace diagnostics (pre-existing,
-  shared with `malformed-pnpm-workspace-yaml`; the stderr warning still
-  appears there). The diagnostic kind is additive on the
+  envelope carries it at the envelope root, in the top-level
+  `workspace_diagnostics[]`; no section of the combined envelope repeats it
+  (see the [#2366](https://github.com/fallow-rs/fallow/issues/2366) fix
+  below). The diagnostic kind is additive on the
   `workspace_diagnostics[].kind` union; consumers that exhaustively match on
   `kind` should treat unknown kinds as informational.
 
@@ -369,6 +370,159 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No cache version changed: the trace is a read-only query over the graph, so
   a warm `.fallow` directory written by a previous release returns the
   corrected trace.
+
+- **The bare combined `fallow --format json` envelope now carries the
+  analysis-stage workspace diagnostics that `dead-code`, `check`, and
+  `health` already carry** (Closes
+  [#2366](https://github.com/fallow-rs/fallow/issues/2366)). A malformed
+  `pnpm-workspace.yaml` (`malformed-pnpm-workspace-yaml`) and the bun.lockb
+  override-resolution skip (`bun-lockb-override-resolution-skipped`) reached
+  `workspace_diagnostics[]` on every standalone JSON envelope, but the bare
+  combined run (dead code plus duplication plus health) printed neither at
+  the root nor under `check`, while the stderr warning still appeared. Two
+  causes: the combined envelope had no diagnostics field at all, and every
+  per-analysis config reload inside the combined run replaced the diagnostics
+  registry while preserving only the source-discovery kinds, so the entries
+  the analyze pass had recorded were wiped before the envelope was built. The
+  combined envelope now carries a top-level `workspace_diagnostics[]` with the
+  same root-relative paths the standalone envelopes use, deduplicated on the
+  whole `kind` (typed payload included) plus `path`, and omitted when empty.
+  Keying on the payload is what keeps two overlapping workspace globs
+  (`["packages/*", "packages/*/*"]`) reporting the same package-less directory
+  once per `pattern`, the way the standalone envelopes do. It is the union of
+  what every analysis in the run recorded, which matters because a combined
+  run walks the project once per analysis and a per-analysis `production` mode
+  (`production: { deadCode, health, dupes }`, `--production-health`) can give
+  those walks different file sets: reporting only what the last walk saw would
+  drop, for example, a `skipped-large-file` that the dead-code walk recorded
+  for a test file the production health walk never looks at. For the
+  source-discovery and analysis-stage kinds on a run whose analyses share one
+  mode, the array is exactly what the standalone `dead-code` envelope carries,
+  in the same order. For the workspace-discovery kinds it can be BROADER: each
+  analysis contributes the list its own config load produced, the same list
+  `fallow list --workspaces` and the MCP `project_info` tool report, while the
+  standalone `dead-code`, `check`, `health`, and `dupes` envelopes read the
+  process diagnostics registry and can miss an `undeclared-workspace` or
+  `glob-matched-no-package-json` entry those two commands do report. That gap
+  in the standalone envelopes predates this change and is unchanged by it; the
+  combined root simply no longer inherits it. The carrier is the envelope root
+  rather than a section, so a run that drops a section (`--skip check`,
+  `--only health`, `--only dupes`) reports every diagnostic its analyses
+  recorded instead of dropping them while stderr warns. The `check`, `dupes`,
+  and `health` sections stay report bodies and never repeat the array. Config
+  reloads preserve analysis-stage entries the way they preserve
+  source-discovery entries, and each dead-code analyze pass clears its
+  previous analysis-stage entries before re-recording, so a watch-mode rerun
+  or a long-lived engine session (MCP, LSP) drops the diagnostic once the YAML
+  is fixed or a text `bun.lock` exists instead of keeping a stale entry. Two
+  audit-family envelopes gain kinds too: `fallow audit --format json` under
+  `dead_code.workspace_diagnostics[]`, and the `audit-brief` envelope shared
+  by `fallow review --format json` and `fallow audit --brief --format json`,
+  also under `dead_code`. Those two arrays already carried the config-load
+  workspace-discovery kinds and the source-discovery kinds, so the change
+  there is three additional kinds, not a field that was previously always
+  empty: the two analysis-stage ones plus `undeclared-workspace`, which the
+  analyze pipeline appends after the config-load stash and a later
+  per-analysis reload used to wipe before the envelope was built. Only the
+  combined root is a genuinely new field. Both sections are already typed as
+  the `dead-code` envelope body, so the widening is additive; the MCP `audit`
+  tool and the programmatic combined route (MCP code mode, NAPI, embedders)
+  answer the same as the CLI, including when per-analysis `production` modes
+  make the run's walks disagree. Each analysis now carries the diagnostics its
+  own walk produced instead of reading the shared registry back after the
+  fact, so a combined run whose `production` split makes it walk the project
+  twice in parallel reports the same union, in the same order, on every run:
+  the array no longer depends on which of the two parallel walks wrote to the
+  shared registry last. Each of those folds closes with a process-registry
+  read for the kinds an analysis records after its list was captured (a
+  parse-stage `source-read-failure`, or the analysis-stage kinds the health
+  run's own dead-code precompute records), and that read now drops the
+  walk-recorded kinds, so a split can no longer make an envelope report a
+  `skipped-large-file` for a file the analysis it belongs to never walked:
+  `fallow audit --format json` under `production: { deadCode: true }` reported
+  the test file the non-production health walk skipped while the MCP `audit`
+  tool reported none, and they now agree. The combined envelope's new root
+  field is optional and absent when there are no diagnostics, so no
+  `schema_version` moves. The carrier work does not touch the standalone
+  `dead-code`, `check`, `health`, and `dupes` envelopes or any non-JSON
+  format; the three envelopes named above change whenever the run records a
+  diagnostic. Two of the changes described next do reach those four standalone
+  envelopes, and either one alone is enough to move them: the recorded
+  `pattern`, `path`, and `message` change on a repository whose manifests spell
+  any workspace glob with a leading `./`, and the entry count drops on a
+  repository that declares one glob, or reaches one workspace member, through
+  two sources. A repository with neither shape reports the same bytes on those
+  four envelopes as before. Two further shapes move for a shared reason: the
+  fold is deduplicated on the whole typed `kind` rather than its id, so bare
+  `fallow list --format json` and the envelopes built from an engine session's
+  snapshot (the MCP `project_info`, `find_dupes`, and `check_health` tools,
+  and the programmatic dead-code and combined routes) now report a
+  package-less directory matched by two workspace globs once per `pattern`
+  instead of once in total, matching what `fallow list --workspaces --format
+  json` already reported. Because the payload now decides identity, the
+  recorded `pattern` drops the no-op `./` prefix a `package.json` `workspaces`
+  entry may carry (`"./apps/**"` is reported as `apps/**`, in the JSON field
+  and in the warning text; a glob spelled exactly `"./"`, the project root
+  itself, keeps its spelling), and the recorded `path` drops the matching no-op
+  `.` component, so one directory has one spelling everywhere instead of
+  `./pkgs/aaa` on the analysis envelopes next to `pkgs/aaa` on the workspace
+  listing, decided by which manifest happened to be read first. Workspace
+  discovery deduplicates before it returns, not only the process registry:
+  `package.json` `workspaces`, `pnpm-workspace.yaml` `packages`, `deno.json`
+  `workspace`, and the root `tsconfig.json` references are additive sources,
+  so one glob declared in two of them is walked twice. A repository that
+  declares one glob in both `package.json` and `pnpm-workspace.yaml`, which is
+  the conventional pnpm layout, reported every package-less directory under
+  that glob TWICE, once per spelling, on `fallow dead-code`, `check`, `dupes`,
+  `health`, `list --workspaces`, and `workspaces --format json`, through the
+  MCP `project_info` tool, and under `dead_code` in `fallow audit` and `fallow
+  review --format json`; it now reports each once, so such a repository sees a
+  finding-count decrease on those surfaces. The human surfaces render the same
+  list, so three of them move with it: the aggregated stderr warning names the
+  directory count the repository actually has and each example directory once
+  instead of counting the duplicates, the `N workspace discovery diagnostics`
+  summary line every human-format command prints names the deduplicated
+  count, and so does the per-entry block `fallow workspaces` and `fallow list
+  --workspaces` print. SARIF, markdown, compact, badge, CodeClimate, and the
+  cache format carry no workspace diagnostic and are unchanged. The repair
+  covers the case where both manifests spell the glob identically too, which
+  produced byte-identical duplicates before this change as well. A second
+  shape folds with it, on the same surfaces: a
+  malformed workspace member reached through BOTH an npm glob and a root
+  `tsconfig.json` `references[]` entry reported one `malformed-package-json`
+  diagnostic per source and now reports one in total. Two overlapping globs
+  declared in ONE manifest
+  (`["packages/*", "packages/a*"]`) still report the same directory once per
+  `pattern`, because the payload is part of the key. No kind is new on those
+  envelopes and no field changes type, so no `schema_version` moves.
+
+- **The `list-workspaces` envelope now emits a project-relative
+  `workspace_diagnostics[].path`** on `fallow workspaces --format json`,
+  `fallow list --workspaces --format json`, and bare `fallow list --format
+  json`. Every
+  other envelope that carries the array reports the path relative to the
+  project root, and so does the `workspaces[].path` field right next to it in
+  the same envelope, but the list envelope emitted the absolute path because
+  it is the one envelope with no post-serialization root-prefix strip. A
+  diagnostic for `packages/inner` now reads `"path": "packages/inner"` instead
+  of `"path": "/Users/you/project/packages/inner"`, so the output no longer
+  leaks the checkout location and no longer differs between two checkouts of
+  the same repository. The MCP `project_info` tool, which shares the same
+  builder, is fixed with it. A diagnostic path outside the project root
+  (canonicalisation crossed a symlink) stays absolute, matching how the
+  human-readable `message` renders it. Consumers that joined the emitted path
+  onto the project root already got the right answer for every other envelope
+  and now get it here too; a consumer that treated this one field as absolute
+  needs to join it onto the root. Joining onto the project root is the
+  portable comparison, and the two envelope families now agree on the spelling
+  as well: a workspace glob written as `"./apps/**"` no longer leaves a `./`
+  prefix on the analysis envelopes' copy of the same diagnostic, so the same
+  directory reads the same on both. The typed
+  `workspace_diagnostics[]`
+  schema description also said the kinds are "surfaced during config load",
+  which has been wrong since source-discovery diagnostics joined the array
+  in [#1086](https://github.com/fallow-rs/fallow/issues/1086); it now names
+  all three recording stages and which envelopes each kind can reach.
 
 - **Star re-exports inside `declare module '...'` bodies credit the full ES
   star surface of their target without adding to the declaring file's export

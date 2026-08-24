@@ -438,7 +438,13 @@ fn collect_workspace_output(
     WorkspacesOutput {
         workspace_count: workspaces.len(),
         workspaces,
-        workspace_diagnostics: diagnostics.to_vec(),
+        // Project-relative like the sibling `workspaces[].path` and like every
+        // analysis envelope's `workspace_diagnostics[]`. The list envelope has
+        // no post-serialization `strip_root_prefix` pass, so it normalises here.
+        workspace_diagnostics: diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.clone().into_root_relative(root))
+            .collect(),
     }
 }
 
@@ -643,6 +649,27 @@ mod tests {
 
     use super::*;
 
+    /// The `fallow workspaces` / `fallow list --workspaces` envelope and the
+    /// MCP `project_info` tool have no post-serialization `strip_root_prefix`
+    /// pass, so `collect_workspace_output` is what makes their diagnostic
+    /// paths project-relative like every other envelope's.
+    #[test]
+    fn workspace_output_emits_project_relative_diagnostic_paths() {
+        let root = Path::new("/project");
+        let output = collect_workspace_output(
+            root,
+            &[],
+            &[fallow_config::WorkspaceDiagnostic::new(
+                root,
+                root.join("packages/inner"),
+                fallow_config::WorkspaceDiagnosticKind::UndeclaredWorkspace,
+            )],
+        );
+
+        let value = serde_json::to_value(&output).expect("workspaces output serializes");
+        assert_eq!(value["workspace_diagnostics"][0]["path"], "packages/inner");
+    }
+
     fn empty_boundary_data() -> BoundaryData {
         BoundaryData {
             zones: vec![],
@@ -813,11 +840,68 @@ mod tests {
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic["kind"].as_str() == Some("undeclared-workspace")
-                    && diagnostic["path"]
-                        .as_str()
-                        .is_some_and(|path| path.replace('\\', "/").ends_with("/tools/extra"))
+                    // Project-relative, like every other envelope's
+                    // `workspace_diagnostics[].path` (issue #2366 follow-up).
+                    && diagnostic["path"].as_str() == Some("tools/extra")
             }),
             "project info must include undeclared workspace diagnostics from the reused session, got {diagnostics:#?}"
+        );
+    }
+
+    /// Issue #2366: the MCP `project_info` tool reads the same workspace value
+    /// the `fallow workspaces` envelope does, so a glob declared in both
+    /// `package.json` and `pnpm-workspace.yaml` must reach an agent as one
+    /// entry per directory, project-relative, exactly as the CLI reports it.
+    #[test]
+    fn project_info_reports_one_entry_per_directory_for_a_glob_in_two_manifests() {
+        let project = tempfile::tempdir().expect("project");
+        let root = project.path();
+        std::fs::create_dir_all(root.join("pkgs/aaa")).expect("first package-less dir");
+        std::fs::create_dir_all(root.join("pkgs/bbb")).expect("second package-less dir");
+        std::fs::create_dir_all(root.join("src")).expect("source dir");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"two-manifest-root","private":true,"workspaces":["./pkgs/*"]}"#,
+        )
+        .expect("write root manifest");
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - \"pkgs/*\"\n",
+        )
+        .expect("write pnpm workspace manifest");
+        std::fs::write(root.join("src/index.ts"), "export const value = 1;\n")
+            .expect("write source");
+
+        let output = serialize_project_info_programmatic_json(
+            run_project_info(&ProjectInfoOptions {
+                analysis: AnalysisOptions {
+                    root: Some(root.to_path_buf()),
+                    no_cache: true,
+                    ..AnalysisOptions::default()
+                },
+                ..ProjectInfoOptions::default()
+            })
+            .expect("project info should run"),
+        )
+        .expect("project info should serialize");
+
+        let reported: Vec<(&str, &str)> = output["workspace_diagnostics"]
+            .as_array()
+            .expect("project info should include workspace_diagnostics")
+            .iter()
+            .map(|diagnostic| {
+                (
+                    diagnostic["pattern"].as_str().unwrap_or_default(),
+                    diagnostic["path"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            reported,
+            vec![("pkgs/*", "pkgs/aaa"), ("pkgs/*", "pkgs/bbb")],
+            "project_info agrees with the CLI envelopes: {}",
+            output["workspace_diagnostics"]
         );
     }
 

@@ -1516,8 +1516,10 @@ fn core_backend_fallow_core_calls_are_explicitly_allowlisted() {
         "fallow_core::plugins::registry::is_external_plugin_active",
         // The discovery walk has one implementation, in fallow-core, so its
         // config-candidate basenames stay derived from the plugin registry.
+        "fallow_core::discover::DiscoveredSources",
         "fallow_core::discover::HiddenDirScope",
         "fallow_core::discover::discover_files_and_config_candidates",
+        "fallow_core::discover::discover_files_config_candidates_and_diagnostics",
         // Entry-point discovery has one implementation, in fallow-core.
         "fallow_core::discover::discover_entry_points",
         "fallow_core::discover::discover_workspace_entry_points",
@@ -1989,6 +1991,154 @@ fn api_and_cli_workspace_scope_resolution_routes_through_engine() {
                 "{source_path} must not own workspace-scope matching helper `{forbidden}`"
             );
         }
+    }
+}
+
+/// Issue #2366: `WorkspaceDiagnosticKind::is_analysis_stage` may only classify
+/// a kind `true` when the dead-code analyze pass re-records it, because that
+/// pass is the single site that clears the previous run's analysis-stage
+/// entries. The exhaustive match in `fallow-types` forces a NEW kind to be
+/// classified, but nothing there notices an EXISTING recorder moving out of
+/// the analyze pass; a re-homed recorder would be cleared on every run and its
+/// kind would silently vanish from every envelope. Pin the recorder set so
+/// re-homing one trips this test instead.
+#[test]
+fn analysis_stage_diagnostics_are_recorded_only_from_the_dead_code_analyze_pass() {
+    // The registry owns the function; this guard names it to pin the set.
+    let exempt = [
+        "crates/config/src/workspace/diagnostics.rs",
+        "crates/cli/src/architecture_boundaries.rs",
+    ];
+    let expected = [
+        "crates/core/src/analyze/unused_catalog.rs",
+        "crates/core/src/analyze/unused_overrides.rs",
+    ];
+
+    let mut callers: Vec<String> = rust_sources_under(["crates"])
+        .into_iter()
+        .filter(|path| !exempt.contains(&path.as_str()))
+        .filter(|path| {
+            read_source_without_line_comments(path)
+                .expect("read crate source")
+                .contains("record_workspace_diagnostics(")
+        })
+        .collect();
+    callers.sort();
+
+    assert_eq!(
+        callers, expected,
+        "record_workspace_diagnostics must stay inside the detectors the dead-code analyze pass \
+         runs; a recorder moved elsewhere loses its kind from every envelope on the next pass"
+    );
+
+    let analyze = read_source_without_line_comments("crates/core/src/analyze/mod.rs")
+        .expect("read core analyze module");
+    assert!(
+        analyze.contains("clear_analysis_stage_diagnostics(&config.root)"),
+        "find_dead_code_full must clear the previous pass's analysis-stage diagnostics before \
+         the detectors re-record this pass's"
+    );
+    for recorder in ["unused_catalog", "unused_overrides"] {
+        assert!(
+            analyze.contains(recorder),
+            "the dead-code analyze pass must reach the {recorder} detector"
+        );
+    }
+}
+
+/// Issue #2366: source-discovery diagnostics must reach an analysis by value
+/// from its own walk, never by reading the process registry back.
+///
+/// Combined mode runs the dead-code and duplication walks under `rayon::join`
+/// whenever a per-analysis `production` split stops them from sharing a file
+/// list. Each walk replaces the registry's source-discovery set for the root,
+/// so a registry read after the walk answers "whichever walk wrote last",
+/// which varies between runs of the same command. Pin both halves: one writer,
+/// and a session snapshot built from that writer's return value.
+#[test]
+fn source_discovery_diagnostics_reach_sessions_by_value_not_through_the_registry() {
+    let exempt = [
+        "crates/config/src/workspace/diagnostics.rs",
+        "crates/cli/src/architecture_boundaries.rs",
+    ];
+    let mut writers: Vec<String> = rust_sources_under(["crates"])
+        .into_iter()
+        .filter(|path| !exempt.contains(&path.as_str()))
+        .filter(|path| {
+            read_source_without_line_comments(path)
+                .expect("read crate source")
+                .contains("replace_source_discovery_diagnostics(")
+        })
+        .collect();
+    writers.sort();
+    assert_eq!(
+        writers,
+        ["crates/core/src/discover/walk.rs"],
+        "the source walk is the only writer of the registry's source-discovery set; a second \
+         writer reintroduces the interleaving that loses one walk's skips"
+    );
+
+    let session =
+        read_source_without_line_comments("crates/engine/src/session.rs").expect("read session");
+    assert!(
+        session.contains("discovery.source_diagnostics()"),
+        "the session snapshot must carry its own walk's source-discovery diagnostics"
+    );
+    assert!(
+        session.contains("!diagnostic.kind.is_source_discovery()"),
+        "the session snapshot must drop the registry's source-discovery entries in favour of \
+         its own walk's list"
+    );
+    assert!(
+        session.contains("registry_diagnostics_to_fold("),
+        "the live registry read in current_workspace_diagnostics must go through the filtered \
+         fold leg; importing a concurrent walk's skips changes the order of the combined \
+         root's union between runs of the same command"
+    );
+}
+
+/// Issue #2366: every fold of an analysis's own diagnostics with the process
+/// registry must read the registry through `registry_diagnostics_to_fold`.
+///
+/// A raw read imports whichever walk in the run wrote last. Under a
+/// per-analysis `production` split that walk looked at a different file set, so
+/// the audit family reported a `skipped-large-file` its dead-code analysis
+/// never saw while the MCP `audit` tool, which serializes the typed list,
+/// reported none. Pin the filtered leg at all four fold sites so a raw read
+/// cannot come back.
+#[test]
+fn diagnostics_folds_read_the_registry_through_the_filtered_leg() {
+    let registry = read_source_without_line_comments("crates/config/src/workspace/diagnostics.rs")
+        .expect("read diagnostics registry");
+    assert!(
+        registry.contains("pub fn registry_diagnostics_to_fold(")
+            && registry.contains("!diagnostic.kind.is_source_walk_recorded()"),
+        "the registry owns the fold leg and the walk-recorded filter it applies"
+    );
+
+    for (path, site) in [
+        (
+            "crates/engine/src/session.rs",
+            "the engine session's live read",
+        ),
+        (
+            "crates/cli/src/report/json.rs",
+            "the CLI audit family's dead-code section",
+        ),
+        (
+            "crates/cli/src/combined/output.rs",
+            "the CLI combined root fold",
+        ),
+        (
+            "crates/api/src/runtime_json.rs",
+            "the programmatic combined root fold",
+        ),
+    ] {
+        let source = read_source_without_line_comments(path).expect("read fold site");
+        assert!(
+            source.contains("registry_diagnostics_to_fold("),
+            "{site} ({path}) must close its fold with the filtered registry leg"
+        );
     }
 }
 

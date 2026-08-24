@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rustc_hash::FxHashSet;
 #[cfg(feature = "schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -141,6 +142,57 @@ impl WorkspaceDiagnosticKind {
                 | Self::SourceReadFailure { .. }
         )
     }
+
+    /// Whether this diagnostic is written by the source file WALK
+    /// (`discover_files`), the subset of [`Self::is_source_discovery`] that a
+    /// walk replaces wholesale for its root. `source-read-failure` is the
+    /// other source-discovery kind and is NOT one of these: the parse stage
+    /// records it after the walk, so it has to keep reaching consumers through
+    /// the registry.
+    ///
+    /// A walk-recorded entry must reach an analysis from its OWN walk's return
+    /// value. Combined mode runs the dead-code and duplication walks under
+    /// `rayon::join` whenever a per-analysis `production` split stops them from
+    /// sharing a file list, so a registry read answers "whichever walk wrote
+    /// last" and varies between runs of the same command (issue #2366).
+    #[must_use]
+    pub const fn is_source_walk_recorded(&self) -> bool {
+        matches!(
+            self,
+            Self::SkippedLargeFile { .. } | Self::SkippedMinifiedFile { .. }
+        )
+    }
+
+    /// Whether this diagnostic is recorded by the ANALYZE stage (the
+    /// dependency-catalog and override detectors) rather than by workspace or
+    /// source discovery. Analysis-stage diagnostics reach the registry through
+    /// `record_workspace_diagnostics` after config load, so
+    /// `stash_workspace_diagnostics` must preserve them across combined-mode's
+    /// per-analysis config re-loads, and every analyze pass clears its previous
+    /// entries before re-recording so a fixed cause drops out on the next run
+    /// (issue #2366). The match is exhaustive on purpose: a new kind must be
+    /// classified here before it compiles.
+    ///
+    /// Classify a kind `true` ONLY when a detector reachable from the dead-code
+    /// analyze pass (`find_dead_code_full`) re-records it, because that pass is
+    /// the single clear site. A kind recorded exclusively by another stage would
+    /// be cleared by the next dead-code pass and never come back.
+    #[must_use]
+    pub const fn is_analysis_stage(&self) -> bool {
+        match self {
+            Self::MalformedPnpmWorkspaceYaml { .. } | Self::BunLockbOverrideResolutionSkipped => {
+                true
+            }
+            Self::UndeclaredWorkspace
+            | Self::MalformedPackageJson { .. }
+            | Self::GlobMatchedNoPackageJson { .. }
+            | Self::MalformedTsconfig { .. }
+            | Self::TsconfigReferenceDirMissing
+            | Self::SkippedLargeFile { .. }
+            | Self::SkippedMinifiedFile { .. }
+            | Self::SourceReadFailure { .. } => false,
+        }
+    }
 }
 
 /// Render a byte count as a megabyte figure with one decimal place for
@@ -189,8 +241,13 @@ impl WorkspaceDiagnostic {
     ///
     /// If `path` is not under `root` (e.g. canonicalisation crossed a
     /// symlink), the absolute path is emitted instead.
+    ///
+    /// `path` also loses any no-op `.` component, for the same reason the
+    /// payload loses a glob's `./` prefix: one directory reached through two
+    /// spellings of one glob must be one diagnostic.
     #[must_use]
     pub fn new(root: &Path, path: PathBuf, kind: WorkspaceDiagnosticKind) -> Self {
+        let path = normalise_diagnostic_path(path);
         let kind = normalise_payload_paths(root, kind);
         let message = render_message(root, &path, &kind);
         Self {
@@ -199,12 +256,65 @@ impl WorkspaceDiagnostic {
             message,
         }
     }
+
+    /// Return this diagnostic with `path` rewritten relative to `root`.
+    ///
+    /// `path` is stored absolute so callers can act on it. Every JSON envelope
+    /// emits it project-relative instead: the analysis envelopes get there
+    /// through the post-serialisation `strip_root_prefix` pass, which the
+    /// `fallow workspaces` / `fallow list --workspaces` envelope and the MCP
+    /// `project_info` tool never run, so those emitted the absolute path while
+    /// the sibling `workspaces[].path` next to it was relative. They normalise
+    /// at the typed layer with this method instead.
+    ///
+    /// Paths outside `root` (canonicalisation crossed a symlink) are left
+    /// absolute, matching how [`Self::new`] renders the message.
+    #[must_use]
+    pub fn into_root_relative(mut self, root: &Path) -> Self {
+        if let Ok(relative) = self.path.strip_prefix(root) {
+            self.path = relative.to_path_buf();
+        }
+        self
+    }
+}
+
+/// Rebuild `path` from its components so one directory has one spelling.
+///
+/// The dedupe key was never the problem: [`Path`] equality already ignores an
+/// interior `.`, so `<root>/./pkgs/aaa` and `<root>/pkgs/aaa` are one key. The
+/// stored bytes were. A workspace glob spelled `./pkgs/*` in `package.json`
+/// expands to the first spelling and the same glob spelled `pkgs/*` in
+/// `pnpm-workspace.yaml` expands to the second, and the two envelope families
+/// make a project-relative path differently: the analysis envelopes strip the
+/// root as a string (leaving `./pkgs/aaa`) while the workspace listing
+/// envelope uses [`WorkspaceDiagnostic::into_root_relative`] (leaving
+/// `pkgs/aaa`). Whichever
+/// manifest happened to be read first then decided which shape every consumer
+/// saw. Collapsing at construction gives them one answer (issue #2366).
+///
+/// A path that is already component-clean rebuilds to itself. Serialization
+/// normalises separators, so the rebuild is wire-invisible on Windows.
+fn normalise_diagnostic_path(path: PathBuf) -> PathBuf {
+    let rebuilt: PathBuf = path.components().collect();
+    if rebuilt.as_os_str() == path.as_os_str() {
+        path
+    } else {
+        rebuilt
+    }
 }
 
 /// Strip the project root from absolute paths embedded inside variant
-/// payloads (the `error` field of malformed-config and source-read failures).
-/// Mirrors the per-platform `display()` byte sequence
-/// so the substring match works on Windows too.
+/// payloads (the `error` field of malformed-config and source-read failures),
+/// and drop a glob pattern's no-op `./` prefix.
+///
+/// Mirrors the per-platform `display()` byte sequence so the substring match
+/// works on Windows too.
+///
+/// The pattern prefix matters because the payload is part of the dedupe key in
+/// [`merge_workspace_diagnostics`]. A repository whose `package.json` declares
+/// `"./apps/**"` and whose `pnpm-workspace.yaml` declares `apps/**` names one
+/// glob twice, and without this both spellings would report every package-less
+/// directory under `apps/` a second time (issue #2366).
 fn normalise_payload_paths(root: &Path, kind: WorkspaceDiagnosticKind) -> WorkspaceDiagnosticKind {
     let root_str = root.display().to_string();
     let root_alt = root_str.replace('\\', "/");
@@ -232,8 +342,83 @@ fn normalise_payload_paths(root: &Path, kind: WorkspaceDiagnosticKind) -> Worksp
                 error: normalise(error),
             }
         }
+        WorkspaceDiagnosticKind::GlobMatchedNoPackageJson { pattern } => {
+            WorkspaceDiagnosticKind::GlobMatchedNoPackageJson {
+                pattern: canonical_glob_pattern(pattern),
+            }
+        }
         other => other,
     }
+}
+
+/// Drop the leading `./` (or `.\`) a workspace glob may carry, so the same
+/// pattern declared in two manifests is one payload.
+///
+/// A pattern that is nothing BUT the prefix (`"./"`, the root itself) keeps
+/// its spelling: stripping it would report an empty `pattern` field and an
+/// empty quoted glob in the warning text, which names no glob at all.
+fn canonical_glob_pattern(pattern: String) -> String {
+    for prefix in ["./", ".\\"] {
+        if let Some(rest) = pattern.strip_prefix(prefix)
+            && !rest.is_empty()
+        {
+            return rest.to_owned();
+        }
+    }
+    pattern
+}
+
+/// Concatenate two diagnostic lists, keeping the first occurrence of each
+/// `(kind, path)` pair and the order of `primary` followed by the entries only
+/// `secondary` has.
+///
+/// The single place diagnostics from two observation points are folded
+/// together: an engine session's own capture plus the process registry, and
+/// the combined run's per-analysis lists (issue #2366). A combined run walks
+/// the project once per analysis, and per-analysis `production` modes can make
+/// those walks see different file sets, so no single observation point holds
+/// everything the run recorded; the union does, and folding it the same way
+/// everywhere is what keeps the CLI and the programmatic route answering
+/// identically.
+///
+/// The key is the WHOLE kind, payload included, not its
+/// [`id`](WorkspaceDiagnosticKind::id). Two entries can share a kind id and a
+/// path and still be two distinct diagnostics: overlapping workspace globs
+/// (`["packages/*", "packages/*/*"]`) each report the same package-less
+/// directory with their own `pattern`, and the standalone envelopes report
+/// both. An id-keyed fold silently dropped the second one.
+#[must_use]
+pub fn merge_workspace_diagnostics(
+    primary: Vec<WorkspaceDiagnostic>,
+    secondary: Vec<WorkspaceDiagnostic>,
+) -> Vec<WorkspaceDiagnostic> {
+    let mut merged = Vec::with_capacity(primary.len() + secondary.len());
+    let mut seen: FxHashSet<(WorkspaceDiagnosticKind, PathBuf)> = FxHashSet::default();
+    for diagnostic in primary.into_iter().chain(secondary) {
+        let key = (diagnostic.kind.clone(), diagnostic.path.clone());
+        if seen.insert(key) {
+            merged.push(diagnostic);
+        }
+    }
+    merged
+}
+
+/// Keep the first occurrence of each `(kind, path)` pair in one list.
+///
+/// The single-list form of [`merge_workspace_diagnostics`], applied where
+/// diagnostics are produced rather than where two observation points are
+/// folded: workspace discovery reads `package.json` `workspaces`,
+/// `pnpm-workspace.yaml` `packages`, `deno.json` `workspace` and the root
+/// `tsconfig.json` references additively, so a repository that declares one
+/// glob in two of them reports every package-less directory under it twice.
+/// Deduplicating at that source is what keeps the JSON envelopes, the
+/// aggregated stderr warning and the process registry telling one story
+/// (issue #2366).
+#[must_use]
+pub fn dedupe_workspace_diagnostics(
+    diagnostics: Vec<WorkspaceDiagnostic>,
+) -> Vec<WorkspaceDiagnostic> {
+    merge_workspace_diagnostics(diagnostics, Vec::new())
 }
 
 /// Render `path` relative to `root` with forward slashes. The forward-slash
@@ -432,6 +617,302 @@ mod tests {
         );
         let json = serde_json::to_value(&diag).expect("diagnostic serializes");
         assert_eq!(json["kind"], "bun-lockb-override-resolution-skipped");
+    }
+
+    #[test]
+    fn into_root_relative_strips_the_root_and_keeps_outside_paths_absolute() {
+        let root = Path::new("/project");
+        let inside = WorkspaceDiagnostic::new(
+            root,
+            root.join("packages/inner"),
+            WorkspaceDiagnosticKind::UndeclaredWorkspace,
+        )
+        .into_root_relative(root);
+        assert_eq!(inside.path, Path::new("packages/inner"));
+
+        let outside = WorkspaceDiagnostic::new(
+            root,
+            PathBuf::from("/elsewhere/packages/inner"),
+            WorkspaceDiagnosticKind::UndeclaredWorkspace,
+        )
+        .into_root_relative(root);
+        assert_eq!(outside.path, Path::new("/elsewhere/packages/inner"));
+    }
+
+    #[test]
+    fn analysis_stage_classification_covers_only_analyze_stage_kinds() {
+        let analysis_stage = [
+            WorkspaceDiagnosticKind::MalformedPnpmWorkspaceYaml {
+                error: "bad yaml".to_owned(),
+            },
+            WorkspaceDiagnosticKind::BunLockbOverrideResolutionSkipped,
+        ];
+        for kind in &analysis_stage {
+            assert!(
+                kind.is_analysis_stage() && !kind.is_source_discovery(),
+                "{} is recorded by the analyze stage only",
+                kind.id()
+            );
+        }
+
+        let other = [
+            WorkspaceDiagnosticKind::UndeclaredWorkspace,
+            WorkspaceDiagnosticKind::MalformedPackageJson {
+                error: "trailing comma".to_owned(),
+            },
+            WorkspaceDiagnosticKind::GlobMatchedNoPackageJson {
+                pattern: "packages/*".to_owned(),
+            },
+            WorkspaceDiagnosticKind::MalformedTsconfig {
+                error: "unexpected token".to_owned(),
+            },
+            WorkspaceDiagnosticKind::TsconfigReferenceDirMissing,
+            WorkspaceDiagnosticKind::SkippedLargeFile { size_bytes: 1 },
+            WorkspaceDiagnosticKind::SkippedMinifiedFile { size_bytes: 1 },
+            WorkspaceDiagnosticKind::SourceReadFailure {
+                error: "permission denied".to_owned(),
+            },
+        ];
+        for kind in &other {
+            assert!(
+                !kind.is_analysis_stage(),
+                "{} is a discovery kind, not an analyze-stage kind",
+                kind.id()
+            );
+        }
+    }
+
+    #[test]
+    fn merge_keeps_two_diagnostics_that_share_a_kind_id_and_path() {
+        let root = Path::new("/project");
+        let first = WorkspaceDiagnostic::new(
+            root,
+            root.join("packages/aaa"),
+            WorkspaceDiagnosticKind::GlobMatchedNoPackageJson {
+                pattern: "packages/*".to_owned(),
+            },
+        );
+        let second = WorkspaceDiagnostic::new(
+            root,
+            root.join("packages/aaa"),
+            WorkspaceDiagnosticKind::GlobMatchedNoPackageJson {
+                pattern: "packages/a*".to_owned(),
+            },
+        );
+
+        let merged =
+            merge_workspace_diagnostics(vec![first.clone(), second.clone()], vec![first, second]);
+
+        let patterns: Vec<String> = merged
+            .iter()
+            .map(|diagnostic| match &diagnostic.kind {
+                WorkspaceDiagnosticKind::GlobMatchedNoPackageJson { pattern } => pattern.clone(),
+                other => panic!("unexpected kind {}", other.id()),
+            })
+            .collect();
+        assert_eq!(
+            patterns,
+            ["packages/*", "packages/a*"],
+            "two overlapping globs report the same directory twice, with their own pattern; \
+             the same entry seen from two observation points still folds to one"
+        );
+    }
+
+    /// Issue #2366: a repository that declares one glob in two manifests
+    /// (`"./apps/**"` in `package.json`, `apps/**` in `pnpm-workspace.yaml`)
+    /// must not report every package-less directory under it twice now that the
+    /// payload is part of the dedupe key.
+    #[test]
+    fn merge_folds_two_spellings_of_one_glob_into_one_diagnostic() {
+        let root = Path::new("/project");
+        let dotted = WorkspaceDiagnostic::new(
+            root,
+            root.join("apps/site/.next/cache"),
+            WorkspaceDiagnosticKind::GlobMatchedNoPackageJson {
+                pattern: "./apps/**".to_owned(),
+            },
+        );
+        let bare = WorkspaceDiagnostic::new(
+            root,
+            root.join("apps/site/.next/cache"),
+            WorkspaceDiagnosticKind::GlobMatchedNoPackageJson {
+                pattern: "apps/**".to_owned(),
+            },
+        );
+        assert_eq!(
+            dotted.kind, bare.kind,
+            "the no-op ./ prefix is normalised out of the recorded pattern"
+        );
+        assert!(
+            dotted.message.contains("Glob 'apps/**'"),
+            "the message renders the normalised pattern: {}",
+            dotted.message
+        );
+
+        let merged = merge_workspace_diagnostics(vec![dotted], vec![bare]);
+        assert_eq!(
+            merged.len(),
+            1,
+            "one glob declared twice is one diagnostic: {merged:?}"
+        );
+    }
+
+    /// A glob spelled exactly `"./"` (the project root itself) is the one
+    /// pattern the prefix strip must leave alone: an empty `pattern` field
+    /// names no glob, and the warning would quote nothing.
+    #[test]
+    fn new_keeps_a_root_only_glob_spelling_and_still_strips_a_real_prefix() {
+        let root = Path::new("/project");
+        let recorded = |pattern: &str| {
+            let diagnostic = WorkspaceDiagnostic::new(
+                root,
+                root.join("pkgs"),
+                WorkspaceDiagnosticKind::GlobMatchedNoPackageJson {
+                    pattern: pattern.to_owned(),
+                },
+            );
+            let WorkspaceDiagnosticKind::GlobMatchedNoPackageJson { pattern } = diagnostic.kind
+            else {
+                panic!("constructed a glob-matched-no-package-json diagnostic");
+            };
+            (pattern, diagnostic.message)
+        };
+
+        let (root_pattern, root_message) = recorded("./");
+        assert_eq!(root_pattern, "./", "a root-only glob keeps its spelling");
+        assert!(
+            root_message.contains("Glob './'"),
+            "the warning names the glob the manifest declared: {root_message}"
+        );
+        assert_eq!(recorded(".\\").0, ".\\");
+        assert_eq!(recorded("./pkgs/*").0, "pkgs/*");
+        assert_eq!(recorded(".\\pkgs\\*").0, "pkgs\\*");
+    }
+
+    /// Issue #2366, the path half of the same repository shape: expanding
+    /// `./pkgs/*` joins the no-op `.` into every match, so the two manifests
+    /// hand one directory to the diagnostic under two spellings. Both must
+    /// store, render and serialise as the bare one, otherwise whichever
+    /// manifest was read first decides whether the analysis envelopes print
+    /// `./pkgs/aaa` while the workspace listing envelope prints `pkgs/aaa`.
+    #[test]
+    fn new_stores_one_spelling_for_a_directory_reached_through_a_dotted_glob() {
+        let root = Path::new("/project");
+        let dotted = WorkspaceDiagnostic::new(
+            root,
+            root.join("./pkgs/aaa"),
+            WorkspaceDiagnosticKind::GlobMatchedNoPackageJson {
+                pattern: "./pkgs/*".to_owned(),
+            },
+        );
+        let bare = WorkspaceDiagnostic::new(
+            root,
+            root.join("pkgs/aaa"),
+            WorkspaceDiagnosticKind::GlobMatchedNoPackageJson {
+                pattern: "pkgs/*".to_owned(),
+            },
+        );
+
+        let spelling = |diagnostic: &WorkspaceDiagnostic| {
+            diagnostic.path.display().to_string().replace('\\', "/")
+        };
+        assert_eq!(
+            spelling(&dotted),
+            "/project/pkgs/aaa",
+            "the stored path drops the no-op . component, which Path equality \
+             hides but serialization does not"
+        );
+        assert_eq!(spelling(&dotted), spelling(&bare));
+        assert_eq!(
+            spelling(&dotted.clone().into_root_relative(root)),
+            "pkgs/aaa"
+        );
+
+        let merged = merge_workspace_diagnostics(vec![dotted], vec![bare]);
+        assert_eq!(
+            merged.len(),
+            1,
+            "one directory reached through two spellings of one glob: {merged:?}"
+        );
+    }
+
+    /// The single-list fold applied at workspace discovery keeps one entry per
+    /// `(kind, path)` and leaves distinct payloads alone.
+    #[test]
+    fn dedupe_keeps_first_of_each_pair_and_every_distinct_payload() {
+        let root = Path::new("/project");
+        let glob = |pattern: &str, relative: &str| {
+            WorkspaceDiagnostic::new(
+                root,
+                root.join(relative),
+                WorkspaceDiagnosticKind::GlobMatchedNoPackageJson {
+                    pattern: pattern.to_owned(),
+                },
+            )
+        };
+
+        let deduped = dedupe_workspace_diagnostics(vec![
+            glob("pkgs/*", "pkgs/aaa"),
+            glob("pkgs/*", "pkgs/bbb"),
+            glob("./pkgs/*", "./pkgs/aaa"),
+            glob("pkgs/a*", "pkgs/aaa"),
+        ]);
+
+        let reported: Vec<(String, String)> = deduped
+            .iter()
+            .map(|diagnostic| match &diagnostic.kind {
+                WorkspaceDiagnosticKind::GlobMatchedNoPackageJson { pattern } => (
+                    pattern.clone(),
+                    diagnostic.path.display().to_string().replace('\\', "/"),
+                ),
+                other => panic!("unexpected kind {}", other.id()),
+            })
+            .collect();
+
+        assert_eq!(
+            reported,
+            vec![
+                ("pkgs/*".to_owned(), "/project/pkgs/aaa".to_owned()),
+                ("pkgs/*".to_owned(), "/project/pkgs/bbb".to_owned()),
+                ("pkgs/a*".to_owned(), "/project/pkgs/aaa".to_owned()),
+            ],
+            "the duplicate spelling folds away and the overlapping glob stays"
+        );
+    }
+
+    #[test]
+    fn source_walk_recorded_covers_only_the_kinds_a_walk_replaces() {
+        for kind in [
+            WorkspaceDiagnosticKind::SkippedLargeFile { size_bytes: 1 },
+            WorkspaceDiagnosticKind::SkippedMinifiedFile { size_bytes: 1 },
+        ] {
+            assert!(
+                kind.is_source_walk_recorded() && kind.is_source_discovery(),
+                "{} is written by the source walk",
+                kind.id()
+            );
+        }
+
+        let read_failure = WorkspaceDiagnosticKind::SourceReadFailure {
+            error: "permission denied".to_owned(),
+        };
+        assert!(
+            read_failure.is_source_discovery() && !read_failure.is_source_walk_recorded(),
+            "the parse stage records source-read-failure after the walk, so it must keep \
+             reaching sessions through the registry"
+        );
+
+        for kind in [
+            WorkspaceDiagnosticKind::UndeclaredWorkspace,
+            WorkspaceDiagnosticKind::TsconfigReferenceDirMissing,
+            WorkspaceDiagnosticKind::BunLockbOverrideResolutionSkipped,
+        ] {
+            assert!(
+                !kind.is_source_walk_recorded(),
+                "{} is not written by the source walk",
+                kind.id()
+            );
+        }
     }
 
     #[test]

@@ -551,35 +551,35 @@ pub(super) fn api_check_json_document_with_config_fixable_meta_and_extras(
     })
 }
 
+/// Build the `CheckOutput` body the audit family embeds as its `dead_code`
+/// section.
+///
+/// `analysis_diagnostics` is the dead-code analysis's OWN
+/// `workspace_diagnostics[]`, folded with the registry leg the same way
+/// `combined_workspace_diagnostics` folds the combined root. The registry read
+/// alone reports whichever walk in the run wrote last, so under a per-analysis
+/// `production` split the audit envelope would otherwise be narrower than the
+/// run and than the MCP `audit` tool, which serializes the typed list. The leg
+/// is [`fallow_config::registry_diagnostics_to_fold`], not a raw registry read,
+/// so the same split cannot make it BROADER either by importing a file the
+/// dead-code walk never looked at from the health or dupes walk (issue #2366).
 pub fn api_check_json_payload_with_config_fixable(
     results: &AnalysisResults,
     root: &Path,
     elapsed: Duration,
     config_fixable: bool,
-) -> Result<serde_json::Value, serde_json::Error> {
-    api_check_json_payload_with_config_fixable_and_extras(
-        results,
-        root,
-        elapsed,
-        config_fixable,
-        CheckJsonExtraOutputs::default(),
-    )
-}
-
-pub fn api_check_json_payload_with_config_fixable_and_extras(
-    results: &AnalysisResults,
-    root: &Path,
-    elapsed: Duration,
-    config_fixable: bool,
-    extras: CheckJsonExtraOutputs,
+    analysis_diagnostics: &[WorkspaceDiagnostic],
 ) -> Result<serde_json::Value, serde_json::Error> {
     fallow_api::serialize_check_json_payload(CheckJsonPayloadInput {
         results,
         root,
         elapsed,
         config_fixable,
-        extras,
-        workspace_diagnostics: workspace_diagnostics_for_output(root),
+        extras: CheckJsonExtraOutputs::default(),
+        workspace_diagnostics: fallow_types::workspace::merge_workspace_diagnostics(
+            analysis_diagnostics.to_vec(),
+            fallow_config::registry_diagnostics_to_fold(root),
+        ),
     })
 }
 

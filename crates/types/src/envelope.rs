@@ -194,10 +194,10 @@ pub struct CheckSummary {
     /// Workspace package.json catalog references the workspace catalogs
     /// do not declare.
     pub unresolved_catalog_references: usize,
-    /// Pnpm `overrides:` entries whose target package is not declared by any
-    /// workspace package and not present in the lockfile.
+    /// Package-manager overrides whose target package is not declared by any
+    /// workspace package and not present in the active readable lockfile.
     pub unused_dependency_overrides: usize,
-    /// Pnpm `overrides:` entries whose key or value cannot be parsed.
+    /// Package-manager overrides whose key or value cannot be parsed.
     pub misconfigured_dependency_overrides: usize,
     /// `"use client"` files that export a Next.js server-only / route-config name.
     #[serde(default)]

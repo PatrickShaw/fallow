@@ -10,7 +10,7 @@ use crate::resolve::ResolvedModule;
 use fallow_types::discover::FileId;
 #[cfg(test)]
 use fallow_types::extract::ModuleLoadMechanism;
-use fallow_types::extract::{ImportedName, VisibilityTag};
+use fallow_types::extract::{ImportedName, SemanticFact, VisibilityTag};
 
 use super::types::{
     ExportSymbol, ReExportEdge, ReferenceKind, ReferencePathId, ReferencePathInterner,
@@ -71,9 +71,9 @@ impl AttachContext<'_> {
     /// Record that a consumer in this graph observed `target`'s whole
     /// namespace object.
     ///
-    /// Every namespace mark-all site must call this or
-    /// [`AttachContext::observe_ambient_namespace_object`] so the exposed
-    /// namespace closure sees the same seed set the marks credited; the one
+    /// Every namespace mark-all site must call this or one of the ambient
+    /// observation methods so the exposed namespace closure sees the same
+    /// seed set the marks credited; the one
     /// deliberate exception is a binding the namespace-object alias phase
     /// narrows on the consumer's behalf. The seed is namespace-agnostic on
     /// purpose: the object exposes the same names in the type and value
@@ -89,8 +89,14 @@ impl AttachContext<'_> {
     /// Separate from [`AttachContext::observe_whole_namespace_object`]
     /// because the observers live outside this graph: the seed stands however
     /// the shim and the target sit in it.
+    fn observe_ambient_star(&mut self, target: FileId) {
+        self.whole_module_targets.observe_ambient_star(target);
+    }
+
+    /// Record that an ambient `export * as ns` exposes `target`'s namespace
+    /// object, including its default member.
     fn observe_ambient_namespace_object(&mut self, target: FileId) {
-        self.whole_module_targets.observe_ambient(target);
+        self.whole_module_targets.observe_ambient_namespace(target);
     }
 
     fn reborrow(&mut self) -> AttachContext<'_> {
@@ -168,6 +174,37 @@ fn is_unused_import_binding(
     !sym_local_name.is_empty()
         && !matches!(sym_imported_name, ImportedName::SideEffect)
         && source_mod.is_some_and(|m| m.unused_import_bindings.contains(sym_local_name))
+}
+
+fn ambient_star_observes_namespace_object(
+    sym: &ImportedSymbol,
+    source_mod: Option<&&ResolvedModule>,
+) -> bool {
+    source_mod.is_some_and(|module| {
+        module.resolved_imports.iter().any(|import| {
+            import.info.span == sym.import_span
+                && import.info.local_name.is_empty()
+                && import.info.is_type_only
+                && matches!(import.info.imported_name, ImportedName::Default)
+        })
+    })
+}
+
+fn is_single_static_cjs_object_map(module: &ResolvedModule) -> bool {
+    module
+        .semantic_facts
+        .iter()
+        .any(|fact| matches!(fact, SemanticFact::CjsSingleStaticObjectMap))
+}
+
+fn default_import_has_whole_object_use(module: &ResolvedModule, local_name: &str) -> bool {
+    module.semantic_facts.iter().any(|fact| {
+        matches!(
+            fact,
+            SemanticFact::DefaultImportWholeObjectUse(use_fact)
+                if use_fact.local_name == local_name
+        )
+    })
 }
 
 /// Extract member access names for a given local variable from a resolved module.
@@ -479,8 +516,12 @@ fn narrow_namespace_references(
     let source_mod = ctx.module_by_id.get(&site.from_file);
     let accessed_members = extract_accessed_members(source_mod, sym_local_name);
 
-    let is_whole_object =
-        source_mod.is_some_and(|m| m.whole_object_uses.iter().any(|n| n == sym_local_name));
+    let is_whole_object = source_mod.is_some_and(|module| {
+        module
+            .whole_object_uses
+            .iter()
+            .any(|name| name == sym_local_name)
+    });
 
     // `export { ns }` hands the namespace object itself to consumers the graph
     // cannot enumerate, on an entry point as much as on any other module: the
@@ -490,6 +531,11 @@ fn narrow_namespace_references(
             .iter()
             .any(|e| e.local_name.as_deref() == Some(sym_local_name))
     });
+    let namespaces = if is_re_exported && namespaces.1 {
+        (true, true)
+    } else {
+        namespaces
+    };
 
     let is_entry_with_no_access = accessed_members.is_empty()
         && !is_whole_object
@@ -569,8 +615,13 @@ fn narrow_css_module_references(
     ctx: &mut AttachContext<'_>,
 ) {
     let source_mod = ctx.module_by_id.get(&site.from_file);
-    let is_whole_object =
-        source_mod.is_some_and(|m| m.whole_object_uses.iter().any(|n| n == sym_local_name));
+    let is_whole_object = source_mod.is_some_and(|module| {
+        module
+            .whole_object_uses
+            .iter()
+            .any(|name| name == sym_local_name)
+            || default_import_has_whole_object_use(module, sym_local_name)
+    });
     let accessed_members = extract_accessed_members(source_mod, sym_local_name);
     let mut mark = NamespaceMarkContext {
         module_id,
@@ -796,7 +847,17 @@ pub(super) fn attach_symbol_reference(
     }
 
     let site = ReferenceSite::from_symbol(source_id, target_module.file_id, sym, reference_paths);
-    attach_direct_export_references(target_module, site, sym, ref_kind, ctx.reborrow());
+    let is_default_import = matches!(sym.imported_name, ImportedName::Default)
+        || matches!(&sym.imported_name, ImportedName::Named(name) if name == "default");
+    let narrows_default_object_map = is_default_import
+        && !sym.local_name.is_empty()
+        && ctx
+            .module_by_id
+            .get(&target_module.file_id)
+            .is_some_and(|module| is_single_static_cjs_object_map(module));
+    if !narrows_default_object_map {
+        attach_direct_export_references(target_module, site, sym, ref_kind, ctx.reborrow());
+    }
 
     if matches!(sym.imported_name, ImportedName::Namespace) {
         if sym.local_name.is_empty() {
@@ -817,7 +878,11 @@ pub(super) fn attach_symbol_reference(
             // observers are importers of the declared module id, not files in
             // this graph.
             if sym.is_ambient_star() {
-                ctx.observe_ambient_namespace_object(target_module.file_id);
+                if ambient_star_observes_namespace_object(sym, source_mod) {
+                    ctx.observe_ambient_namespace_object(target_module.file_id);
+                } else {
+                    ctx.observe_ambient_star(target_module.file_id);
+                }
             } else {
                 ctx.observe_whole_namespace_object(target_module.file_id);
             }
@@ -853,9 +918,9 @@ pub(super) fn attach_symbol_reference(
         }
     }
 
-    if matches!(sym.imported_name, ImportedName::Default)
+    if is_default_import
         && !sym.local_name.is_empty()
-        && is_css_module_path(&target_module.path)
+        && (is_css_module_path(&target_module.path) || narrows_default_object_map)
     {
         narrow_css_module_references(
             &mut target_module.exports,

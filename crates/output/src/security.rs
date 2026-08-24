@@ -8,6 +8,7 @@ use fallow_types::results::{
     SecurityAttackSurfaceEntry, SecurityFinding, SecurityFindingKind, SecurityRuntimeState,
     SecuritySeverity, TaintConfidence,
 };
+use fallow_types::workspace::WorkspaceDiagnostic;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// Current `fallow security --format json` schema version.
@@ -132,6 +133,9 @@ pub struct SecurityOutput<Config, Gate> {
     /// distinguish "gate ran and passed" from "gate did not run" (absent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<Gate>,
+    /// Diagnostics owned by this security analysis run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_diagnostics: Vec<WorkspaceDiagnostic>,
     /// Security candidates. Paths are project-root-relative, forward-slash.
     pub security_findings: Vec<SecurityFinding>,
     /// Opt-in attack-surface inventory from untrusted entry points to reachable
@@ -225,6 +229,9 @@ pub struct SecuritySummaryOutput<Config, Gate> {
     /// Gate verdict, present only when `--gate <mode>` was set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<Gate>,
+    /// Diagnostics owned by the full security analysis summarized here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_diagnostics: Vec<WorkspaceDiagnostic>,
     /// Aggregate security counts after all filters, gates, and scopes.
     pub summary: SecuritySummary,
 }
@@ -473,6 +480,7 @@ where
         config: output.config.clone(),
         meta: output.meta.clone(),
         gate: output.gate,
+        workspace_diagnostics: output.workspace_diagnostics.clone(),
         summary: build_security_summary(output),
     };
     let mut value = serialize_named_json_output(summary, "security", mode)?;
@@ -636,6 +644,9 @@ pub struct SecuritySurvivorsOutput {
     pub version: ToolVersion,
     /// Wall-clock milliseconds spent producing the report.
     pub elapsed_ms: ElapsedMs,
+    /// Diagnostics preserved from the candidate security report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_diagnostics: Vec<WorkspaceDiagnostic>,
     /// Aggregate verdict counts.
     pub summary: SecuritySurvivorsSummary,
     /// Verifier-retained candidates keyed by finding id.
@@ -709,6 +720,9 @@ pub struct SecurityBlindSpotsOutput {
     pub version: ToolVersion,
     /// Wall-clock milliseconds spent producing the report.
     pub elapsed_ms: ElapsedMs,
+    /// Diagnostics owned by the security analysis used for this view.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_diagnostics: Vec<WorkspaceDiagnostic>,
     /// Aggregate blind-spot counts from the security analysis.
     pub summary: SecurityBlindSpotsSummary,
     /// Grouped unresolved callee diagnostics, derived from existing samples.
@@ -792,6 +806,11 @@ mod tests {
             config: json!({"rules": {}}),
             meta: None,
             gate: None::<()>,
+            workspace_diagnostics: vec![WorkspaceDiagnostic::new(
+                std::path::Path::new("/project"),
+                std::path::PathBuf::from("package.json"),
+                fallow_types::workspace::WorkspaceDiagnosticKind::UndeclaredWorkspace,
+            )],
             security_findings: Vec::new(),
             attack_surface: None,
             unresolved_edge_files: 2,
@@ -807,6 +826,7 @@ mod tests {
         assert_eq!(value["summary"]["security_findings"], 0);
         assert_eq!(value["summary"]["unresolved_edge_files"], 2);
         assert_eq!(value["summary"]["unresolved_callee_sites"], 3);
+        assert_eq!(value["workspace_diagnostics"][0]["path"], "package.json");
         assert!(value.get("security_findings").is_none());
     }
 
@@ -840,6 +860,50 @@ mod tests {
         })
         .expect("security summary");
         validate_saved_security_envelope(&summary).expect("current summary security envelope");
+    }
+
+    #[test]
+    fn saved_security_validator_accepts_legacy_v7_type_aware_payload() {
+        let mut envelope = current_security_envelope();
+        envelope["schema_version"] = json!("7");
+        envelope["_meta"] = json!({
+            "type_aware": {
+                "executed": true,
+                "protocol_version": 6,
+                "sidecar_version": "0.6.0",
+                "backend": "typescript-go",
+                "backend_version": "7.0.0-dev",
+                "selected_tsconfigs": ["tsconfig.json"],
+                "candidate_count": 1,
+                "confirmed_used_count": 0,
+                "contract_preserved_count": 0,
+                "no_static_references_count": 1,
+                "fix_eligible_count": 0,
+                "unresolved_count": 0,
+                "abstained_count": 0,
+                "abstention_reasons": {
+                    "no_project": 0,
+                    "ambiguous_project": 0,
+                    "blocking_diagnostics": 0,
+                    "svelte_virtual_module_exports": 0,
+                    "unknown_symbol": 0,
+                    "unsupported_syntax": 0,
+                    "capacity": 0
+                },
+                "projects": [],
+                "warning_count": 0,
+                "warnings": [],
+                "elapsed_ms": 4,
+                "phase_timings_ms": {
+                    "project_setup": 1,
+                    "diagnostics": 1,
+                    "symbol_scan": 2
+                }
+            }
+        });
+
+        validate_saved_security_envelope(&envelope)
+            .expect("legacy schema 7 type-aware metadata stays readable");
     }
 
     #[test]

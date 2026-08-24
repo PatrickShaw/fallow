@@ -26,6 +26,38 @@ impl ModuleInfoExtractor {
             .any(|scope| scope.contains(name))
     }
 
+    pub(in crate::visitor) fn namespace_like_binding_is_shadowed(&self, name: &str) -> bool {
+        if let Some(owner) = self
+            .scoped_namespace_binding_names
+            .iter()
+            .rposition(|scope| scope.contains(name))
+        {
+            return self
+                .nested_declaration_stack
+                .iter()
+                .skip(owner + 1)
+                .any(|scope| scope.contains(name));
+        }
+        if self.module_namespace_binding_names.contains(name)
+            || self.namespace_import_locals.contains(name)
+            || self.default_import_locals.contains(name)
+        {
+            return self.nested_scope_shadows(name);
+        }
+        self.namespace_binding_names
+            .iter()
+            .any(|local| local == name)
+    }
+
+    pub(in crate::visitor) fn record_namespace_binding_name(&mut self, name: String) {
+        self.namespace_binding_names.push(name.clone());
+        if let Some(scope) = self.scoped_namespace_binding_names.last_mut() {
+            scope.insert(name);
+        } else {
+            self.module_namespace_binding_names.insert(name);
+        }
+    }
+
     pub(super) fn record_sanitizer_binding(&mut self, name: &str, scope: Option<SanitizerScope>) {
         if self.is_module_scope() {
             self.module_sanitizer_bindings
@@ -289,6 +321,8 @@ impl ModuleInfoExtractor {
             .map(|name| (name.clone(), None))
             .collect::<FxHashMap<_, _>>();
         self.nested_declaration_stack.push(scope);
+        self.scoped_namespace_binding_names
+            .push(FxHashSet::default());
         self.scoped_array_binding_element_types
             .push(array_element_scope);
         self.sanitizer_binding_stack.push(sanitizer_scope);
@@ -301,6 +335,7 @@ impl ModuleInfoExtractor {
     pub(super) fn pop_function_declaration_scope(&mut self) {
         if self.namespace_depth == 0 {
             self.nested_declaration_stack.pop();
+            self.scoped_namespace_binding_names.pop();
             self.scoped_array_binding_element_types.pop();
             self.sanitizer_binding_stack.pop();
             self.literal_allowlist_binding_stack.pop();

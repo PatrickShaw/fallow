@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@theme": ["src/aliased-target.module.css"],
+      "@shadow-theme": ["src/shadow-aliased.module.css"]
+    }
+  }
+}

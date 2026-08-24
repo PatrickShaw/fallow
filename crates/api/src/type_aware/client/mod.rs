@@ -2145,7 +2145,10 @@ fn record_candidate_decision(
                 Some(SemanticGapReason::Capacity) => {
                     stats.abstention_reasons.capacity += 1;
                 }
-                _ => stats.abstention_reasons.unsupported_syntax += 1,
+                Some(SemanticGapReason::UnsupportedSyntax) => {
+                    stats.abstention_reasons.unsupported_syntax += 1;
+                }
+                _ => {}
             }
         }
         SemanticCandidateDecisionKind::RetainedAbstained => {
@@ -2164,7 +2167,10 @@ fn record_candidate_decision(
                 Some(SemanticGapReason::Capacity) => {
                     stats.abstention_reasons.capacity += 1;
                 }
-                _ => stats.abstention_reasons.unsupported_syntax += 1,
+                Some(SemanticGapReason::UnsupportedSyntax) => {
+                    stats.abstention_reasons.unsupported_syntax += 1;
+                }
+                _ => {}
             }
         }
     }

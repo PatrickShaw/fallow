@@ -44,6 +44,44 @@ fn cache_roundtrip_preserves_declaration_merge_facts() {
 }
 
 #[test]
+fn cache_roundtrip_preserves_single_static_cjs_object_map_provenance() {
+    let module = parse_from_content(
+        FileId(0),
+        Path::new("src/theme.cjs"),
+        "module.exports = { default: 'blue', primary: 'red' };",
+    );
+    let cached = module_to_cached_from_parts(&module, 10, 20);
+    let encoded = bitcode::encode(&cached);
+    let decoded: CachedModule = bitcode::decode(&encoded).expect("decode cached module");
+    let restored = cached_to_module(&decoded, FileId(0));
+
+    assert!(
+        restored
+            .semantic_facts
+            .contains(&SemanticFact::CjsSingleStaticObjectMap)
+    );
+}
+
+#[test]
+fn cache_roundtrip_preserves_default_import_whole_object_use() {
+    let module = parse_from_content(
+        FileId(0),
+        Path::new("src/consumer.ts"),
+        "import value from './value'; hand(value);",
+    );
+    let cached = module_to_cached_from_parts(&module, 10, 20);
+    let encoded = bitcode::encode(&cached);
+    let decoded: CachedModule = bitcode::decode(&encoded).expect("decode cached module");
+    let restored = cached_to_module(&decoded, FileId(0));
+
+    assert!(restored.semantic_facts.iter().any(|fact| matches!(
+        fact,
+        SemanticFact::DefaultImportWholeObjectUse(use_fact)
+            if use_fact.local_name == "value"
+    )));
+}
+
+#[test]
 fn cache_roundtrip_preserves_type_alias_surface_targets() {
     let module = parse_from_content(
         FileId(0),

@@ -363,9 +363,9 @@ type: "jsdoc_tag"
  */
 export type DependencyOverrideSource = ("pnpm-workspace.yaml" | "package.json")
 /**
- * Why a dependency-override entry is misconfigured. `pnpm install` would
- * either fail at install time or silently no-op on these entries; surfacing
- * them statically catches the issue before pnpm does.
+ * Why a dependency-override entry is misconfigured. The active package
+ * manager may fail at install time or silently no-op on these entries;
+ * surfacing them statically catches the issue first.
  */
 export type DependencyOverrideMisconfigReason = ("unparsable-key" | "empty-value")
 /**
@@ -443,6 +443,10 @@ error: string
 kind: "source-read-failure"
 } | {
 kind: "bun-lockb-override-resolution-skipped"
+} | {
+kind: "bun-lock-override-resolution-skipped"
+} | {
+kind: "bun-resolutions-shadowed-by-overrides"
 })
 /**
  * Discriminant for [`CloneGroupAction::kind`]. Mirrors the action types
@@ -2285,8 +2289,9 @@ empty_catalog_groups?: EmptyCatalogGroupFinding[]
  */
 unresolved_catalog_references?: UnresolvedCatalogReferenceFinding[]
 /**
- * Entries in pnpm-workspace.yaml's overrides: section, package.json's
- * pnpm.overrides block, or package.json's top-level npm overrides object,
+ * Entries in pnpm-workspace.yaml's overrides section, package.json's
+ * pnpm.overrides block, npm or Bun's top-level overrides object, or Bun's
+ * top-level resolutions object,
  * whose target package is not declared by any workspace package and is
  * not present in pnpm-lock.yaml, package-lock.json, npm-shrinkwrap.json,
  * or bun.lock. Default severity is warn because projects without a
@@ -2297,10 +2302,10 @@ unresolved_catalog_references?: UnresolvedCatalogReferenceFinding[]
  */
 unused_dependency_overrides?: UnusedDependencyOverrideFinding[]
 /**
- * pnpm.overrides or npm overrides entries whose key or value does not
- * parse as a valid override spec (empty key, empty value, malformed
- * selector, unbalanced parent matcher). The package manager will reject
- * these at install time. Default severity is error. Wrapped in
+ * Package-manager override or resolution entries whose key or value does
+ * not parse in the declaration source's grammar (empty key, empty value,
+ * malformed selector, unbalanced parent matcher). The package manager may
+ * reject or ignore these at install time. Default severity is error. Wrapped in
  * [`MisconfiguredDependencyOverrideFinding`].
  */
 misconfigured_dependency_overrides?: MisconfiguredDependencyOverrideFinding[]
@@ -2659,12 +2664,12 @@ empty_catalog_groups: number
  */
 unresolved_catalog_references: number
 /**
- * Pnpm `overrides:` entries whose target package is not declared by any
- * workspace package and not present in the lockfile.
+ * Package-manager overrides whose target package is not declared by any
+ * workspace package and not present in the active readable lockfile.
  */
 unused_dependency_overrides: number
 /**
- * Pnpm `overrides:` entries whose key or value cannot be parsed.
+ * Package-manager overrides whose key or value cannot be parsed.
  */
 misconfigured_dependency_overrides: number
 /**
@@ -3907,7 +3912,7 @@ parent_package?: (string | null)
  */
 version_constraint?: (string | null)
 /**
- * The right-hand side of the entry: the version pnpm should force.
+ * The right-hand side of the entry: the version the package manager should force.
  */
 version_range: string
 source: DependencyOverrideSource
@@ -9058,6 +9063,18 @@ is_used: boolean
  */
 direct_references: ExportReference[]
 /**
+ * Reachable direct references grouped by namespace. This is additive to
+ * `namespace` and `direct_references`, whose winning-lane meaning remains
+ * unchanged for backwards compatibility.
+ */
+direct_references_by_namespace?: NamespacedExportReferences[]
+/**
+ * A star-export collision that makes the traced name ambiguous. When
+ * present, `is_used: false` is an abstention rather than an unused-code
+ * verdict.
+ */
+star_export_ambiguity?: (StarExportAmbiguity | null)
+/**
  * Re-export chains that pass through this export.
  */
 re_export_chains: ReExportChain[]
@@ -9082,6 +9099,36 @@ from_file: string
  * Reference kind, such as named import, default import, or re-export.
  */
 kind: string
+}
+/**
+ * Direct references that credit one namespace of an export binding.
+ */
+export interface NamespacedExportReferences {
+namespace: SemanticNamespace
+/**
+ * Number of reachable references in this namespace.
+ */
+reference_count: number
+/**
+ * Reachable references in deterministic graph order.
+ */
+references: ExportReference[]
+}
+/**
+ * The `export *` collision that keeps a name from being exported.
+ */
+export interface StarExportAmbiguity {
+/**
+ * Files that each declare a colliding declaration under the traced name
+ * (project-root-relative), sorted. These are the origins to fix: keep one,
+ * rename or explicitly re-export the rest.
+ */
+sources: string[]
+/**
+ * The namespaces the collision occurs in, type before value. A name can
+ * collide in type space, value space, or both.
+ */
+namespaces: SemanticNamespace[]
 }
 /**
  * A re-export chain showing how an export is propagated.
@@ -9444,22 +9491,6 @@ export interface UnresolvedCallee {
  */
 callee: string
 reason: UnresolvedReason
-}
-/**
- * The `export *` collision that keeps a name from being exported.
- */
-export interface StarExportAmbiguity {
-/**
- * Files that each declare a colliding declaration under the traced name
- * (project-root-relative), sorted. These are the origins to fix: keep one,
- * rename or explicitly re-export the rest.
- */
-sources: string[]
-/**
- * The namespaces the collision occurs in, type before value. A name can
- * collide in type space, value space, or both.
- */
-namespaces: SemanticNamespace[]
 }
 /**
  * Envelope emitted by `fallow --format review-github` / `review-gitlab`.
@@ -10622,8 +10653,9 @@ empty_catalog_groups?: EmptyCatalogGroupFinding[]
  */
 unresolved_catalog_references?: UnresolvedCatalogReferenceFinding[]
 /**
- * Entries in pnpm-workspace.yaml's overrides: section, package.json's
- * pnpm.overrides block, or package.json's top-level npm overrides object,
+ * Entries in pnpm-workspace.yaml's overrides section, package.json's
+ * pnpm.overrides block, npm or Bun's top-level overrides object, or Bun's
+ * top-level resolutions object,
  * whose target package is not declared by any workspace package and is
  * not present in pnpm-lock.yaml, package-lock.json, npm-shrinkwrap.json,
  * or bun.lock. Default severity is warn because projects without a
@@ -10634,10 +10666,10 @@ unresolved_catalog_references?: UnresolvedCatalogReferenceFinding[]
  */
 unused_dependency_overrides?: UnusedDependencyOverrideFinding[]
 /**
- * pnpm.overrides or npm overrides entries whose key or value does not
- * parse as a valid override spec (empty key, empty value, malformed
- * selector, unbalanced parent matcher). The package manager will reject
- * these at install time. Default severity is error. Wrapped in
+ * Package-manager override or resolution entries whose key or value does
+ * not parse in the declaration source's grammar (empty key, empty value,
+ * malformed selector, unbalanced parent matcher). The package manager may
+ * reject or ignore these at install time. Default severity is error. Wrapped in
  * [`MisconfiguredDependencyOverrideFinding`].
  */
 misconfigured_dependency_overrides?: MisconfiguredDependencyOverrideFinding[]
@@ -11054,6 +11086,10 @@ _meta?: (Meta | null)
  * distinguish "gate ran and passed" from "gate did not run" (absent).
  */
 gate?: (SecurityGate | null)
+/**
+ * Diagnostics owned by this security analysis run.
+ */
+workspace_diagnostics?: WorkspaceDiagnostic[]
 /**
  * Security candidates. Paths are project-root-relative, forward-slash.
  */
@@ -11671,6 +11707,10 @@ _meta?: (Meta | null)
  * Gate verdict, present only when `--gate <mode>` was set.
  */
 gate?: (SecurityGate | null)
+/**
+ * Diagnostics owned by the full security analysis summarized here.
+ */
+workspace_diagnostics?: WorkspaceDiagnostic[]
 summary: SecuritySummary
 }
 /**
@@ -11790,6 +11830,10 @@ export interface SecuritySurvivorsOutput {
 schema_version: SecuritySurvivorsSchemaVersion
 version: ToolVersion
 elapsed_ms: ElapsedMs
+/**
+ * Diagnostics preserved from the candidate security report.
+ */
+workspace_diagnostics?: WorkspaceDiagnostic[]
 summary: SecuritySurvivorsSummary
 /**
  * Verifier-retained candidates keyed by finding id.
@@ -11872,6 +11916,10 @@ export interface SecurityBlindSpotsOutput {
 schema_version: SecurityBlindSpotsSchemaVersion
 version: ToolVersion
 elapsed_ms: ElapsedMs
+/**
+ * Diagnostics owned by the security analysis used for this view.
+ */
+workspace_diagnostics?: WorkspaceDiagnostic[]
 summary: SecurityBlindSpotsSummary
 /**
  * Grouped unresolved callee diagnostics, derived from existing samples.

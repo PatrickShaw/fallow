@@ -316,37 +316,9 @@ fn type_aware_class_method_impact_uses_exact_owner_identity() {
 }
 
 #[test]
-fn type_aware_refines_ambiguous_unused_exports_without_unsafe_fixes() {
+fn type_aware_preserves_reachable_aliases_and_reports_actual_unused_export() {
     let root = fixture_path("type-aware-unused-export-refinement");
     let root_arg = root.to_string_lossy();
-    let args = [
-        "dead-code",
-        "--root",
-        &root_arg,
-        "--unused-exports",
-        "--unused-types",
-        "--format",
-        "json",
-        "--quiet",
-    ];
-
-    let syntactic = parse_json(&run_fallow_raw(&args));
-    let syntactic_exports = syntactic["unused_exports"]
-        .as_array()
-        .expect("unused exports");
-    let syntactic_types = syntactic["unused_types"].as_array().expect("unused types");
-    assert!(syntactic_exports.iter().any(|issue| {
-        matches!(
-            issue["export_name"].as_str(),
-            Some("PublicApi" | "PublicMerged")
-        )
-    }));
-    assert!(
-        syntactic_types
-            .iter()
-            .any(|issue| { issue["export_name"] == "PublicComplex" })
-    );
-
     let type_aware_args = [
         "dead-code",
         "--root",
@@ -368,21 +340,15 @@ fn type_aware_refines_ambiguous_unused_exports_without_unsafe_fixes() {
     let typed_exports = typed["unused_exports"].as_array().expect("unused exports");
     let typed_types = typed["unused_types"].as_array().expect("unused types");
 
-    for confirmed_used in ["PublicApi", "PublicComplex", "PublicMerged"] {
+    for reachable_alias in ["PublicApi", "PublicComplex", "PublicMerged"] {
         assert!(
             typed_exports
                 .iter()
                 .chain(typed_types)
-                .all(|issue| issue["export_name"] != confirmed_used),
-            "{confirmed_used} should be removed after exact semantic use is confirmed"
+                .all(|issue| issue["export_name"] != reachable_alias),
+            "{reachable_alias} has a reachable exact consumer"
         );
     }
-
-    let runtime_only = typed_exports
-        .iter()
-        .find(|issue| issue["export_name"] == "RuntimeOnly")
-        .expect("dynamic import candidate");
-    assert_eq!(runtime_only["actions"][0]["auto_fixable"], false);
 
     let actually_unused = typed_exports
         .iter()
@@ -390,16 +356,16 @@ fn type_aware_refines_ambiguous_unused_exports_without_unsafe_fixes() {
         .expect("confirmed unused export");
     assert_eq!(actually_unused["actions"][0]["auto_fixable"], true);
 
+    assert!(
+        typed_exports
+            .iter()
+            .any(|issue| issue["export_name"] == "mixedNonCrediting"),
+        "mixed unreachable-read and bare-re-export evidence must not hide dead code: {typed_exports:?}"
+    );
+
     let decisions = typed["_meta"]["type_aware"]["candidate_decisions"]
         .as_array()
         .expect("candidate decisions");
-    let runtime_decision = decisions
-        .iter()
-        .find(|decision| decision["subject"]["exported_name"] == "RuntimeOnly")
-        .expect("dynamic import decision");
-    assert_eq!(runtime_decision["decision"], "retained-abstained");
-    assert_eq!(runtime_decision["reason_code"], "dynamic-behavior");
-
     let unused_decision = decisions
         .iter()
         .find(|decision| decision["subject"]["exported_name"] == "actuallyUnused")
@@ -408,6 +374,12 @@ fn type_aware_refines_ambiguous_unused_exports_without_unsafe_fixes() {
         unused_decision["decision"],
         "confirmed-no-static-references"
     );
+
+    let mixed_decision = decisions
+        .iter()
+        .find(|decision| decision["subject"]["exported_name"] == "mixedNonCrediting")
+        .expect("mixed non-crediting evidence decision");
+    assert_eq!(mixed_decision["decision"], "retained-abstained");
 }
 
 #[test]
@@ -1156,13 +1128,12 @@ fn trace_reports_the_type_lane_credit_of_a_value_only_export() {
     );
 }
 
-/// Issue #2371: the checker proof beside the syntactic trace covers the lane
-/// the declaration occupies, and the sidecar does not model a cross-lane
-/// import as a reference. The payload must stay readable across that gap: the
-/// root trace reports the credit, `semantic.target.namespace` names the lane
-/// the narrower proof covers, and the human proof line says so.
+/// Issue #2371: the checker proof beside the syntactic trace follows the local
+/// alias read through a type-only import. The proof stays scoped to the value
+/// declaration occupied by `helper`, while the root graph trace reports its
+/// type-lane credit.
 #[test]
-fn type_aware_trace_scopes_the_proof_that_misses_the_type_lane_credit() {
+fn type_aware_trace_proves_typeof_read_through_type_only_import() {
     let dir = tempfile::tempdir().expect("temporary project");
     let root = dir.path();
     write_type_only_import_probe(root);
@@ -1191,10 +1162,7 @@ fn type_aware_trace_scopes_the_proof_that_misses_the_type_lane_credit() {
         "the proof covers the declaration's own lane: {}",
         trace["semantic"]
     );
-    // Deliberate negative control: the sidecar does not credit a cross-lane
-    // import, so the proof is narrower than the graph here. It pins the known
-    // gap, not a behaviour this change introduces.
-    assert_eq!(trace["semantic"]["assertion"], "no-references-found");
+    assert_eq!(trace["semantic"]["assertion"], "references-found");
 
     let human = run_fallow_raw_with_type_aware_sidecar(&[
         "dead-code",
@@ -1208,9 +1176,65 @@ fn type_aware_trace_scopes_the_proof_that_misses_the_type_lane_credit() {
     ]);
     let stderr = redact_paths(&human.stderr, root);
     assert!(
-        stderr.contains("Type-aware proof: no-references-found (complete, value namespace only)"),
-        "the proof line names the lane it covers; stderr: {stderr}"
+        stderr.contains("Type-aware proof: references-found (complete)")
+            && stderr.contains("src/index.ts:2:23 (value-reference, Value)"),
+        "the proof lists the value read through the local alias; stderr: {stderr}"
     );
+}
+
+#[test]
+fn filtered_type_aware_dead_code_keeps_unreachable_only_export_evidence() {
+    let root = fixture_path("issue-2390-trace-consistency");
+    let root_arg = root.to_string_lossy();
+    let output = run_fallow_raw_with_type_aware_sidecar(&[
+        "dead-code",
+        "--root",
+        &root_arg,
+        "--type-aware",
+        "--unused-exports",
+        "--format",
+        "json",
+        "--quiet",
+        "--no-cache",
+    ]);
+
+    let report = parse_json(&output);
+    let helper = report["unused_exports"]
+        .as_array()
+        .expect("unused exports")
+        .iter()
+        .find(|finding| finding["path"] == "src/lonely.ts" && finding["export_name"] == "helper")
+        .unwrap_or_else(|| {
+            panic!("unreachable-only checker evidence must not hide helper: {report}")
+        });
+    assert_eq!(helper["semantic"]["decision"], "retained-abstained");
+}
+
+#[test]
+fn type_aware_trace_does_not_credit_an_unreachable_consumer() {
+    let root = fixture_path("issue-2390-trace-consistency");
+    let root_arg = root.to_string_lossy();
+    let output = run_fallow_raw_with_type_aware_sidecar(&[
+        "dead-code",
+        "--root",
+        &root_arg,
+        "--trace",
+        "src/lonely.ts:helper",
+        "--type-aware",
+        "--format",
+        "json",
+        "--quiet",
+        "--no-cache",
+    ]);
+
+    let trace = parse_json(&output);
+    assert_eq!(trace["is_used"], false);
+    assert_eq!(
+        trace["semantic"]["assertion"],
+        "references-only-in-unreachable-files"
+    );
+    assert_eq!(trace["semantic"]["status"], "partial");
+    assert_eq!(trace["semantic"]["references"][0]["path"], "src/orphan.ts");
 }
 
 fn combined_root_diagnostics_of_kind(
@@ -1716,15 +1740,10 @@ fn combined_json_root_carries_a_diagnostic_only_the_dupes_walk_recorded() {
     assert_eq!(skipped[0]["path"], "src/huge.test.ts");
 }
 
-/// Issue #2366: each analysis contributes the workspace-discovery list ITS OWN
-/// config load produced, which is the list `fallow list --workspaces` reports.
-/// That makes the combined root the only analysis envelope in agreement with
-/// the workspace listing: the standalone `dead-code` / `check` / `health` /
-/// `dupes` envelopes read the process diagnostics registry, which a later
-/// re-stash in the same run can leave without the entry. Pin only the
-/// agreement, so closing that separate registry-read gap does not break this.
-#[test]
-fn combined_json_root_agrees_with_the_workspace_listing_on_undeclared_workspaces() {
+/// Issues #2366 and #2396: every standalone analysis envelope carries the
+/// workspace-discovery list captured by its own run, matching both the
+/// workspace listing and the combined root.
+fn undeclared_workspace_fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("packages/inner/src")).expect("create inner package");
     std::fs::create_dir_all(dir.path().join("src")).expect("create src");
@@ -1745,6 +1764,28 @@ fn combined_json_root_agrees_with_the_workspace_listing_on_undeclared_workspaces
         "export const inner = 2;\n",
     )
     .expect("write inner source");
+    dir
+}
+
+fn assert_undeclared_workspace_diagnostic(output: &serde_json::Value, context: &str) {
+    let diagnostics = output["workspace_diagnostics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|diagnostic| diagnostic["kind"] == "undeclared-workspace")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "{context}: {}",
+        output["workspace_diagnostics"]
+    );
+    assert_eq!(diagnostics[0]["path"], "packages/inner");
+}
+
+#[test]
+fn analysis_envelopes_agree_with_the_workspace_listing_on_undeclared_workspaces() {
+    let dir = undeclared_workspace_fixture();
     let root = dir.path().to_str().expect("temp path is UTF-8");
 
     let listing = parse_json(&run_fallow_raw(&[
@@ -1756,20 +1797,10 @@ fn combined_json_root_agrees_with_the_workspace_listing_on_undeclared_workspaces
         "json",
         "--quiet",
     ]));
-    let listed: Vec<serde_json::Value> = listing["workspace_diagnostics"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|diagnostic| diagnostic["kind"] == "undeclared-workspace")
-        .collect();
-    assert_eq!(
-        listed.len(),
-        1,
-        "the workspace listing reports the undeclared package: {}",
-        listing["workspace_diagnostics"]
+    assert_undeclared_workspace_diagnostic(
+        &listing,
+        "the workspace listing reports the undeclared package",
     );
-    assert_eq!(listed[0]["path"], "packages/inner");
 
     let combined = parse_json(&run_fallow_raw(&[
         "--root",
@@ -1779,14 +1810,64 @@ fn combined_json_root_agrees_with_the_workspace_listing_on_undeclared_workspaces
         "--quiet",
         "--no-cache",
     ]));
-    let undeclared = combined_root_diagnostics_of_kind(&combined, "undeclared-workspace");
-    assert_eq!(
-        undeclared.len(),
-        1,
-        "the combined root reports what the workspace listing reports: {}",
-        combined["workspace_diagnostics"]
+    assert_undeclared_workspace_diagnostic(
+        &combined,
+        "the combined root reports what the workspace listing reports",
     );
-    assert_eq!(undeclared[0]["path"], "packages/inner");
+
+    for command in ["dead-code", "check", "health", "dupes"] {
+        let output = parse_json(&run_fallow_raw(&[
+            command,
+            "--root",
+            root,
+            "--format",
+            "json",
+            "--quiet",
+            "--no-cache",
+        ]));
+        assert_undeclared_workspace_diagnostic(
+            &output,
+            &format!("{command} reports the run-owned undeclared workspace"),
+        );
+    }
+
+    for command in [
+        vec![
+            "security",
+            "--root",
+            root,
+            "--format",
+            "json",
+            "--quiet",
+            "--no-cache",
+        ],
+        vec![
+            "security",
+            "--root",
+            root,
+            "--summary",
+            "--format",
+            "json",
+            "--quiet",
+            "--no-cache",
+        ],
+        vec![
+            "security",
+            "--root",
+            root,
+            "--no-cache",
+            "blind-spots",
+            "--format",
+            "json",
+            "--quiet",
+        ],
+    ] {
+        let output = parse_json(&run_fallow_raw(&command));
+        assert_undeclared_workspace_diagnostic(
+            &output,
+            "security-family output reports its run-owned diagnostic",
+        );
+    }
 }
 
 /// Issue #2366: two overlapping workspace globs (`["pkgs/*", "pkgs/a*"]`, the

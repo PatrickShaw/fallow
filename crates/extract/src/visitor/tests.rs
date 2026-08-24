@@ -5887,6 +5887,80 @@ fn import_default() {
 }
 
 #[test]
+fn default_import_whole_object_handoffs_are_distinct_from_member_accesses() {
+    let info = parse(
+        "import direct from './direct';\n\
+         import { default as aliased } from './aliased';\n\
+         direct.used;\n\
+         aliased.used;\n\
+         hand(direct);\n\
+         hand(aliased);",
+    );
+
+    for local_name in ["direct", "aliased"] {
+        assert!(
+            info.member_accesses
+                .iter()
+                .any(|access| access.object == local_name && access.member == "used"),
+            "the precise member access must remain available for {local_name}"
+        );
+        assert!(
+            info.semantic_facts.iter().any(|fact| matches!(
+                fact,
+                SemanticFact::DefaultImportWholeObjectUse(use_fact)
+                    if use_fact.local_name == local_name
+            )),
+            "the bare handoff must be recorded separately for {local_name}"
+        );
+    }
+
+    let precise_only = parse("import value from './value'; value.used;");
+    assert!(precise_only.semantic_facts.iter().all(|fact| !matches!(
+        fact,
+        SemanticFact::DefaultImportWholeObjectUse(use_fact)
+            if use_fact.local_name == "value"
+    )));
+}
+
+#[test]
+fn shadowed_default_import_name_does_not_record_object_usage() {
+    let info = parse(
+        "import value from './value';\n\
+         function inspect(value) {\n\
+           const { shadowedDestructure } = value;\n\
+           return [hand(value), value.shadowedMember, shadowedDestructure];\n\
+         }\n\
+         function inspectHoisted() {\n\
+           hand(value);\n\
+           value.hoistedMember;\n\
+           function value() {}\n\
+           return value;\n\
+         }\n\
+         value.used;\n\
+         inspect({ shadowedDestructure: 1, shadowedMember: 2 });\n\
+         inspectHoisted();",
+    );
+
+    assert!(info.semantic_facts.iter().all(|fact| !matches!(
+        fact,
+        SemanticFact::DefaultImportWholeObjectUse(use_fact)
+            if use_fact.local_name == "value"
+    )));
+    assert!(
+        info.member_accesses
+            .iter()
+            .any(|access| access.object == "value" && access.member == "used")
+    );
+    assert!(info.member_accesses.iter().all(|access| {
+        access.object != "value"
+            || !matches!(
+                access.member.as_str(),
+                "shadowedMember" | "shadowedDestructure" | "hoistedMember"
+            )
+    }));
+}
+
+#[test]
 fn css_module_default_import_destructure_records_member_accesses() {
     let info = parse(
         "import styles from './Card.module.css';\n\
@@ -6534,6 +6608,48 @@ fn cjs_module_exports_object_keys() {
     let info = parse("module.exports = { foo: 1, bar: 2, baz: 3 };");
     assert!(info.has_cjs_exports);
     assert_eq!(info.exports.len(), 3);
+    assert!(
+        info.semantic_facts
+            .contains(&SemanticFact::CjsSingleStaticObjectMap)
+    );
+}
+
+#[test]
+fn cjs_object_map_provenance_fails_closed_for_ambiguous_forms() {
+    for source in [
+        "exports.default = 1;",
+        "module.exports.default = 1;",
+        "module.exports = value;",
+        "module.exports = { default: 1 }; module.exports = { default: 2 };",
+        "module.exports = { default: 1 }; exports.extra = 2;",
+        "exports.extra = 2; module.exports = { default: 1 };",
+        "module.exports = { default: 1 }; module['exports'].extra = 2;",
+        "module.exports = { default: 1 }; module['exports'] = { other: 2 };",
+        "module.exports = { default: 1 }; exports['extra'] = 2;",
+        "module.exports += { default: 1 };",
+        "module.exports = { default: 1 }; module.exports.default++;",
+        "module.exports = { default: 1 }; delete module.exports.default;",
+        "module.exports = { default: 1 }; ({ extra: module.exports.extra } = source);",
+        "module.exports = { default: 1 }; [module.exports.extra] = source;",
+        "module.exports = { default: 1 }; [module.exports.extra = 1] = source;",
+        "module.exports = { default: 1 }; [...module.exports.extra] = source;",
+        "module.exports = { default: 1 }; (module.exports.extra as unknown) = 1;",
+        "module.exports = { default: 1 }; (module.exports as any).extra = 1;",
+        "module.exports = { default: 1 }; (module.exports as any)['extra'] = 1;",
+        "module.exports = { default: 1, ...extra };",
+        "module.exports = { ['default']: 1 };",
+        "module.exports = { default: 1, default: 2 };",
+        "function configure() { module.exports = { default: 1 }; }",
+        "Object.defineProperty(exports, '__esModule', { value: true }); module.exports = { default: 1 };",
+    ] {
+        let info = parse(source);
+        assert!(
+            !info
+                .semantic_facts
+                .contains(&SemanticFact::CjsSingleStaticObjectMap),
+            "ambiguous CommonJS form must not carry provenance: {source}"
+        );
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
-//! Detection of unused and misconfigured pnpm and npm dependency-override
-//! entries.
+//! Detection of unused and misconfigured pnpm, npm, and Bun
+//! dependency-override entries.
 //!
 //! pnpm supports forcing transitive dependency versions through two
 //! equivalent locations:
@@ -33,16 +33,16 @@
 //!    lockfile (`pnpm-lock.yaml`, `package-lock.json`, `npm-shrinkwrap.json`,
 //!    or `bun.lock`). Overrides targeting resolved transitive packages are
 //!    treated as used because CVE-fix pins often exist only in the lockfile.
-//!    When the only lockfile is bun's legacy binary `bun.lockb`, resolution
-//!    ground truth is unreadable, so no unused-override findings are emitted
-//!    at all rather than degrading to declaration-only analysis that would
-//!    flag every transitive-only pin. That skip is announced through a
-//!    `bun-lockb-override-resolution-skipped` workspace diagnostic anchored
-//!    at the root `package.json` (issue #2358).
+//!    When Bun resolution ground truth is unreadable because only the legacy
+//!    binary `bun.lockb` exists or the text `bun.lock` is malformed, no
+//!    unused-override findings are emitted rather than degrading to
+//!    declaration-only analysis that would flag every transitive-only pin.
+//!    A workspace diagnostic names the unreadable lockfile and the recovery
+//!    step.
 //!
 //! 2. **`misconfigured-dependency-overrides`**: an override whose key cannot
-//!    be parsed or whose value is empty. `pnpm install` refuses to honor
-//!    these entries; fallow surfaces the issue statically.
+//!    be parsed or whose value is empty. The active package manager may reject
+//!    or ignore these entries; fallow surfaces the issue statically.
 //!
 //! Suppression is config-only via `ignoreDependencyOverrides: [{ package,
 //! source? }]`. Inline suppression is structurally impossible because
@@ -57,7 +57,7 @@
 
 use fallow_config::{
     CompiledIgnoreDependencyOverrideRule, PackageJson, PnpmOverrideData, ResolvedConfig,
-    WorkspaceDiagnostic, WorkspaceDiagnosticKind, WorkspaceInfo,
+    WorkspaceDiagnostic, WorkspaceDiagnosticKind, WorkspaceInfo, append_workspace_diagnostics,
     override_misconfig_reason as parser_misconfig_reason, parse_bun_package_json_resolutions,
     parse_npm_package_json_overrides, parse_pnpm_package_json_overrides,
     parse_pnpm_workspace_overrides, record_workspace_diagnostics,
@@ -123,11 +123,9 @@ pub struct PnpmOverrideState {
     /// package specifiers, or dependency sections of any of those lockfiles.
     /// Includes transitive dependencies resolved by the package manager.
     lockfile_packages: FxHashSet<String>,
-    /// True when the only resolution source is bun's binary `bun.lockb`,
-    /// with no parseable text lockfile alongside it. Unused-override analysis
-    /// is skipped in that case because transitive resolution cannot be
-    /// established, and the skip is recorded as a workspace diagnostic.
-    lockfile_resolution_unavailable: bool,
+    /// Why bun resolution ground truth is unavailable, when unused-override
+    /// analysis must fail closed instead of offering unsafe removal advice.
+    lockfile_resolution_unavailable: Option<BunLockfileFailure>,
     /// Package-manager-appropriate hint attached to every unused-override
     /// finding, chosen from the root `package.json` `packageManager` field
     /// first and the lockfiles present at the root as fallback.
@@ -179,13 +177,28 @@ pub fn gather_pnpm_override_state(
     let manifest_declares_overrides = root_manifest
         .as_ref()
         .is_some_and(|manifest| manifest.get(OVERRIDES_KEY).is_some());
-    let bun_resolutions_data = match root_pkg_source.as_deref() {
-        Some(source)
-            if uses_bun(declared_manager, &config.root) && !manifest_declares_overrides =>
-        {
-            parse_bun_package_json_resolutions(source)
-        }
-        _ => PnpmOverrideData::default(),
+    let uses_bun = uses_bun(declared_manager, &config.root);
+    let parsed_bun_resolutions = root_pkg_source
+        .as_deref()
+        .filter(|_| uses_bun)
+        .map(parse_bun_package_json_resolutions)
+        .unwrap_or_default();
+    let bun_resolutions_shadowed =
+        manifest_declares_overrides && !parsed_bun_resolutions.entries.is_empty();
+    if bun_resolutions_shadowed {
+        record_override_diagnostics(
+            config,
+            vec![WorkspaceDiagnostic::new(
+                &config.root,
+                root_pkg_path,
+                WorkspaceDiagnosticKind::BunResolutionsShadowedByOverrides,
+            )],
+        );
+    }
+    let bun_resolutions_data = if manifest_declares_overrides {
+        PnpmOverrideData::default()
+    } else {
+        parsed_bun_resolutions
     };
 
     if workspace_yaml_data.entries.is_empty()
@@ -253,18 +266,24 @@ fn collect_declared_packages(
 /// plus the derived analysis knobs that depend on which lockfiles exist.
 struct LockfileResolution {
     packages: FxHashSet<String>,
-    resolution_unavailable: bool,
+    resolution_unavailable: Option<BunLockfileFailure>,
     transitive_hint: &'static str,
+}
+
+#[derive(Clone, Copy)]
+enum BunLockfileFailure {
+    Binary,
+    Text,
 }
 
 /// Parse `pnpm-lock.yaml`, `package-lock.json` / `npm-shrinkwrap.json`, and
 /// `bun.lock` and collect package names from resolved package keys plus
-/// dependency maps. Malformed or missing lockfiles degrade to an empty set,
-/// preserving the package.json-only fallback for projects without a lockfile.
-/// The one exception is bun's binary `bun.lockb` without any parseable text
-/// lockfile alongside it: resolution exists but is unreadable, so
-/// `resolution_unavailable` is set and callers skip the unused analysis
-/// instead of flagging every transitive-only override.
+/// dependency maps. Missing lockfiles preserve the package.json-only fallback.
+/// An unreadable Bun lockfile is different: a binary `bun.lockb`, or a text
+/// `bun.lock` that fails to parse, sets `resolution_unavailable` when no
+/// readable pnpm or npm lockfile provides independent resolution ground truth.
+/// Callers then skip unused analysis instead of flagging every transitive-only
+/// override.
 fn collect_lockfile_packages(
     config: &ResolvedConfig,
     declared_manager: Option<DeclaredPackageManager>,
@@ -287,15 +306,16 @@ fn collect_lockfile_packages(
         }
     }
 
-    let mut has_bun_lock = false;
-    let mut bun_lock_parsed = false;
-    if let Ok(raw_source) = std::fs::read_to_string(config.root.join(BUN_LOCK_FILE)) {
-        has_bun_lock = true;
-        if let Some(bun_packages) = collect_bun_lock_packages(&raw_source) {
-            packages.extend(bun_packages);
-            bun_lock_parsed = true;
-        }
-    }
+    let has_bun_lock = config.root.join(BUN_LOCK_FILE).exists();
+    let bun_lock_parsed = if let Ok(raw_source) =
+        std::fs::read_to_string(config.root.join(BUN_LOCK_FILE))
+        && let Some(bun_packages) = collect_bun_lock_packages(&raw_source)
+    {
+        packages.extend(bun_packages);
+        true
+    } else {
+        false
+    };
     let has_bun_lockb = config.root.join(BUN_LOCKB_FILE).exists();
     let has_yarn_lock = config.root.join(YARN_LOCK_FILE).exists();
 
@@ -315,10 +335,17 @@ fn collect_lockfile_packages(
         // A parseable pnpm or npm lockfile is complete resolution ground
         // truth on its own; a stale leftover bun.lockb must not silently
         // disable the analysis when one is present.
-        resolution_unavailable: has_bun_lockb
-            && !bun_lock_parsed
-            && !has_pnpm_lock
-            && !has_npm_lock,
+        resolution_unavailable: if !bun_lock_parsed && !has_pnpm_lock && !has_npm_lock {
+            if has_bun_lock {
+                Some(BunLockfileFailure::Text)
+            } else if has_bun_lockb {
+                Some(BunLockfileFailure::Binary)
+            } else {
+                None
+            }
+        } else {
+            None
+        },
         transitive_hint,
     }
 }
@@ -534,30 +561,46 @@ fn package_name_from_lock_key(raw_key: &str) -> Option<String> {
     Some(key[..name_end].to_string())
 }
 
-/// Record the skip diagnostic for a root where bun's binary `bun.lockb` is
-/// present and `collect_lockfile_packages` found no parseable text lockfile
-/// to use instead: the manifest declares overrides, but resolution ground
-/// truth is unreadable, so the unused-override check does not run. Reaches
-/// `workspace_diagnostics[]` JSON and one deduplicated stderr warning, the
-/// same channel as a malformed `pnpm-workspace.yaml`, so the absence of
-/// findings is explained instead of silent (issue #2358).
-fn report_bun_lockb_override_resolution_skipped(config: &ResolvedConfig) {
-    record_workspace_diagnostics(
-        &config.root,
-        vec![WorkspaceDiagnostic::new(
-            &config.root,
+/// Record the matching skip diagnostic when Bun resolution ground truth is
+/// unreadable and no pnpm or npm lockfile can replace it. Binary `bun.lockb`
+/// anchors the diagnostic at the manifest because the lockfile cannot be read;
+/// malformed text `bun.lock` anchors it at that file. Both reach
+/// `workspace_diagnostics[]` and one deduplicated stderr warning, so the
+/// absence of unused-override findings is explicit.
+fn report_bun_override_resolution_skipped(config: &ResolvedConfig, failure: BunLockfileFailure) {
+    let (path, kind) = match failure {
+        BunLockfileFailure::Binary => (
             config.root.join(ROOT_PACKAGE_JSON),
             WorkspaceDiagnosticKind::BunLockbOverrideResolutionSkipped,
-        )],
+        ),
+        BunLockfileFailure::Text => (
+            config.root.join(BUN_LOCK_FILE),
+            WorkspaceDiagnosticKind::BunLockOverrideResolutionSkipped,
+        ),
+    };
+    record_override_diagnostics(
+        config,
+        vec![WorkspaceDiagnostic::new(&config.root, path, kind)],
     );
+}
+
+fn record_override_diagnostics(config: &ResolvedConfig, diagnostics: Vec<WorkspaceDiagnostic>) {
+    if should_emit_override_warning(config) {
+        record_workspace_diagnostics(&config.root, diagnostics);
+    } else {
+        append_workspace_diagnostics(&config.root, diagnostics);
+    }
+}
+
+fn should_emit_override_warning(config: &ResolvedConfig) -> bool {
+    !config.analysis_snapshot.is_base()
 }
 
 /// Emit one `UnusedDependencyOverride` for every parseable override whose
 /// target package (and parent, when present) is not declared in any workspace
 /// `package.json` or resolved in any recognized lockfile. When resolution is
-/// unavailable (bun.lockb without a parseable text lockfile beside it), emits
-/// nothing and records the `bun-lockb-override-resolution-skipped` workspace
-/// diagnostic instead.
+/// unavailable because Bun lockfile data is unreadable, emits nothing and
+/// records the matching workspace diagnostic instead.
 #[must_use]
 #[deprecated(
     since = "2.76.0",
@@ -567,8 +610,8 @@ pub fn find_unused_dependency_overrides(
     state: &PnpmOverrideState,
     config: &ResolvedConfig,
 ) -> Vec<UnusedDependencyOverride> {
-    if state.lockfile_resolution_unavailable {
-        report_bun_lockb_override_resolution_skipped(config);
+    if let Some(failure) = state.lockfile_resolution_unavailable {
+        report_bun_override_resolution_skipped(config, failure);
         return Vec::new();
     }
 
@@ -1113,6 +1156,31 @@ mod tests {
     }
 
     #[test]
+    fn malformed_text_bun_lock_fails_closed_with_a_diagnostic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        write_bun_manifest(root, Some(r#"{ "transitive-only": "^1.0.0" }"#));
+        std::fs::write(root.join(BUN_LOCK_FILE), "not valid json").expect("write bun.lock");
+        let config = resolve_config(root);
+
+        let findings = run_unused_override_detector(&config).expect("overrides are declared");
+        assert!(
+            findings.is_empty(),
+            "unreadable resolution must not produce removal advice"
+        );
+        assert!(
+            fallow_config::workspace_diagnostics_for(root)
+                .iter()
+                .any(|diagnostic| {
+                    matches!(
+                        diagnostic.kind,
+                        fallow_config::WorkspaceDiagnosticKind::BunLockOverrideResolutionSkipped
+                    )
+                })
+        );
+    }
+
+    #[test]
     fn bun_lockb_next_to_text_bun_lock_resolves_and_records_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
@@ -1159,19 +1227,35 @@ mod tests {
                 findings.is_empty(),
                 "{sibling} next to bun.lockb does not restore resolution: {findings:?}"
             );
-            let diagnostics = bun_lockb_skip_diagnostics(root);
+            let diagnostics: Vec<_> = fallow_config::workspace_diagnostics_for(root)
+                .into_iter()
+                .filter(|diagnostic| {
+                    matches!(
+                        diagnostic.kind,
+                        fallow_config::WorkspaceDiagnosticKind::BunLockbOverrideResolutionSkipped
+                            | fallow_config::WorkspaceDiagnosticKind::BunLockOverrideResolutionSkipped
+                    )
+                })
+                .collect();
             assert_eq!(
                 diagnostics.len(),
                 1,
                 "{sibling} next to bun.lockb still skips and announces it: {diagnostics:?}"
             );
             let message = &diagnostics[0].message;
-            assert!(
-                !message.contains("only bun.lockb")
-                    && message.contains("no parseable text lockfile")
-                    && message.contains("delete the stale bun.lockb"),
-                "message describes the real condition and offers the stale-lockb exit: {message}"
-            );
+            if sibling == YARN_LOCK_FILE {
+                assert!(
+                    !message.contains("only bun.lockb")
+                        && message.contains("no parseable text lockfile")
+                        && message.contains("delete the stale bun.lockb"),
+                    "message describes the binary-lock condition: {message}"
+                );
+            } else {
+                assert!(
+                    message.contains("could not be parsed") && message.contains("regenerate"),
+                    "message describes the malformed text lockfile: {message}"
+                );
+            }
         }
     }
 
@@ -1250,6 +1334,59 @@ mod tests {
 
     const RESOLUTIONS_WS_AND_LEFT_PAD: &str = r#"{ "ws": "^8.21.0", "left-pad": "^1.3.0" }"#;
     const RESOLUTIONS_LEFT_PAD: &str = r#"{ "left-pad": "^1.3.0" }"#;
+
+    #[test]
+    fn bun_nonempty_resolutions_shadowed_by_overrides_are_diagnostic_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        write_manifest(
+            root,
+            Some("bun@1.3.2"),
+            Some(r#"{ "ws": "^8.21.0" }"#),
+            Some(RESOLUTIONS_LEFT_PAD),
+        );
+        let config = resolve_config(root);
+
+        let findings = run_unused_override_detector(&config).expect("overrides are declared");
+        assert_eq!(flagged_targets(&findings), vec!["ws"]);
+        assert!(
+            fallow_config::workspace_diagnostics_for(root)
+                .iter()
+                .any(|diagnostic| {
+                    matches!(
+                        diagnostic.kind,
+                        fallow_config::WorkspaceDiagnosticKind::BunResolutionsShadowedByOverrides
+                    )
+                })
+        );
+    }
+
+    #[test]
+    fn base_snapshot_keeps_override_diagnostic_structured_without_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        write_manifest(
+            root,
+            Some("bun@1.3.2"),
+            Some(r#"{ "ws": "^8.21.0" }"#),
+            Some(RESOLUTIONS_LEFT_PAD),
+        );
+        let mut config = resolve_config(root);
+        config.analysis_snapshot = fallow_config::AnalysisSnapshot::Base;
+
+        assert!(!should_emit_override_warning(&config));
+        let _ = run_unused_override_detector(&config);
+        assert!(
+            fallow_config::workspace_diagnostics_for(root)
+                .iter()
+                .any(|diagnostic| {
+                    matches!(
+                        diagnostic.kind,
+                        fallow_config::WorkspaceDiagnosticKind::BunResolutionsShadowedByOverrides
+                    )
+                })
+        );
+    }
 
     #[test]
     fn bun_resolutions_only_next_to_bun_lockb_records_skip_diagnostic_once() {

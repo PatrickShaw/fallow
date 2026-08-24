@@ -1020,6 +1020,7 @@ pub fn execute_check(opts: &CheckOptions<'_>) -> Result<CheckResult, ExitCode> {
         }
         return Err(code);
     }
+    let unfiltered_unused_files = data.results.unused_files.clone();
 
     apply_scope_filters(
         opts,
@@ -1063,6 +1064,8 @@ pub fn execute_check(opts: &CheckOptions<'_>) -> Result<CheckResult, ExitCode> {
                 &data.workspaces,
             )
         });
+        let reported_unused_files =
+            std::mem::replace(&mut data.results.unused_files, unfiltered_unused_files);
         let outcome = fallow_api::refine_type_aware_results_with_config(
             &config,
             &mut data.results,
@@ -1071,8 +1074,9 @@ pub fn execute_check(opts: &CheckOptions<'_>) -> Result<CheckResult, ExitCode> {
             include_symbol_use,
             config.rules.private_type_leaks != Severity::Off,
             opts.retain_modules_for_health,
-        )
-        .map_err(|error| {
+        );
+        data.results.unused_files = reported_unused_files;
+        let outcome = outcome.map_err(|error| {
             emit_error(
                 &format!("Type-aware analysis failed: {error}"),
                 2,
@@ -1185,6 +1189,7 @@ pub fn benchmark_dead_code_json(
         regression: result.regression.as_ref(),
         baseline_matched: result.baseline_matched,
         config_fixable: result.config_fixable,
+        workspace_diagnostics: &result.workspace_diagnostics,
         json_style: crate::json_style::JsonStyle::Compact,
     })
     .map_err(|_| ExitCode::from(2))?;
@@ -1245,6 +1250,7 @@ fn prepare_print_check(result: &CheckResult, opts: PrintCheckOptions) -> Prepare
         report_ctx: report::ReportContext {
             root: &result.config.root,
             rules: &result.config.rules,
+            workspace_diagnostics: &result.workspace_diagnostics,
             elapsed: result.elapsed,
             quiet: opts.quiet,
             explain: opts.explain,

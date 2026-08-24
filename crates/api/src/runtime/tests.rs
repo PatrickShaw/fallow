@@ -62,6 +62,84 @@ fn analysis_at(root: &Path) -> AnalysisOptions {
     }
 }
 
+#[test]
+fn metadata_and_dupes_do_not_inherit_analysis_stage_diagnostics() {
+    let project = tempfile::tempdir().expect("project");
+    let root = project.path();
+    std::fs::create_dir_all(root.join("src")).expect("create src");
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"diagnostic-ownership","main":"src/index.ts","overrides":{"ws":"^8"}}"#,
+    )
+    .expect("write package");
+    std::fs::write(root.join("bun.lockb"), "binary lock placeholder").expect("write lockb");
+    std::fs::write(root.join("src/index.ts"), "export const value = 1;\n").expect("write source");
+    let analysis = analysis_at(root);
+
+    let analyzed = dead_code_json(&DeadCodeOptions {
+        analysis: analysis.clone(),
+        ..DeadCodeOptions::default()
+    })
+    .expect("dead-code analysis");
+    assert!(has_diagnostic_kind(
+        &analyzed,
+        "bun-lockb-override-resolution-skipped"
+    ));
+
+    let project_info = crate::serialize_project_info_programmatic_json(
+        crate::run_project_info(&crate::ProjectInfoOptions {
+            analysis: analysis.clone(),
+            ..crate::ProjectInfoOptions::default()
+        })
+        .expect("project info"),
+    )
+    .expect("project info json");
+    assert!(!has_diagnostic_kind(
+        &project_info,
+        "bun-lockb-override-resolution-skipped"
+    ));
+
+    let dupes = duplication_json(&DuplicationOptions {
+        analysis,
+        ..DuplicationOptions::default()
+    })
+    .expect("dupes");
+    assert!(!has_diagnostic_kind(
+        &dupes,
+        "bun-lockb-override-resolution-skipped"
+    ));
+}
+
+fn has_diagnostic_kind(output: &serde_json::Value, kind: &str) -> bool {
+    output["workspace_diagnostics"]
+        .as_array()
+        .is_some_and(|diagnostics| {
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic["kind"] == kind)
+        })
+}
+
+#[test]
+fn health_engine_message_keeps_structured_programmatic_details() {
+    let error = programmatic_health_error(
+        "health",
+        fallow_engine::health::HealthError::Message {
+            message: "coverage: failed to parse coverage data from artifacts/coverage-final.json"
+                .to_string(),
+            exit_code: 2,
+        },
+    );
+
+    assert_eq!(
+        error.message,
+        "coverage: failed to parse coverage data from artifacts/coverage-final.json"
+    );
+    assert_eq!(error.exit_code, 2);
+    assert_eq!(error.code.as_deref(), Some("FALLOW_HEALTH_FAILED"));
+    assert_eq!(error.context.as_deref(), Some("fallow health"));
+}
+
 fn canonical_root(root: &Path) -> PathBuf {
     dunce::canonicalize(root).expect("canonical root")
 }
@@ -200,11 +278,10 @@ fn run_combined_returns_typed_sections_before_json() {
 /// diagnostics its run recorded even when the dead-code section is switched
 /// off, the way the CLI's `--skip check` and `--only health` do.
 ///
-/// The health run records them inside its own dead-code precompute, AFTER
-/// `HealthProgrammaticOutput::workspace_diagnostics` was captured, so the
-/// section lists alone come back empty and only the closing registry leg sees
-/// the entry. Each case gets its own project root because the diagnostics
-/// registry is process-wide and keyed on the root.
+/// The health run captures diagnostics after its own dead-code precompute, so
+/// the section-owned lists are sufficient and the combined serializer does not
+/// need to reread process-global history. Each case gets its own project root
+/// to keep the analysis inputs independent.
 #[test]
 fn combined_programmatic_json_carries_diagnostics_without_a_dead_code_section() {
     for (name, dead_code, duplication) in [

@@ -187,7 +187,14 @@ pub use store::GraphCacheStore;
 /// CommonJS namespace import edge, and the references it credits are baked into
 /// the persisted graph. Warm 42 caches hold the module without that edge, so
 /// the target would stay reported as an unused file on upgrade.
-pub const GRAPH_CACHE_VERSION: u32 = 43;
+///
+/// Bumped to 44 for issue #2375: `export type *` inside a `declare module`
+/// body now carries a type-only-star symbol edge instead of a file-level star
+/// re-export, and the type-lane-only credit it hands the target is baked into
+/// the persisted graph. Warm 43 caches hold the re-export edge, the laundered
+/// entry surface, and the value-lane credits, and a graph-cache hit skips the
+/// build entirely.
+pub const GRAPH_CACHE_VERSION: u32 = 44;
 
 /// Cached form of a resolved target.
 ///
@@ -373,6 +380,8 @@ pub struct CachedImportInfo {
     local_name: String,
     /// Whether this import is type-only.
     is_type_only: bool,
+    /// Whether this whole-module import only carries the target's type meanings.
+    is_type_only_star: bool,
     /// Whether this import originated from a style context.
     from_style: bool,
     /// Span of the full import declaration.
@@ -388,6 +397,7 @@ impl From<&ImportInfo> for CachedImportInfo {
             imported_name: info.imported_name.clone(),
             local_name: info.local_name.clone(),
             is_type_only: info.is_type_only,
+            is_type_only_star: info.is_type_only_star,
             from_style: info.from_style,
             span: span_to_pair(info.span),
             source_span: span_to_pair(info.source_span),
@@ -402,6 +412,7 @@ impl From<CachedImportInfo> for ImportInfo {
             imported_name: info.imported_name,
             local_name: info.local_name,
             is_type_only: info.is_type_only,
+            is_type_only_star: info.is_type_only_star,
             from_style: info.from_style,
             span: pair_to_span(info.span),
             source_span: pair_to_span(info.source_span),
@@ -1014,10 +1025,33 @@ mod tests {
             imported_name: fallow_types::extract::ImportedName::SideEffect,
             local_name: String::new(),
             is_type_only: false,
+            is_type_only_star: false,
             from_style: false,
             span: Span::new(0, 0),
             source_span: Span::new(0, 0),
         }
+    }
+
+    #[test]
+    fn cached_import_info_round_trip_keeps_every_field() {
+        // The resolver payload is replayed into a fresh graph build, so any
+        // field the mirror drops silently changes analysis behaviour behind a
+        // cache hit. Compare the debug rendering so a future field that is not
+        // mirrored fails here instead of in a warm-only output diff.
+        let original = ImportInfo {
+            source: "./impl".to_string(),
+            imported_name: fallow_types::extract::ImportedName::Namespace,
+            local_name: "ns".to_string(),
+            is_type_only: true,
+            is_type_only_star: true,
+            from_style: true,
+            span: Span::new(3, 41),
+            source_span: Span::new(17, 25),
+        };
+
+        let restored = ImportInfo::from(CachedImportInfo::from(&original));
+
+        assert_eq!(format!("{restored:?}"), format!("{original:?}"));
     }
 
     #[test]

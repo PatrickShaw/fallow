@@ -88,6 +88,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`export type *` inside a `declare module '...'` body no longer creates a
+  file-level star re-export on the declaring file** (Closes
+  [#2375](https://github.com/fallow-rs/fallow/issues/2375)). The
+  [#2357](https://github.com/fallow-rs/fallow/issues/2357) fix routed
+  `export *` and `export * as ns` inside an ambient body through a bindingless
+  whole-module import, but the `export type *` and `export type * as ns`
+  spellings kept the pre-existing type-only star re-export because that shape
+  carried no type modifier. Both spellings now take the same shape, flagged
+  type-only, and the graph credits the target's star surface in the type
+  namespace alone. The movement runs in both directions. On a reachable
+  non-entry shim (`declare module 'pkg' { export type * from './impl' }` in a
+  `.ts` file) nothing credited the target before, so the type half of a
+  same-name type and value pair reported even though the star forwards it:
+  **that false positive is gone, and so are the rows for the target's
+  value-only exports**, which the star forwards as well and which a consumer
+  can still reach through `typeof`, the same credit the ambient
+  `export type { x }` form has given since
+  [#2349](https://github.com/fallow-rs/fallow/issues/2349). On an entry-point
+  `.d.ts` the star laundered every target export into the entry's public
+  surface, so **the value half of a same-name pair reported nowhere and now
+  reports**. `export type *` forwards no `default`, exactly like the plain
+  star; `export type * as ns` exposes the namespace object in type space, so
+  it forwards `ns.default`. Plain `export *` and `export * as ns` inside an
+  ambient body are unchanged, and so are the ambient named re-export forms and
+  `import()` type references. Two more findings move into line with the plain
+  ambient star: a file whose ambient body only carries `export type *` no
+  longer takes part in a re-export cycle finding, and when the declaring file
+  is unreachable the target's own export rows report alongside the
+  unused-file rows. Known limitation: the value-meaning erasure reaches the
+  target's own exports only. Names the target re-exports through its own
+  `export *` or `export * as sub` chain are still credited in both
+  namespaces, exactly as the plain star credits them, so the value half of a
+  same-name type and value pair one hop behind the target stops reporting
+  while the same pair on the target keeps reporting. Warm caches invalidate
+  (`CACHE_VERSION` 279 to 280, `GRAPH_CACHE_VERSION` 43 to 44).
+
 - **A namespace import handed over whole (a call argument, a JSX attribute
   value, an alias, an initializer) now credits every export of its target**
   (Closes [#2377](https://github.com/fallow-rs/fallow/issues/2377)). The

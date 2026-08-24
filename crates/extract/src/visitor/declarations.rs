@@ -5,7 +5,8 @@
 
 use oxc_ast::ast::{
     Argument, BindingPattern, CallExpression, Declaration, Expression, ImportExpression,
-    TSEnumMemberName, TSModuleDeclarationName, VariableDeclarator,
+    TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclarationName, TSModuleReference,
+    VariableDeclarator,
 };
 
 use crate::{
@@ -96,7 +97,12 @@ impl ModuleInfoExtractor {
             Declaration::TSModuleDeclaration(module) => {
                 self.extract_module_declaration_export(module, is_type_only);
             }
-            _ => {}
+            Declaration::TSImportEqualsDeclaration(import_equals) => {
+                self.record_exported_import_equals(import_equals);
+            }
+            // `export declare global { ... }` augments the global scope; it
+            // declares no export of this file.
+            Declaration::TSGlobalDeclaration(_) => {}
         }
     }
 
@@ -316,7 +322,12 @@ impl ModuleInfoExtractor {
                     self.push_namespace_member(lit.value.to_string(), lit.span);
                 }
             },
-            _ => {}
+            Declaration::TSImportEqualsDeclaration(import_equals) => {
+                self.record_exported_import_equals(import_equals);
+            }
+            // `declare global { ... }` inside a namespace body augments the
+            // global scope; it contributes no namespace member.
+            Declaration::TSGlobalDeclaration(_) => {}
         }
     }
 
@@ -358,6 +369,7 @@ impl ModuleInfoExtractor {
                     source_span,
                     destructured_names: names,
                     local_name: None,
+                    is_type_only: false,
                 });
                 self.handled_require_spans.insert(call.span);
             }
@@ -370,10 +382,101 @@ impl ModuleInfoExtractor {
                     source_span,
                     destructured_names: Vec::new(),
                     local_name: Some(local),
+                    is_type_only: false,
                 });
                 self.handled_require_spans.insert(call.span);
             }
             _ => {}
+        }
+    }
+
+    /// Handle `import X = require('./y')`, the TypeScript spelling of a
+    /// CommonJS require binding. It records the same shape the
+    /// `BindingIdentifier` arm of [`Self::handle_require_declaration`] records
+    /// for `const X = require('./y')`: one non-destructured require call plus
+    /// the namespace binding name, so the target keeps its edge and `X.member`
+    /// narrows the target's exports the way a namespace import does (issue
+    /// #2365). The two paths run in parallel rather than one calling the other,
+    /// because a `TSExternalModuleReference` carries a `StringLiteral` where the
+    /// variable form carries a `CallExpression`; the `handled_require_spans`
+    /// insert is therefore deliberately absent, since `record_bare_require_call`
+    /// only ever sees call expressions.
+    ///
+    /// The binding is also recorded in `import_equals_bindings` so the semantic
+    /// pass classifies its type and value usage: without that, `X.SomeType` in
+    /// type position would leave the target's type exports uncredited.
+    ///
+    /// `import type X = require('./y')` is the one spelling TypeScript erases
+    /// completely: the emitted JavaScript holds no `require` call at all. It
+    /// keeps the edge, because the target is still a type-space reference, but
+    /// carries `is_type_only`, so dependency classification treats it the way
+    /// it treats `import type * as X from './y'` instead of claiming the
+    /// package is imported at runtime.
+    ///
+    /// `import X = Some.Namespace` names an entity declared in this file rather
+    /// than a module, so it records nothing.
+    pub(super) fn handle_import_equals_declaration(
+        &mut self,
+        decl: &TSImportEqualsDeclaration<'_>,
+    ) {
+        let TSModuleReference::ExternalModuleReference(reference) = &decl.module_reference else {
+            return;
+        };
+        let local = decl.id.name.to_string();
+        self.namespace_binding_names.push(local.clone());
+        self.import_equals_bindings.push(local.clone());
+        self.require_calls.push(RequireCallInfo {
+            source: reference.expression.value.to_string(),
+            // The `require('./y')` reference, matching the call span a
+            // `const X = require('./y')` declaration records.
+            span: reference.span,
+            source_span: reference.expression.span,
+            destructured_names: Vec::new(),
+            local_name: Some(local),
+            is_type_only: decl.import_kind.is_type(),
+        });
+    }
+
+    /// Credit the exported form, `export import X = require('./y')`, with a
+    /// whole-object use of its binding.
+    ///
+    /// The declaration hands the required module object to consumers the graph
+    /// cannot enumerate, exactly as `import * as X from './y'; export { X }`
+    /// does, so every export of the target is credited. Without it an entry
+    /// point that only re-exports the binding has no member access to narrow
+    /// with, `is_entry_with_no_access` fires, and every export of the target
+    /// turns into a false `unused-export` row (issues #2365, #2373).
+    ///
+    /// The credit is unconditional, matching the twin, which has no condition
+    /// either: `narrow_namespace_references` matches `whole_object_uses`
+    /// against the local name of an import edge of this same file, and a
+    /// file-level `import X = require(...)` owns that name outright, because a
+    /// second root binding of it is a TypeScript duplicate-identifier error.
+    /// The one shape that can still collide is a same-named require inside a
+    /// nested scope (`const X = require('./other')` in a function body), which
+    /// over-credits `./other`; that direction loses a finding and never invents
+    /// one, whereas withholding the credit reported every export of the real
+    /// target as unused.
+    ///
+    /// [`Self::push_whole_object_use`] deduplicates, so a whole-object use the
+    /// walk records for the same name (a genuine `Object.values(X)`) stays one
+    /// entry.
+    ///
+    /// The entity-name form stays out of scope: `export import X = Some.Ns`
+    /// aliases a local declaration, not a module.
+    ///
+    /// The namespace-body call site (`namespace N { export import X =
+    /// require('./x') }`) is defensive leniency only: TypeScript rejects that
+    /// spelling with TS1147, so no compiling project reaches it. The file-level
+    /// form is the one real code writes.
+    fn record_exported_import_equals(&mut self, decl: &TSImportEqualsDeclaration<'_>) {
+        if matches!(
+            &decl.module_reference,
+            TSModuleReference::ExternalModuleReference(_)
+        ) {
+            self.exported_import_equals_names
+                .push(decl.id.name.to_string());
+            self.push_whole_object_use(decl.id.name.to_string());
         }
     }
 

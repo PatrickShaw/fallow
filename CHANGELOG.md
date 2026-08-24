@@ -118,6 +118,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   many times is one entry. Warm caches invalidate (`CACHE_VERSION` 277 to 278,
   `GRAPH_CACHE_VERSION` 41 to 42).
 
+- **`import X = require('./x')` now records an import edge** (Closes
+  [#2365](https://github.com/fallow-rs/fallow/issues/2365)). The extractor had
+  no arm for a `TSImportEqualsDeclaration` with an external module reference,
+  so the TypeScript spelling of a CommonJS require produced no import at all:
+  the target was reported as an unused file and nothing reached through the
+  binding was credited. The declaration now records exactly what a
+  `const X = require('./x')` declaration records, so the target resolves
+  through the CommonJS mechanism, member accesses through `X` narrow the
+  target's exports the way a namespace import does, and a binding used as a
+  whole object (`Object.values(X)`) credits the full namespace object,
+  including the names the target only exposes through its own `export *`
+  chain. Narrowing covers both semantic spaces: the binding is classified for
+  type and value usage like a namespace import, so `X.SomeType` in an
+  annotation credits the target's type export instead of leaving it reported
+  as an unused type. `import type X = require('pkg')` is the one spelling
+  TypeScript erases completely, so it keeps the type-space edge but is never
+  read as a runtime import: a type-only devDependency stays out of
+  `dev-dependency-in-production`, matching `import type * as X from 'pkg'`.
+  A bare reference that hands the module object on (`register(X)`,
+  `const alias = X`, `return X`) credits every export the receiver can reach,
+  matching the namespace-import rule added in
+  [#2377](https://github.com/fallow-rs/fallow/issues/2377).
+  `export import X = require('./x')` additionally hands the module object to
+  consumers the graph cannot enumerate, so every export of the target keeps
+  its credit exactly as it does behind `import * as X from './x';
+  export { X }`, including on an entry point with no local member access
+  ([#2373](https://github.com/fallow-rs/fallow/issues/2373)) and whatever else
+  the file happens to bind under that name. The two spellings still differ in
+  one place, in the conservative direction: `export { X }` is an export row, so
+  a re-export nothing imports reports as an unused export, while the
+  import-equals binding records no export row and never does.
+  In the other direction a binding nothing references credits
+  nothing at all: TypeScript elides such a declaration, so the target keeps
+  every unused-export and unused-type row it earns, exactly as it does behind
+  an unreferenced `import * as X from './x'`. The edge still resolves, so the
+  target is a reachable file either way.
+  Repositories that use the form will see fewer unused-file and
+  unused-export findings, and the exports of a file that becomes reachable for
+  the first time are narrowed against the members the consumer writes, so a
+  sibling nothing accesses surfaces as an unused export where the unused-file
+  row used to stand in its place. Total finding count is not guaranteed to
+  decrease: the edge is visible to every check that reads imports, so an
+  import-equals whose specifier does not resolve now reports
+  `unresolved-import`, and a bare specifier no manifest lists reports
+  `unlisted-dependency`, exactly as the equivalent `import X from './x'`
+  already did. `import X = Some.Namespace` is deliberately unchanged: an
+  entity-name reference aliases a binding declared in the same file, not a
+  module, so it records no edge. Warm caches invalidate (extract
+  `CACHE_VERSION` 278 to 279, `GRAPH_CACHE_VERSION` 42 to 43); the first run
+  after upgrading performs one cold re-analysis.
+
 - **A `default` import or re-export specifier now credits the target's default
   export** (Closes
   [#2374](https://github.com/fallow-rs/fallow/issues/2374)). `default` is one

@@ -355,6 +355,23 @@ pub(crate) struct ModuleInfoExtractor {
     /// is precise, so a bare reference to the root is what hands the namespace
     /// object on. See issue #2377.
     object_literal_namespace_placements: Vec<(String, String)>,
+    /// Local bindings introduced by `import X = require('./y')`. The require
+    /// path records them outside `imports`, but the binding lives in both the
+    /// type and the value namespace exactly like an ESM namespace import, so
+    /// the semantic pass classifies them alongside `imports` and `X.Member`
+    /// narrows the target's type exports too (issue #2365).
+    ///
+    /// Classification reads the root scope only, the same restriction the
+    /// `imports` loop next to it has: a binding declared inside a `declare
+    /// module '...'` body is not classified and stays value-only, exactly as
+    /// an `import * as X` binding in that position does.
+    pub(crate) import_equals_bindings: Vec<String>,
+    /// Names declared by `export import X = require('./y')`. The walk credits
+    /// each one with a whole-object use as it records it, the same credit
+    /// `export { X }` earns for a namespace import. The list exempts them from
+    /// the unused-import-binding verdict: the exported form is the file's
+    /// public API and has no local reference by construction.
+    pub(crate) exported_import_equals_names: Vec<String>,
     binding_target_names: FxHashMap<String, BindingTarget>,
     /// The class each binding name most recently named at this point in the walk,
     /// never poisoned to `Ambiguous`. `binding_target_names` is module-flat, so a

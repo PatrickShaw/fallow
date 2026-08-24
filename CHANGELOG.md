@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.18.0] - 2026-08-25
+
 ### Added
 
 - **A repo whose root `package.json` declares overrides next to bun's legacy
@@ -69,6 +71,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Machine-readable capability metadata now derives supported output formats,
+  aliases, and public exit codes from the CLI definitions.** `fallow schema`,
+  the packaged capability manifest, public adapters, and agent guidance now
+  share the same contract and are guarded against drift.
+
+- **Trace JSON now omits redundant per-namespace reference evidence when only
+  one namespace has consumers.** The existing `namespace` and
+  `direct_references` fields retain their meaning, while
+  `direct_references_by_namespace` remains available when both the type and
+  value lanes carry distinct evidence. This reduces serialization work and
+  made the stable trace graph benchmark roughly 46 percent faster in local
+  WallTime measurements, with the matching CodSpeed simulation also improving.
+
 - **Extension publication now verifies every public target before a release can
   complete.** Visual Studio Marketplace and Open VSX use isolated publisher
   jobs, while a credential-free gate downloads and validates the exact
@@ -94,7 +109,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching `_generated` exclusions and special Convex entry files. Missing,
   malformed, empty, or escaping values keep the safe default. Projects using a
   custom root will no longer report those runtime modules as unused files;
-  files outside that root remain eligible for unused-file findings.
+  files outside that root remain eligible for unused-file findings. Thanks to
+  [@pierre-H](https://github.com/pierre-H) for reporting the gap.
+
+- **Inline GitHub and GitLab review findings now follow explicit discussion
+  lifecycles** ([#2370](https://github.com/fallow-rs/fallow/pull/2370)). Clean
+  reruns do not repeat resolution replies, while a genuine recurrence opens a
+  fresh reviewable lifecycle. Provider identity, pagination, and mutation
+  mismatches fail closed. Thanks to [@Jerc92](https://github.com/Jerc92) for
+  the contribution.
+
+- **Windows npm launcher verification now covers every production path**
+  ([#2289](https://github.com/fallow-rs/fallow/pull/2289)). Host-independent
+  fixtures exercise lazy verification and sentinel cache behavior in regular
+  CI and release validation. Thanks to
+  [@NgoQuocViet2001](https://github.com/NgoQuocViet2001) for the groundwork in
+  [#2288](https://github.com/fallow-rs/fallow/pull/2288).
 
 - **Dead-code traces, symbol impact, and type-aware proof now agree on
   namespace, reachability, and ambiguity** (Closes
@@ -125,6 +155,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine error, and project/list/dupe routes no longer inherit analysis-stage
   diagnostics from earlier calls in the same process. The generated Code Mode
   description now identifies the actual subprocess-backed tools.
+
+- **Typed MCP analysis no longer stalls while assembling next-step facts on
+  Windows.** Engine-owned Git probes now detach from protocol stdin instead of
+  retaining the long-lived MCP input handle. Analyze and health keep their
+  existing thread selection and output contracts while fresh MCP processes can
+  return the first response normally.
 
 - **MDX statement extraction now shares one source-mapped TSX stream across
   dead-code and duplication analysis** (Closes
@@ -226,11 +262,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`const api = { NS }` plus `api.NS.member`, the shape the namespace-object
   alias phase follows precisely). A bare reference to that local
   (`hand(api)`) now hands the namespace on as well. `export { NS }` is
-  unchanged: the graph already credits every export there. The rule is scoped
-  to `import * as` locals, so named imports, and namespace objects bound by
-  `require` or a dynamic import, keep the behavior they had. Since Astro and
-  MDX consumers got this guarantee from their whole-file completeness guard,
-  only `.ts` / `.tsx` / `.js` / `.jsx` consumers change. **Repositories using
+  unchanged: the graph already credits every export there. This initial rule
+  is scoped to `import * as` locals; the later namespace-equivalence fix in
+  this release extends the same whole-object credit to namespace objects bound
+  by `require` or a dynamic import. Named imports remain unchanged. Since
+  Astro and MDX consumers got this guarantee from their whole-file
+  completeness guard, only `.ts` / `.tsx` / `.js` / `.jsx` consumers change.
+  **Repositories using
   any of these shapes will see fewer unused-export findings**, and an export
   credited for the first time also becomes reachable, so member-level
   detectors can report on it where the unused-export finding used to stand in
@@ -511,15 +549,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unreferenced export still reports `is_used: false`; and a same-name
   `export type Foo` next to `export const Foo` keeps the value export on
   `value` and unused under a type-only import, because the import credits the
-  type declaration and `dead-code` reports the value one. A declaration merge
-  that splits across lanes, such as an `interface` next to a same-name
-  `class`, also keeps the preferred lane and can still trace as unused while
-  `dead-code` credits the class through the merge; a merge that stays one
-  binding, such as a `class` next to a same-name `namespace`, is covered. The
+  type declaration and `dead-code` reports the value one. Declaration merges
+  across lanes now resolve through declaration-safe evidence, so trace and
+  dead-code agree while distinct same-name declarations remain isolated. The
   `namespace` field may therefore now be `type` for a value export. `is_used`
-  keeps following the listed references only, so an export in an unreachable
-  file can still read `is_used: true` next to `file_reachable: false`, which
-  is how the value lane already behaved. Every consumer of the export trace
+  follows reachable references only, so consumers in unreachable files no
+  longer make trace disagree with dead-code. Every consumer of the export trace
   inherits the correction: the `trace_export` MCP tool, the typed API, the
   `trace_symbol` root trace, and `fallow inspect --symbol` (both its
   `identity.is_used` / `identity.reason` and its `evidence.trace_export`
@@ -530,14 +565,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `owner_is_used`, `owner_direct_references` and the reason string describe
   the crediting lane, the payload gains an additive `owner_namespace` naming
   that lane, and the human trace prints an `Owner namespace:` line. Under
-  `--type-aware` the checker proof printed beside either trace still covers
-  only the lane the declaration itself occupies, so it can report
-  `no-references-found` for a credit the root trace lists;
-  `semantic.target.namespace` names the lane the proof covers, the human
-  proof line appends that lane (`value namespace only`) when such a proof
-  lists no references of its own, and the `_meta.field_definitions.semantic`
-  note plus the `trace_symbol` tool description now say that a root trace
-  listing a reference the proof omits is the wider evidence, not a stale one.
+  `--type-aware`, checker proof follows declaration-safe lanes and rejects
+  unreachable or re-export-only evidence, so it no longer contradicts the
+  dead-code verdict. `semantic.target.namespace` continues to name the lane
+  covered by the proof.
   No cache version changed: the trace is a read-only query over the graph, so
   a warm `.fallow` directory written by a previous release returns the
   corrected trace.
@@ -569,14 +600,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a test file the production health walk never looks at. For the
   source-discovery and analysis-stage kinds on a run whose analyses share one
   mode, the array is exactly what the standalone `dead-code` envelope carries,
-  in the same order. For the workspace-discovery kinds it can be BROADER: each
-  analysis contributes the list its own config load produced, the same list
-  `fallow list --workspaces` and the MCP `project_info` tool report, while the
-  standalone `dead-code`, `check`, `health`, and `dupes` envelopes read the
-  process diagnostics registry and can miss an `undeclared-workspace` or
-  `glob-matched-no-package-json` entry those two commands do report. That gap
-  in the standalone envelopes predates this change and is unchanged by it; the
-  combined root simply no longer inherits it. The carrier is the envelope root
+  in the same order. For workspace-discovery kinds, each analysis contributes
+  the run-owned list produced by its config load. Standalone envelopes now use
+  their own run-owned list too, while the combined array can remain broader
+  when its analyses intentionally use different production modes because it is
+  their union. The carrier is the envelope root
   rather than a section, so a run that drops a section (`--skip check`,
   `--only health`, `--only dupes`) reports every diagnostic its analyses
   recorded instead of dropping them while stderr warns. The `check`, `dupes`,
@@ -814,10 +842,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured coverage file that does not exist fails audit with the same
   structured exit 2 as `fallow health`, and a relative `health.coverageRoot`
   is rejected with the same `--coverage-root expects an absolute path`
-  exit 2. The MCP `audit` and `check_health` tools are unchanged: their typed
-  route reads only the explicit `coverage` / `coverage_root` parameters and
-  consults the config keys only when a call falls back to the CLI; routing
-  that route through the same precedence is tracked as a follow-up.
+  exit 2. The MCP `audit` and `check_health` typed routes now apply the same
+  explicit, environment, and config precedence through the programmatic parity
+  fix later in this release.
 
 - **Inner `export` declarations of a namespace declared without the `export`
   keyword are no longer reported as unused exports of the containing file**
@@ -6789,7 +6816,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.17.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.18.0...HEAD
+[3.18.0]: https://github.com/fallow-rs/fallow/compare/v3.17.0...v3.18.0
 [3.17.0]: https://github.com/fallow-rs/fallow/compare/v3.16.0...v3.17.0
 [3.16.0]: https://github.com/fallow-rs/fallow/compare/v3.15.0...v3.16.0
 [3.15.0]: https://github.com/fallow-rs/fallow/compare/v3.14.0...v3.15.0

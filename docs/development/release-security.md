@@ -1,7 +1,7 @@
 # Release security
 
-Use this reference when editing `.github/workflows/release.yml` or the release
-workflow skill. The maintainer dispatches the workflow against the signed
+Use this reference when editing `.github/workflows/release.yml` or
+`release-procedure.md`. The maintainer dispatches the workflow against the signed
 release commit while the version tag is still absent. The workflow never
 creates, moves, or publishes Git tags or GitHub Releases.
 

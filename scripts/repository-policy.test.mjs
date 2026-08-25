@@ -272,7 +272,7 @@ test("VS Code public release verification stays exact and credential-free", () =
   const verifier = readFileSync("scripts/vscode-public-verify.mjs", "utf8");
   const verifierTests = readFileSync("scripts/vscode-public-verify.test.mjs", "utf8");
   const releaseSecurity = readFileSync("docs/development/release-security.md", "utf8");
-  const releaseSkill = readFileSync(".agents/skills/release/SKILL.md", "utf8");
+  const releaseProcedure = readFileSync("docs/development/release-procedure.md", "utf8");
   assert.equal(vscodePackage.devDependencies["@vscode/vsce"], "3.9.2");
   assert.equal(vscodePackage.devDependencies.ovsx, "1.1.1");
   assert.match(verifier, /from "\.\.\/editors\/vscode\/scripts\/vsix-targets\.mjs"/u);
@@ -288,7 +288,7 @@ test("VS Code public release verification stays exact and credential-free", () =
   assert.match(verifierTests, /universal fallback/u);
   assert.match(verifierTests, /changed content/u);
   assert.match(releaseSecurity, /vscode-public-verify/u);
-  assert.match(releaseSkill, /Verify public VS Code registry targets/u);
+  assert.match(releaseProcedure, /Verify public VS Code registry targets/u);
 });
 
 test("type-aware public surfaces expose only the stable protocol", () => {

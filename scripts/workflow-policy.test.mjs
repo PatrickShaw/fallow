@@ -530,15 +530,15 @@ test("release keeps the version tag last and requires curated public notes", () 
   const workflow = readWorkflow(".github/workflows/release.yml");
   const context = indentedBlock(workflow, "release-context", 2);
   const releaseAssets = indentedBlock(workflow, "release-assets", 2);
-  const skill = readFileSync(".agents/skills/release/SKILL.md", "utf8");
+  const procedure = readFileSync("docs/development/release-procedure.md", "utf8");
   const downloadStep = releaseAssets.indexOf("- name: Download all artifacts");
   const absentTagStep = releaseAssets.indexOf("- name: Reconfirm release tag is absent");
   const assembleStep = releaseAssets.indexOf("- name: Assemble release asset bundle");
   const uploadStep = releaseAssets.indexOf("- name: Upload release asset bundle");
-  const workflowDispatch = skill.indexOf("gh workflow run release.yml");
-  const downloadBundle = skill.indexOf('gh run download "$RUN_ID"');
-  const signedTag = skill.indexOf('git tag -s "$TAG"');
-  const createRelease = skill.indexOf('gh release create "$TAG"');
+  const workflowDispatch = procedure.indexOf("gh workflow run release.yml");
+  const downloadBundle = procedure.indexOf('gh run download "$RUN_ID"');
+  const signedTag = procedure.indexOf('git tag -s "$TAG"');
+  const createRelease = procedure.indexOf('gh release create "$TAG"');
 
   assert.notEqual(downloadStep, -1, "release must download every built artifact");
   assert.notEqual(absentTagStep, -1, "release must reconfirm tag absence");
@@ -557,8 +557,8 @@ test("release keeps the version tag last and requires curated public notes", () 
   // The immutability gate lives in the maintainer flow: the endpoint is not
   // readable with any grantable GITHUB_TOKEN scope.
   assert.doesNotMatch(context, /\$\{GITHUB_REPOSITORY\}\/immutable-releases/u);
-  assert.match(skill, /immutable-releases/u);
-  assert.match(skill, /Release immutability is not enabled/u);
+  assert.match(procedure, /immutable-releases/u);
+  assert.match(procedure, /Release immutability is not enabled/u);
   assert.match(context, /Release tag .* already exists; tag creation must remain near the end/u);
   assert.match(releaseAssets, /Release tag .* appeared before publication completed/u);
   assert.match(releaseAssets, /No release assets were downloaded/u);
@@ -571,19 +571,22 @@ test("release keeps the version tag last and requires curated public notes", () 
     /gh release create|softprops\/action-gh-release|git tag|git push origin/u,
   );
 
-  assert.match(skill, /Draft curated public GitHub release notes before starting the publication/u);
-  assert.match(skill, /exact full-changelog comparison URL/u);
-  assert.match(skill, /non-empty body/u);
-  assert.match(skill, /release title must be/u);
-  assert.match(skill, /release title or notes contain an em-dash/u);
-  assert.match(skill, /name no competing or upstream third-party project/u);
-  assert.match(skill, /--name release-assets/u);
-  assert.match(skill, /--verify-tag/u);
-  assert.match(skill, /--notes-file "\$NOTES_FILE"/u);
-  assert.notEqual(workflowDispatch, -1, "skill must dispatch the release workflow");
-  assert.notEqual(downloadBundle, -1, "skill must download the exact run asset bundle");
-  assert.notEqual(signedTag, -1, "skill must create a signed release tag");
-  assert.notEqual(createRelease, -1, "skill must create the immutable release");
+  assert.match(
+    procedure,
+    /Draft curated public GitHub release notes before starting the publication/u,
+  );
+  assert.match(procedure, /exact full-changelog comparison URL/u);
+  assert.match(procedure, /non-empty body/u);
+  assert.match(procedure, /release title must be/u);
+  assert.match(procedure, /release title or notes contain an em-dash/u);
+  assert.match(procedure, /name no competing or upstream third-party project/u);
+  assert.match(procedure, /--name release-assets/u);
+  assert.match(procedure, /--verify-tag/u);
+  assert.match(procedure, /--notes-file "\$NOTES_FILE"/u);
+  assert.notEqual(workflowDispatch, -1, "procedure must dispatch the release workflow");
+  assert.notEqual(downloadBundle, -1, "procedure must download the exact run asset bundle");
+  assert.notEqual(signedTag, -1, "procedure must create a signed release tag");
+  assert.notEqual(createRelease, -1, "procedure must create the immutable release");
   assert.ok(workflowDispatch < downloadBundle, "workflow must complete before asset download");
   assert.ok(downloadBundle < signedTag, "asset bundle must exist before tag creation");
   assert.ok(signedTag < createRelease, "signed tag must exist before release creation");

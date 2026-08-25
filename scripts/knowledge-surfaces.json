@@ -86,6 +86,10 @@
         "section": "development"
       },
       {
+        "path": "docs/development/release-procedure.md",
+        "section": "development"
+      },
+      {
         "path": "docs/development/release-security.md",
         "section": "development"
       },

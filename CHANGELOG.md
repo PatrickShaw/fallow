@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`fallow similar-code` adds opt-in semantic function discovery through a
+  pinned, verified local model.** It complements deterministic clone detection
+  with explicitly unverified candidates for functions that may share intent
+  despite different syntax. The separate workflow includes explicit local
+  setup, provider and model provenance, bounded completion accounting, a
+  persistent source-digest vector cache, source-grounded candidate inspection,
+  a fail-closed external verdict join, read-only MCP tools, and a Node API. It
+  is advisory and does not participate in bare analysis, audit gates, SARIF,
+  editor diagnostics, or auto-fix.
+
 ### Changed
 
 - **`fallow impact statusline` now says when the Impact store was written by a

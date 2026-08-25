@@ -379,6 +379,20 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: cargo zigbuild --release --target ${{ matrix.target }} -p fallow-multicall
 
+      - name: Build local similar-code provider
+        if: matrix.target != 'aarch64-unknown-linux-musl'
+        run: cargo build --locked --manifest-path tools/similar-code-sidecar/Cargo.toml --target-dir target --release --target "$FALLOW_TARGET"
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          FALLOW_TARGET: ${{ matrix.target }}
+
+      - name: Build local similar-code provider (aarch64-musl via zig)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        env:
+          FALLOW_TARGET: ${{ matrix.target }}
+        run: cargo zigbuild --locked --manifest-path tools/similar-code-sidecar/Cargo.toml --target-dir target --release --target "$FALLOW_TARGET"
+
       - name: Install NAPI package dependencies
         run: cd crates/napi && npm ci --omit=optional --ignore-scripts
 
@@ -390,6 +404,13 @@ jobs:
 
       - name: Verify GNU glibc compatibility
         if: contains(matrix.target, 'unknown-linux-gnu')
+        env:
+          FALLOW_BINARY: ${{ matrix.binary }}
+          FALLOW_LSP_BINARY: ${{ matrix.lsp_binary }}
+          FALLOW_MCP_BINARY: ${{ matrix.mcp_binary }}
+          FALLOW_MULTICALL_BINARY: ${{ matrix.multicall_binary }}
+          FALLOW_NPM_DIR: ${{ matrix.npm_dir }}
+          FALLOW_TARGET: ${{ matrix.target }}
         run: |
           ldd --version | head -n1
           max_allowed="2.31"
@@ -425,23 +446,35 @@ jobs:
             fi
           }
 
-          check_glibc_floor "target/${{ matrix.target }}/release/${{ matrix.binary }}"
-          check_glibc_floor "target/${{ matrix.target }}/release/${{ matrix.multicall_binary }}"
-          check_glibc_floor "target/${{ matrix.target }}/release/${{ matrix.lsp_binary }}"
-          check_glibc_floor "target/${{ matrix.target }}/release/${{ matrix.mcp_binary }}"
-          check_glibc_floor "crates/napi/fallow-node.${{ matrix.npm_dir }}.node"
+          check_glibc_floor "target/${FALLOW_TARGET}/release/${FALLOW_BINARY}"
+          check_glibc_floor "target/${FALLOW_TARGET}/release/${FALLOW_MULTICALL_BINARY}"
+          check_glibc_floor "target/${FALLOW_TARGET}/release/${FALLOW_LSP_BINARY}"
+          check_glibc_floor "target/${FALLOW_TARGET}/release/${FALLOW_MCP_BINARY}"
+          check_glibc_floor "target/${FALLOW_TARGET}/release/fallow-similar-code"
+          check_glibc_floor "crates/napi/fallow-node.${FALLOW_NPM_DIR}.node"
 
       - name: Package binaries (unix)
         if: runner.os != 'Windows'
+        env:
+          FALLOW_BINARY: ${{ matrix.binary }}
+          FALLOW_LSP_BINARY: ${{ matrix.lsp_binary }}
+          FALLOW_MCP_BINARY: ${{ matrix.mcp_binary }}
+          FALLOW_TARGET: ${{ matrix.target }}
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../fallow-${{ matrix.target }}.tar.gz ${{ matrix.binary }} ${{ matrix.lsp_binary }} ${{ matrix.mcp_binary }}
+          cd "target/${FALLOW_TARGET}/release"
+          tar czf "../../../fallow-${FALLOW_TARGET}.tar.gz" "$FALLOW_BINARY" "$FALLOW_LSP_BINARY" "$FALLOW_MCP_BINARY" fallow-similar-code
 
       - name: Package binaries (windows)
         if: runner.os == 'Windows'
+        shell: bash
+        env:
+          FALLOW_BINARY: ${{ matrix.binary }}
+          FALLOW_LSP_BINARY: ${{ matrix.lsp_binary }}
+          FALLOW_MCP_BINARY: ${{ matrix.mcp_binary }}
+          FALLOW_TARGET: ${{ matrix.target }}
         run: |
-          cd target/${{ matrix.target }}/release
-          7z a ../../../fallow-${{ matrix.target }}.zip ${{ matrix.binary }} ${{ matrix.lsp_binary }} ${{ matrix.mcp_binary }}
+          cd "target/${FALLOW_TARGET}/release"
+          7z a "../../../fallow-${FALLOW_TARGET}.zip" "$FALLOW_BINARY" "$FALLOW_LSP_BINARY" "$FALLOW_MCP_BINARY" fallow-similar-code.exe
 
       - name: Upload release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -456,19 +489,36 @@ jobs:
       # below and staged into the npm payload, but is NOT a GitHub release asset.
       - name: Rename CLI, LSP, MCP, and multicall binaries with target identifier (unix)
         if: runner.os != 'Windows'
+        env:
+          FALLOW_BINARY: ${{ matrix.binary }}
+          FALLOW_LSP_BINARY: ${{ matrix.lsp_binary }}
+          FALLOW_MCP_BINARY: ${{ matrix.mcp_binary }}
+          FALLOW_MULTICALL_BINARY: ${{ matrix.multicall_binary }}
+          FALLOW_NPM_DIR: ${{ matrix.npm_dir }}
+          FALLOW_TARGET: ${{ matrix.target }}
         run: |
-          cp target/${{ matrix.target }}/release/${{ matrix.binary }} fallow-${{ matrix.npm_dir }}
-          cp target/${{ matrix.target }}/release/${{ matrix.multicall_binary }} fallow-multicall-${{ matrix.npm_dir }}
-          cp target/${{ matrix.target }}/release/${{ matrix.lsp_binary }} fallow-lsp-${{ matrix.npm_dir }}
-          cp target/${{ matrix.target }}/release/${{ matrix.mcp_binary }} fallow-mcp-${{ matrix.npm_dir }}
+          cp "target/${FALLOW_TARGET}/release/${FALLOW_BINARY}" "fallow-${FALLOW_NPM_DIR}"
+          cp "target/${FALLOW_TARGET}/release/${FALLOW_MULTICALL_BINARY}" "fallow-multicall-${FALLOW_NPM_DIR}"
+          cp "target/${FALLOW_TARGET}/release/${FALLOW_LSP_BINARY}" "fallow-lsp-${FALLOW_NPM_DIR}"
+          cp "target/${FALLOW_TARGET}/release/${FALLOW_MCP_BINARY}" "fallow-mcp-${FALLOW_NPM_DIR}"
+          cp "target/${FALLOW_TARGET}/release/fallow-similar-code" "fallow-similar-code-${FALLOW_NPM_DIR}"
 
       - name: Rename CLI, LSP, MCP, and multicall binaries with target identifier (windows)
         if: runner.os == 'Windows'
+        shell: bash
+        env:
+          FALLOW_BINARY: ${{ matrix.binary }}
+          FALLOW_LSP_BINARY: ${{ matrix.lsp_binary }}
+          FALLOW_MCP_BINARY: ${{ matrix.mcp_binary }}
+          FALLOW_MULTICALL_BINARY: ${{ matrix.multicall_binary }}
+          FALLOW_NPM_DIR: ${{ matrix.npm_dir }}
+          FALLOW_TARGET: ${{ matrix.target }}
         run: |
-          cp target/${{ matrix.target }}/release/${{ matrix.binary }} fallow-${{ matrix.npm_dir }}.exe
-          cp target/${{ matrix.target }}/release/${{ matrix.multicall_binary }} fallow-multicall-${{ matrix.npm_dir }}.exe
-          cp target/${{ matrix.target }}/release/${{ matrix.lsp_binary }} fallow-lsp-${{ matrix.npm_dir }}.exe
-          cp target/${{ matrix.target }}/release/${{ matrix.mcp_binary }} fallow-mcp-${{ matrix.npm_dir }}.exe
+          cp "target/${FALLOW_TARGET}/release/${FALLOW_BINARY}" "fallow-${FALLOW_NPM_DIR}.exe"
+          cp "target/${FALLOW_TARGET}/release/${FALLOW_MULTICALL_BINARY}" "fallow-multicall-${FALLOW_NPM_DIR}.exe"
+          cp "target/${FALLOW_TARGET}/release/${FALLOW_LSP_BINARY}" "fallow-lsp-${FALLOW_NPM_DIR}.exe"
+          cp "target/${FALLOW_TARGET}/release/${FALLOW_MCP_BINARY}" "fallow-mcp-${FALLOW_NPM_DIR}.exe"
+          cp "target/${FALLOW_TARGET}/release/fallow-similar-code.exe" "fallow-similar-code-${FALLOW_NPM_DIR}.exe"
 
       - name: Verify binary-signing public key parity
         shell: bash
@@ -481,23 +531,27 @@ jobs:
         env:
           ED25519_BINARY_SIGNING_PRIVATE_KEY: ${{ secrets.ED25519_BINARY_SIGNING_PRIVATE_KEY }}
           ED25519_BINARY_SIGNING_PUBLIC_KEY: ${{ vars.ED25519_BINARY_SIGNING_PUBLIC_KEY }}
+          FALLOW_NPM_DIR: ${{ matrix.npm_dir }}
+          FALLOW_RUNNER_OS: ${{ runner.os }}
         run: |
           ext=""
-          if [ "${{ runner.os }}" = "Windows" ]; then
+          if [ "$FALLOW_RUNNER_OS" = "Windows" ]; then
             ext=".exe"
           fi
 
           for bin in \
-            "fallow-${{ matrix.npm_dir }}${ext}" \
-            "fallow-multicall-${{ matrix.npm_dir }}${ext}" \
-            "fallow-lsp-${{ matrix.npm_dir }}${ext}" \
-            "fallow-mcp-${{ matrix.npm_dir }}${ext}"
+            "fallow-${FALLOW_NPM_DIR}${ext}" \
+            "fallow-multicall-${FALLOW_NPM_DIR}${ext}" \
+            "fallow-lsp-${FALLOW_NPM_DIR}${ext}" \
+            "fallow-mcp-${FALLOW_NPM_DIR}${ext}" \
+            "fallow-similar-code-${FALLOW_NPM_DIR}${ext}"
           do
             node .github/scripts/sign-binary.mjs "$bin" "${bin}.sig"
             node .github/scripts/verify-binary.mjs "$bin" "${bin}.sig"
           done
 
-      # The npm platform packages ship ONE binary: the multicall `fallow`
+      # The npm platform packages ship the multicall `fallow` binary and the
+      # exact-version local similar-code provider.
       # (CLI + LSP + MCP linked into a single engine). Stage it plus its
       # signature under the package's `fallow(.exe)` name so the "Upload npm
       # binary" step carries exactly those two files into the npm-<platform>
@@ -509,14 +563,19 @@ jobs:
       # SHA-256 against the release asset digest. Refs #465.
       - name: Stage npm platform payload (multicall binary as fallow)
         shell: bash
+        env:
+          FALLOW_NPM_DIR: ${{ matrix.npm_dir }}
+          FALLOW_RUNNER_OS: ${{ runner.os }}
         run: |
           ext=""
-          if [ "${{ runner.os }}" = "Windows" ]; then
+          if [ "$FALLOW_RUNNER_OS" = "Windows" ]; then
             ext=".exe"
           fi
           mkdir -p npm-payload
-          cp "fallow-multicall-${{ matrix.npm_dir }}${ext}"     "npm-payload/fallow${ext}"
-          cp "fallow-multicall-${{ matrix.npm_dir }}${ext}.sig" "npm-payload/fallow${ext}.sig"
+          cp "fallow-multicall-${FALLOW_NPM_DIR}${ext}"     "npm-payload/fallow${ext}"
+          cp "fallow-multicall-${FALLOW_NPM_DIR}${ext}.sig" "npm-payload/fallow${ext}.sig"
+          cp "fallow-similar-code-${FALLOW_NPM_DIR}${ext}"     "npm-payload/fallow-similar-code${ext}"
+          cp "fallow-similar-code-${FALLOW_NPM_DIR}${ext}.sig" "npm-payload/fallow-similar-code${ext}.sig"
 
       - name: Upload CLI artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -542,6 +601,14 @@ jobs:
             fallow-mcp-${{ matrix.npm_dir }}${{ runner.os == 'Windows' && '.exe' || '' }}
             fallow-mcp-${{ matrix.npm_dir }}${{ runner.os == 'Windows' && '.exe' || '' }}.sig
 
+      - name: Upload similar-code provider artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fallow-similar-code-${{ matrix.npm_dir }}
+          path: |
+            fallow-similar-code-${{ matrix.npm_dir }}${{ runner.os == 'Windows' && '.exe' || '' }}
+            fallow-similar-code-${{ matrix.npm_dir }}${{ runner.os == 'Windows' && '.exe' || '' }}.sig
+
       - name: Upload npm binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -549,6 +616,8 @@ jobs:
           path: |
             npm-payload/fallow${{ runner.os == 'Windows' && '.exe' || '' }}
             npm-payload/fallow${{ runner.os == 'Windows' && '.exe' || '' }}.sig
+            npm-payload/fallow-similar-code${{ runner.os == 'Windows' && '.exe' || '' }}
+            npm-payload/fallow-similar-code${{ runner.os == 'Windows' && '.exe' || '' }}.sig
 
       - name: Upload NAPI addon
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -709,17 +778,20 @@ jobs:
       - name: Organize binaries into npm directories
         run: |
           for dir in npm-artifacts/npm-*; do
-            target="npm/$(basename "$dir" | sed 's/^npm-//')"
+            platform="$(basename "$dir" | sed 's/^npm-//')"
+            target="npm/$platform"
             mkdir -p "$target"
             cp "$dir"/* "$target"/
+            sidecar_target="npm/fallow-similar-code-$platform"
+            mkdir -p "$sidecar_target"
+            cp "$dir"/fallow-similar-code* "$sidecar_target"/
           done
 
       - name: Set binary permissions
         run: |
-          # Platform packages now ship a single multicall `fallow` binary; the
-          # bundled lsp/mcp launcher shims in the wrapper spawn it. Windows
-          # `fallow.exe` needs no +x bit.
-          for bin in npm/*/fallow; do
+          # Platform packages ship the multicall `fallow` binary and the local
+          # similar-code provider. Windows executables need no +x bit.
+          for bin in npm/*/fallow npm/*/fallow-similar-code; do
             [ -f "$bin" ] && chmod +x "$bin"
           done
 
@@ -736,10 +808,9 @@ jobs:
               pkg.version = version;
               if (pkg.optionalDependencies) {
                 for (const key of Object.keys(pkg.optionalDependencies)) {
-                  // fallow-type-aware must bump in lockstep: the launcher
-                  // requires an exact version match, so a stale pin leaves the
-                  // sidecar unwired for every npm install (issue #2103).
-                  if (key.startsWith("@fallow-cli/") || key === "fallow-type-aware") {
+                  // Companion roots must bump in lockstep: their launchers
+                  // require exact package versions.
+                  if (key.startsWith("@fallow-cli/") || key === "fallow-type-aware" || key === "fallow-similar-code") {
                     pkg.optionalDependencies[key] = version;
                   }
                 }
@@ -812,7 +883,7 @@ jobs:
             pkg.version = version;
             if (pkg.optionalDependencies) {
               for (const key of Object.keys(pkg.optionalDependencies)) {
-                if (key.startsWith("@fallow-cli/fallow-node") || key === "fallow-type-aware") {
+                if (key.startsWith("@fallow-cli/fallow-node") || key === "fallow-type-aware" || key === "fallow-similar-code") {
                   pkg.optionalDependencies[key] = version;
                 }
               }
@@ -857,7 +928,7 @@ jobs:
           # download/upload artifact round-trip; the publish job iterates them
           # in sequence and publishes whatever .tgz it finds inside.
           rm -rf tarballs
-          mkdir -p tarballs/10-cli-platform tarballs/15-type-aware tarballs/20-cli-root tarballs/30-napi-platform tarballs/40-napi-root
+          mkdir -p tarballs/10-cli-platform tarballs/12-similar-code-platform tarballs/15-companions tarballs/20-cli-root tarballs/30-napi-platform tarballs/40-napi-root
 
           # Emit a manifest alongside the tarballs so the publish job can look
           # up name/version without executing any code from inside a tarball.
@@ -892,7 +963,12 @@ jobs:
             pack tarballs/10-cli-platform "$dir"
           done
 
-          pack tarballs/15-type-aware ./tools/type-aware-sidecar
+          for dir in ./npm/fallow-similar-code-darwin-arm64 ./npm/fallow-similar-code-darwin-x64 ./npm/fallow-similar-code-linux-x64-gnu ./npm/fallow-similar-code-linux-arm64-gnu ./npm/fallow-similar-code-linux-x64-musl ./npm/fallow-similar-code-linux-arm64-musl ./npm/fallow-similar-code-win32-x64-msvc ./npm/fallow-similar-code-win32-arm64-msvc; do
+            pack tarballs/12-similar-code-platform "$dir"
+          done
+
+          pack tarballs/15-companions ./tools/type-aware-sidecar
+          pack tarballs/15-companions ./npm/fallow-similar-code
           pack tarballs/20-cli-root ./npm/fallow
 
           for dir in \
@@ -924,6 +1000,8 @@ jobs:
         run: |
           node .github/scripts/verify-pack-contents.mjs \
             tarballs/10-cli-platform/*.tgz \
+            tarballs/12-similar-code-platform/*.tgz \
+            tarballs/15-companions/*.tgz \
             tarballs/20-cli-root/*.tgz
 
       - name: Upload npm tarballs
@@ -992,10 +1070,10 @@ jobs:
             exit 1
           fi
           VERSION="${RELEASE_TAG#v}"
-          # Fixed expected count: 8 cli platform + 1 type-aware companion +
-          # 1 cli root + 8 napi platform + 1 napi root = 19 entries. If this number changes, update the
+          # Fixed expected count: 8 cli platform + 8 similar-code platform +
+          # 2 companion roots + 1 cli root + 8 napi platform + 1 napi root = 28 entries. If this number changes, update the
           # numbered-stage matrix in npm-prep AND this constant together.
-          EXPECTED=19
+          EXPECTED=28
           ACTUAL=$(wc -l < tarballs/manifest.tsv | tr -d ' ')
           if [ "$ACTUAL" -ne "$EXPECTED" ]; then
             echo "::error::Expected $EXPECTED tarballs in manifest, got $ACTUAL"
@@ -1011,7 +1089,16 @@ jobs:
             "@fallow-cli/linux-arm64-musl"
             "@fallow-cli/win32-x64-msvc"
             "@fallow-cli/win32-arm64-msvc"
+            "@fallow-cli/fallow-similar-code-darwin-arm64"
+            "@fallow-cli/fallow-similar-code-darwin-x64"
+            "@fallow-cli/fallow-similar-code-linux-x64-gnu"
+            "@fallow-cli/fallow-similar-code-linux-arm64-gnu"
+            "@fallow-cli/fallow-similar-code-linux-x64-musl"
+            "@fallow-cli/fallow-similar-code-linux-arm64-musl"
+            "@fallow-cli/fallow-similar-code-win32-x64-msvc"
+            "@fallow-cli/fallow-similar-code-win32-arm64-msvc"
             "fallow-type-aware"
+            "fallow-similar-code"
             "fallow"
             "@fallow-cli/fallow-node-darwin-arm64"
             "@fallow-cli/fallow-node-darwin-x64"

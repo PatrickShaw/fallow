@@ -54,6 +54,14 @@ export interface DuplicationOptions extends AnalysisOptions {
   top?: number;
 }
 
+export interface SimilarCodeOptions extends AnalysisOptions {
+  /** Cosine candidate cutoff from 0 through 1, not a probability. */
+  threshold?: number;
+  minLines?: number;
+  top?: number;
+  files?: string[];
+}
+
 export interface FeatureFlagsOptions extends AnalysisOptions {
   top?: number;
 }
@@ -335,6 +343,39 @@ export interface DuplicationReport {
   _meta?: Record<string, unknown>;
 }
 
+export interface SimilarCodeLocation {
+  path: string;
+  name: string;
+  start_line: number;
+  start_column: number;
+  end_line: number;
+  end_column: number;
+  source_sha256: string;
+}
+
+export interface SimilarCodeCandidate {
+  candidate_id: string;
+  review_key: string;
+  left: SimilarCodeLocation;
+  right: SimilarCodeLocation;
+  similarity: number;
+  similarity_band: 'moderate' | 'high' | 'very-high';
+  verification_status: 'unverified';
+  enrichment: Record<string, string>;
+  actions: AnalysisAction[];
+}
+
+export interface SimilarCodeReport {
+  kind: 'similar-code';
+  schema_version: '1';
+  version: string;
+  elapsed_ms: number;
+  generation: Record<string, unknown>;
+  candidates: SimilarCodeCandidate[];
+  completion: Record<string, unknown>;
+  diagnostics: Array<Record<string, unknown>>;
+}
+
 export interface HealthFinding {
   path: string;
   name: string;
@@ -429,6 +470,7 @@ export function detectDeadCode(options?: DeadCodeOptions): Promise<DeadCodeRepor
 export function detectCircularDependencies(options?: DeadCodeOptions): Promise<DeadCodeReport>;
 export function detectBoundaryViolations(options?: DeadCodeOptions): Promise<DeadCodeReport>;
 export function detectDuplication(options?: DuplicationOptions): Promise<DuplicationReport>;
+export function detectSimilarCode(options?: SimilarCodeOptions): Promise<SimilarCodeReport>;
 export function detectFeatureFlags(options?: FeatureFlagsOptions): Promise<FeatureFlagsReport>;
 export function computeComplexity(options?: ComplexityOptions): Promise<HealthReport>;
 export function computeHealth(options?: ComplexityOptions): Promise<HealthReport>;

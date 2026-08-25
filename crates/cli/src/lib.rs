@@ -78,6 +78,7 @@ mod security;
 mod security_help;
 mod setup_hooks;
 mod signal;
+mod similar_code_cli;
 mod suppressions;
 mod task_matrix;
 mod telemetry;
@@ -159,6 +160,7 @@ Analysis:
   health         Analyze complexity, maintainability, hotspots, and coverage gaps
   flags          Detect feature flag usage patterns
   security       Surface local security candidates for agent verification (opt-in)
+  similar-code   Find semantic implementation overlap for verification (opt-in, local)
   audit          Review changed files for dead code, complexity, duplication, and styling
 
 Workflow:
@@ -808,6 +810,28 @@ enum Command {
     TypeAware {
         #[command(subcommand)]
         subcommand: TypeAwareCli,
+    },
+
+    /// Find semantically similar functions with a pinned local model (opt-in).
+    ///
+    /// Results are unverified candidates. The model score is not a probability,
+    /// gate, vulnerability verdict, or safe-refactor decision. Model setup is
+    /// explicit, and project source remains local and offline during analysis.
+    SimilarCode {
+        #[command(subcommand)]
+        subcommand: Option<similar_code_cli::SimilarCodeSubcommand>,
+        /// Minimum cosine similarity retained as an unverified candidate.
+        #[arg(long, value_name = "0..1")]
+        threshold: Option<f64>,
+        /// Minimum source lines per extracted function.
+        #[arg(long, value_name = "N")]
+        min_lines: Option<usize>,
+        /// Cap displayed candidates after bounded full-corpus comparison.
+        #[arg(long, value_name = "N")]
+        top: Option<usize>,
+        /// Report pairs touching one of these project-relative files.
+        #[arg(long, value_name = "PATH")]
+        file: Vec<PathBuf>,
     },
 
     /// Inspect one file or exported symbol as a bundled evidence query
@@ -3387,6 +3411,10 @@ fn run_bare_combined(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the command router is intentionally an exhaustive top-level dispatch table"
+)]
 fn dispatch_subcommand(command: Command, dispatch: &DispatchContext<'_>) -> ExitCode {
     let cli = dispatch.cli;
     let root = dispatch.root;
@@ -3396,6 +3424,31 @@ fn dispatch_subcommand(command: Command, dispatch: &DispatchContext<'_>) -> Exit
         check @ Command::Check { .. } => dispatch_check_command(check, dispatch),
         Command::Watch { no_clear } => dispatch_watch(dispatch, no_clear),
         Command::TypeAware { subcommand } => dispatch_type_aware_command(dispatch, subcommand),
+        Command::SimilarCode {
+            subcommand,
+            threshold,
+            min_lines,
+            top,
+            file,
+        } => similar_code_cli::run(similar_code_cli::SimilarCodeCliInput {
+            root,
+            config_path: cli.config.as_deref(),
+            allow_remote_extends: cli.allow_remote_extends,
+            no_cache: cli.no_cache,
+            threads: dispatch.threads,
+            changed_since: cli.changed_since.as_deref(),
+            diff_file: cli.diff_file.as_deref(),
+            workspace: cli.workspace.as_deref(),
+            changed_workspaces: cli.changed_workspaces.as_deref(),
+            explain: cli.explain,
+            output,
+            json_style: dispatch.json_style,
+            threshold,
+            min_lines,
+            top,
+            files: file,
+            subcommand,
+        }),
         Command::Inspect {
             file,
             symbol,

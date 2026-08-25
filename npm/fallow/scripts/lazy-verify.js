@@ -29,7 +29,7 @@ const { verifyInstalledSync, SKIP_ENV } = require("./verify-binary");
 // Bumped to 2 when SHA-256 + platformPkgDir binding landed (closes the
 // cross-install reuse gap in the shared $XDG fallback cache). v1 sentinels
 // without these fields are invalidated automatically.
-const SENTINEL_SCHEMA_VERSION = 2;
+const SENTINEL_SCHEMA_VERSION = 3;
 const VERIFY_LOG_ENV = "FALLOW_VERIFY_LOG";
 
 // One-shot warning state: each warning class fires once per process,
@@ -66,11 +66,10 @@ function emitVerifyLog(env, payload) {
 }
 
 function binaryTargetsForPlatform(platform) {
-  // Platform packages ship one binary: the multicall `fallow`. The bundled
-  // lsp/mcp launchers spawn `fallow lsp-server` / `fallow mcp-server`, so there
-  // is only one binary to sentinel-track and verify.
+  // Track every executable the multicall CLI may launch without another
+  // wrapper verification boundary.
   const ext = platform === "win32" ? ".exe" : "";
-  return [`fallow${ext}`];
+  return [`fallow${ext}`, `fallow-similar-code${ext}`];
 }
 
 function statMtimeMs(absPath) {

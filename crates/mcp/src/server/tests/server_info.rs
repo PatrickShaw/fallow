@@ -25,6 +25,8 @@ fn all_tools_registered() {
     assert!(names.contains(&"analyze".to_string()));
     assert!(names.contains(&"check_changed".to_string()));
     assert!(names.contains(&"security_candidates".to_string()));
+    assert!(names.contains(&"find_similar_code".to_string()));
+    assert!(names.contains(&"inspect_similar_code".to_string()));
     assert!(names.contains(&"inspect_target".to_string()));
     assert!(names.contains(&"guard".to_string()));
     assert!(names.contains(&"find_dupes".to_string()));
@@ -54,7 +56,7 @@ fn all_tools_registered() {
     assert!(names.contains(&"impact_all".to_string()));
     assert!(names.contains(&"decision_surface".to_string()));
     assert!(names.contains(&"recommend".to_string()));
-    assert_eq!(tools.len(), 33);
+    assert_eq!(tools.len(), 35);
 }
 
 #[test]
@@ -66,6 +68,8 @@ fn read_only_tools_have_annotations() {
         "analyze",
         "check_changed",
         "security_candidates",
+        "find_similar_code",
+        "inspect_similar_code",
         "inspect_target",
         "guard",
         "find_dupes",
@@ -334,8 +338,8 @@ fn code_execute_description_distinguishes_combined_from_subprocess_tools() {
         "code_execute description must list the combined host call"
     );
     assert!(
-        description.contains("analyze, findDupes, checkHealth, and audit stay subprocess-backed"),
-        "the description must list only the four subprocess-backed calls: {description}"
+        description.contains("analyze, findSimilarCode, inspectSimilarCode, findDupes, checkHealth, and audit stay subprocess-backed"),
+        "the description must list only the six subprocess-backed calls: {description}"
     );
     assert!(
         !description.contains("analyze, combined, findDupes"),

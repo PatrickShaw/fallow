@@ -37,6 +37,7 @@ fn create_boundary_config_with_entry(
         ignore_decorators: vec![],
         unused_component_props: fallow_config::UnusedComponentPropsConfig::default(),
         duplicates: DuplicatesConfig::default(),
+        similar_code: fallow_config::SimilarCodeConfig::default(),
         health: HealthConfig::default(),
         rules: RulesConfig {
             boundary_violation: Severity::Error,
@@ -368,6 +369,7 @@ fn no_violations_when_rule_is_off() {
         ignore_decorators: vec![],
         unused_component_props: fallow_config::UnusedComponentPropsConfig::default(),
         duplicates: DuplicatesConfig::default(),
+        similar_code: fallow_config::SimilarCodeConfig::default(),
         health: HealthConfig::default(),
         rules: RulesConfig {
             boundary_violation: Severity::Off,
@@ -430,6 +432,7 @@ fn preset_detects_boundary_violation() {
         ignore_decorators: vec![],
         unused_component_props: fallow_config::UnusedComponentPropsConfig::default(),
         duplicates: DuplicatesConfig::default(),
+        similar_code: fallow_config::SimilarCodeConfig::default(),
         health: HealthConfig::default(),
         rules: RulesConfig {
             boundary_violation: Severity::Error,
@@ -532,6 +535,7 @@ fn root_field_classifies_per_subtree() {
         ignore_decorators: vec![],
         unused_component_props: fallow_config::UnusedComponentPropsConfig::default(),
         duplicates: DuplicatesConfig::default(),
+        similar_code: fallow_config::SimilarCodeConfig::default(),
         health: HealthConfig::default(),
         rules: RulesConfig {
             boundary_violation: Severity::Error,
@@ -638,6 +642,7 @@ fn root_field_genuinely_disambiguates_flat_patterns() {
         ignore_decorators: vec![],
         unused_component_props: fallow_config::UnusedComponentPropsConfig::default(),
         duplicates: DuplicatesConfig::default(),
+        similar_code: fallow_config::SimilarCodeConfig::default(),
         health: HealthConfig::default(),
         rules: RulesConfig {
             boundary_violation: Severity::Error,
@@ -712,6 +717,7 @@ fn root_field_genuinely_disambiguates_flat_patterns() {
         ignore_decorators: vec![],
         unused_component_props: fallow_config::UnusedComponentPropsConfig::default(),
         duplicates: DuplicatesConfig::default(),
+        similar_code: fallow_config::SimilarCodeConfig::default(),
         health: HealthConfig::default(),
         rules: RulesConfig {
             boundary_violation: Severity::Error,
@@ -854,6 +860,7 @@ fn bulletproof_preset_detects_violation() {
         ignore_decorators: vec![],
         unused_component_props: fallow_config::UnusedComponentPropsConfig::default(),
         duplicates: DuplicatesConfig::default(),
+        similar_code: fallow_config::SimilarCodeConfig::default(),
         health: HealthConfig::default(),
         rules: RulesConfig {
             boundary_violation: Severity::Error,
@@ -961,6 +968,7 @@ fn bulletproof_top_level_features_file_is_strict_without_barrel_false_positive()
         ignore_decorators: vec![],
         unused_component_props: fallow_config::UnusedComponentPropsConfig::default(),
         duplicates: DuplicatesConfig::default(),
+        similar_code: fallow_config::SimilarCodeConfig::default(),
         health: HealthConfig::default(),
         rules: RulesConfig {
             boundary_violation: Severity::Error,

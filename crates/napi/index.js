@@ -593,4 +593,5 @@ module.exports.detectBoundaryViolations = nativeBinding.detectBoundaryViolations
 module.exports.detectCircularDependencies = nativeBinding.detectCircularDependencies
 module.exports.detectDeadCode = nativeBinding.detectDeadCode
 module.exports.detectDuplication = nativeBinding.detectDuplication
+module.exports.detectSimilarCode = nativeBinding.detectSimilarCode
 module.exports.detectFeatureFlags = nativeBinding.detectFeatureFlags

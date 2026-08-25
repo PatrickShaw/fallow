@@ -14,11 +14,18 @@ npm install @fallow-cli/fallow-node   # or: pnpm/yarn/bun add @fallow-cli/fallow
 - `detectCircularDependencies(options?)`
 - `detectBoundaryViolations(options?)`
 - `detectDuplication(options?)`
+- `detectSimilarCode(options?)`
 - `detectFeatureFlags(options?)`
 - `computeComplexity(options?)`
 - `computeHealth(options?)`
 
 All functions are async and return the same JSON-shaped report contracts that the CLI emits for `--format json`.
+
+`detectSimilarCode` is opt-in and advisory. It resolves and verifies the
+exact-version `fallow-similar-code` companion before project source is read,
+then returns unverified semantic candidates from the pinned local model. It
+never downloads the model. Run `fallow similar-code setup --local` separately
+after explicit user confirmation.
 
 Enum-like option values use lowercase CLI-style strings such as `"mild"`, `"cyclomatic"`, `"handle"`, and `"low"`.
 

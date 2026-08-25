@@ -10,36 +10,33 @@ use std::fmt;
 use std::mem::size_of;
 
 use rustc_hash::FxHashMap;
+use sha2::{Digest, Sha256};
 
-/// Extraction semantics used by the first similar-code prototype.
-pub const EXTRACTION_SEMANTICS_VERSION: u32 = 1;
-
-/// Stable source identity used for deterministic tie-breaking.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FunctionLocation {
-    /// UTF-8 project-root-relative source path. Separators are normalized in output and IDs.
-    pub file: String,
-    /// One-based start line.
-    pub start_line: usize,
-    /// Zero-based start column.
-    pub start_col: usize,
-    /// One-based end line.
-    pub end_line: usize,
-    /// Zero-based end column.
-    pub end_col: usize,
-}
+pub use fallow_types::similar_code::{
+    SIMILAR_CODE_EXTRACTION_SEMANTICS_VERSION as EXTRACTION_SEMANTICS_VERSION,
+    SimilarCodeFunctionLocation as FunctionLocation, SimilarCodeSourceDigest,
+};
 
 /// One extracted function and its provider-supplied vector.
 #[derive(Debug, Clone)]
 pub struct FunctionVector {
     /// Stable source location for this run.
     pub location: FunctionLocation,
-    /// Content hash of the extracted function source.
-    pub content_hash: u64,
+    /// Full SHA-256 digest of the exact extracted function source.
+    pub source_sha256: SimilarCodeSourceDigest,
     /// Version of the extraction semantics that produced the function.
     pub extraction_semantics_version: u32,
     /// Dense vector values returned by the provider.
     pub values: Vec<f32>,
+}
+
+/// Source identity available before provider inference.
+#[derive(Debug, Clone, Copy)]
+pub struct SimilarCodeSelectionInput<'a> {
+    /// Stable source occurrence for this run.
+    pub location: &'a FunctionLocation,
+    /// Full SHA-256 digest of the exact source fragment.
+    pub source_sha256: SimilarCodeSourceDigest,
 }
 
 /// Hard limits for one candidate-evaluation run.
@@ -99,6 +96,15 @@ pub struct SimilarCodeSkip {
     pub count: usize,
 }
 
+/// Deterministic bounded corpus chosen before provider inference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimilarCodeCorpusSelection {
+    /// Indices into the caller's input slice, in stable occurrence order.
+    pub selected_indices: Vec<usize>,
+    /// Typed omissions caused by function, vector-memory, or comparison limits.
+    pub skipped: Vec<SimilarCodeSkip>,
+}
+
 /// Whether all eligible work within the supplied corpus was evaluated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimilarCodeCompletionStatus {
@@ -134,8 +140,10 @@ pub enum SimilarCodeVerificationStatus {
 /// One advisory similar-code pair.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimilarCodeCandidate {
-    /// Stable pair identity independent of similarity score and platform path separators.
-    pub id: String,
+    /// Snapshot identity over content, occurrences, and extraction semantics.
+    pub candidate_id: String,
+    /// Content-only identity stable when both functions move without changing.
+    pub review_key: String,
     /// Canonically ordered first source location.
     pub left: FunctionLocation,
     /// Canonically ordered second source location.
@@ -196,6 +204,13 @@ pub enum SimilarCodeError {
         /// Source location shared by the duplicate inputs.
         location: FunctionLocation,
     },
+    /// Preselected vector count did not match the source selection contract.
+    SelectionLengthMismatch {
+        /// Number of vectors expected from selected source indices.
+        expected: usize,
+        /// Number of provider vectors supplied.
+        actual: usize,
+    },
 }
 
 impl fmt::Display for SimilarCodeError {
@@ -236,7 +251,11 @@ impl fmt::Display for SimilarCodeError {
             Self::DuplicateFunctionIdentity { location } => write!(
                 formatter,
                 "{}:{}:{} has duplicate similar-code vector input",
-                location.file, location.start_line, location.start_col
+                location.file, location.start_line, location.start_column_utf8
+            ),
+            Self::SelectionLengthMismatch { expected, actual } => write!(
+                formatter,
+                "similar-code selection expected {expected} vectors, received {actual}"
             ),
         }
     }
@@ -247,8 +266,8 @@ impl std::error::Error for SimilarCodeError {}
 /// Identity for one vector-cache entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VectorCacheKey {
-    /// Function-content hash.
-    pub function_content_hash: u64,
+    /// Full SHA-256 digest of the exact function source.
+    pub function_source_sha256: SimilarCodeSourceDigest,
     /// Extraction-semantics version.
     pub extraction_semantics_version: u32,
     /// Stable model identifier.
@@ -457,29 +476,84 @@ pub fn evaluate_similar_code(
     })
 }
 
-fn select_vectors(
+/// Evaluate only the vectors produced for a prior source-corpus selection.
+///
+/// `vectors` must follow `selection.selected_indices` order. The regular
+/// evaluator runs the same selection helper again over this bounded subset,
+/// while this wrapper preserves the pre-inference omissions in completion
+/// evidence.
+pub fn evaluate_selected_similar_code(
     vectors: &[FunctionVector],
+    selection: &SimilarCodeCorpusSelection,
+    threshold: f64,
     limits: SimilarCodeLimits,
     extraction_semantics_version: u32,
-    skips: &mut FxHashMap<SimilarCodeSkipReason, usize>,
-) -> Result<Vec<SelectedVector>, SimilarCodeError> {
-    let occurrence_identities = vectors.iter().map(occurrence_identity).collect::<Vec<_>>();
-    let mut order = (0..vectors.len()).collect::<Vec<_>>();
-    order.sort_by(|&left, &right| {
+) -> Result<SimilarCodeEvaluation, SimilarCodeError> {
+    if vectors.len() != selection.selected_indices.len() {
+        return Err(SimilarCodeError::SelectionLengthMismatch {
+            expected: selection.selected_indices.len(),
+            actual: vectors.len(),
+        });
+    }
+
+    let mut evaluation =
+        evaluate_similar_code(vectors, threshold, limits, extraction_semantics_version)?;
+    let mut skipped = evaluation
+        .completion
+        .skipped
+        .drain(..)
+        .map(|skip| (skip.reason, skip.count))
+        .collect::<FxHashMap<_, _>>();
+    for skip in &selection.skipped {
+        record_skip(&mut skipped, skip.reason, skip.count);
+    }
+    evaluation.completion.skipped = skipped
+        .into_iter()
+        .map(|(reason, count)| SimilarCodeSkip { reason, count })
+        .collect();
+    evaluation
+        .completion
+        .skipped
+        .sort_by_key(|skip| skip.reason);
+    if !evaluation.completion.skipped.is_empty() {
+        evaluation.completion.status = SimilarCodeCompletionStatus::Partial;
+    }
+    Ok(evaluation)
+}
+
+/// Select a deterministic fair corpus before provider inference.
+///
+/// Selection uses only normalized source occurrence and full source digest.
+/// The hash-ranked subset is then returned in stable occurrence order. Every
+/// pair in the selected corpus fits inside `max_comparisons`, so callers can
+/// embed only `selected_indices` and the evaluator can exhaustively compare the
+/// resulting vectors.
+pub fn select_similar_code_corpus(
+    functions: &[SimilarCodeSelectionInput<'_>],
+    limits: SimilarCodeLimits,
+) -> Result<SimilarCodeCorpusSelection, SimilarCodeError> {
+    if limits.dimensions == 0 {
+        return Err(SimilarCodeError::ZeroDimensions);
+    }
+
+    let occurrence_identities = functions
+        .iter()
+        .map(|function| occurrence_identity_for_location(function.location))
+        .collect::<Vec<_>>();
+    let mut identity_order = (0..functions.len()).collect::<Vec<_>>();
+    identity_order.sort_by(|&left, &right| {
         occurrence_identities[left]
             .cmp(&occurrence_identities[right])
-            .then_with(|| vectors[left].content_hash.cmp(&vectors[right].content_hash))
             .then_with(|| {
-                vectors[left]
-                    .extraction_semantics_version
-                    .cmp(&vectors[right].extraction_semantics_version)
+                functions[left]
+                    .source_sha256
+                    .cmp(&functions[right].source_sha256)
             })
     });
-    for duplicate in order.windows(2) {
-        let left = &vectors[duplicate[0]];
+    for duplicate in identity_order.windows(2) {
         if occurrence_identities[duplicate[0]] == occurrence_identities[duplicate[1]] {
             return Err(SimilarCodeError::DuplicateFunctionIdentity {
-                location: left.location.clone(),
+                location: functions[duplicate[0]].location.clone(),
             });
         }
     }
@@ -488,10 +562,80 @@ fn select_vectors(
         .max_vector_bytes
         .checked_div(vector_bytes(limits.dimensions))
         .unwrap_or(0);
-    let function_limit = vectors.len().min(limits.max_functions);
-    let considered = function_limit.min(memory_function_limit);
+    let function_limit = functions.len().min(limits.max_functions);
+    let memory_considered = function_limit.min(memory_function_limit);
+    let considered = functions_within_comparison_budget(memory_considered, limits.max_comparisons);
+
+    let selection_keys = functions.iter().map(selection_key).collect::<Vec<_>>();
+    let mut order = (0..functions.len()).collect::<Vec<_>>();
+    order.sort_by(|&left, &right| {
+        selection_keys[left]
+            .cmp(&selection_keys[right])
+            .then_with(|| {
+                functions[left]
+                    .source_sha256
+                    .cmp(&functions[right].source_sha256)
+            })
+            .then_with(|| occurrence_identities[left].cmp(&occurrence_identities[right]))
+    });
     order.truncate(considered);
-    let selected = order
+    order.sort_by(|&left, &right| {
+        occurrence_identities[left]
+            .cmp(&occurrence_identities[right])
+            .then_with(|| {
+                functions[left]
+                    .source_sha256
+                    .cmp(&functions[right].source_sha256)
+            })
+    });
+
+    let mut skips = FxHashMap::default();
+    record_skip(
+        &mut skips,
+        SimilarCodeSkipReason::FunctionLimit,
+        functions.len().saturating_sub(function_limit),
+    );
+    record_skip(
+        &mut skips,
+        SimilarCodeSkipReason::VectorMemoryLimit,
+        function_limit.saturating_sub(memory_considered),
+    );
+    record_skip(
+        &mut skips,
+        SimilarCodeSkipReason::ComparisonLimit,
+        pair_count(memory_considered).saturating_sub(pair_count(considered)),
+    );
+    let mut skipped = skips
+        .into_iter()
+        .map(|(reason, count)| SimilarCodeSkip { reason, count })
+        .collect::<Vec<_>>();
+    skipped.sort_by_key(|skip| skip.reason);
+
+    Ok(SimilarCodeCorpusSelection {
+        selected_indices: order,
+        skipped,
+    })
+}
+
+fn select_vectors(
+    vectors: &[FunctionVector],
+    limits: SimilarCodeLimits,
+    extraction_semantics_version: u32,
+    skips: &mut FxHashMap<SimilarCodeSkipReason, usize>,
+) -> Result<Vec<SelectedVector>, SimilarCodeError> {
+    let functions = vectors
+        .iter()
+        .map(|vector| SimilarCodeSelectionInput {
+            location: &vector.location,
+            source_sha256: vector.source_sha256,
+        })
+        .collect::<Vec<_>>();
+    let selection = select_similar_code_corpus(&functions, limits)?;
+    for skip in selection.skipped {
+        record_skip(skips, skip.reason, skip.count);
+    }
+    selection
+        .selected_indices
         .into_iter()
         .map(|index| {
             let inverse_norm = validate_vector(
@@ -504,19 +648,7 @@ fn select_vectors(
                 inverse_norm,
             })
         })
-        .collect::<Result<Vec<_>, SimilarCodeError>>()?;
-
-    record_skip(
-        skips,
-        SimilarCodeSkipReason::FunctionLimit,
-        vectors.len().saturating_sub(function_limit),
-    );
-    record_skip(
-        skips,
-        SimilarCodeSkipReason::VectorMemoryLimit,
-        function_limit.saturating_sub(considered),
-    );
-    Ok(selected)
+        .collect::<Result<Vec<_>, SimilarCodeError>>()
 }
 
 fn score_pairs(
@@ -527,15 +659,12 @@ fn score_pairs(
     skips: &mut FxHashMap<SimilarCodeSkipReason, usize>,
 ) -> (Vec<ScoredPair>, usize) {
     let possible_comparisons = pair_count(selected.len());
-    let comparison_budget = possible_comparisons.min(limits.max_comparisons);
+    debug_assert!(possible_comparisons <= limits.max_comparisons);
     let mut comparisons_performed = 0usize;
-    let mut retained = BinaryHeap::with_capacity(limits.max_candidates.min(comparison_budget));
+    let mut retained = BinaryHeap::with_capacity(limits.max_candidates.min(possible_comparisons));
 
-    'pairs: for left in 0..selected.len() {
+    for left in 0..selected.len() {
         for right in left + 1..selected.len() {
-            if comparisons_performed >= comparison_budget {
-                break 'pairs;
-            }
             comparisons_performed += 1;
             let similarity = cosine_similarity(
                 &vectors[selected[left].index],
@@ -558,11 +687,6 @@ fn score_pairs(
             );
         }
     }
-    record_skip(
-        skips,
-        SimilarCodeSkipReason::ComparisonLimit,
-        possible_comparisons.saturating_sub(comparisons_performed),
-    );
 
     let mut ranked = retained.into_vec();
     ranked.sort_by(|left, right| {
@@ -616,8 +740,10 @@ fn build_candidates(
 
         let left = &vectors[selected[pair.left].index];
         let right = &vectors[selected[pair.right].index];
+        let (left, right) = canonical_pair(left, right);
         candidates.push(SimilarCodeCandidate {
-            id: candidate_id(left, right, extraction_semantics_version),
+            candidate_id: candidate_id(left, right, extraction_semantics_version),
+            review_key: review_key(left, right, extraction_semantics_version),
             left: normalized_location(&left.location),
             right: normalized_location(&right.location),
             similarity: pair.similarity,
@@ -687,46 +813,109 @@ fn candidate_id(
     right: &FunctionVector,
     extraction_semantics_version: u32,
 ) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fallow:similar-code:candidate-snapshot:v1\0");
+    hasher.update(extraction_semantics_version.to_be_bytes());
+    update_snapshot_identity(&mut hasher, left);
+    update_snapshot_identity(&mut hasher, right);
+    format_digest_id("similar-code:candidate:v1:", hasher.finalize().as_ref())
+}
+
+fn review_key(
+    left: &FunctionVector,
+    right: &FunctionVector,
+    extraction_semantics_version: u32,
+) -> String {
+    let (first, second) = if left.source_sha256 <= right.source_sha256 {
+        (left.source_sha256, right.source_sha256)
+    } else {
+        (right.source_sha256, left.source_sha256)
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"fallow:similar-code:review-key:v1\0");
+    hasher.update(extraction_semantics_version.to_be_bytes());
+    hasher.update(first.as_bytes());
+    hasher.update(second.as_bytes());
+    format_digest_id("similar-code:review:v1:", hasher.finalize().as_ref())
+}
+
+fn canonical_pair<'a>(
+    left: &'a FunctionVector,
+    right: &'a FunctionVector,
+) -> (&'a FunctionVector, &'a FunctionVector) {
     let left_occurrence = occurrence_identity(left);
     let right_occurrence = occurrence_identity(right);
-    let (first, second) =
-        if (left.content_hash, &left_occurrence) <= (right.content_hash, &right_occurrence) {
-            (
-                (left.content_hash, left_occurrence),
-                (right.content_hash, right_occurrence),
-            )
-        } else {
-            (
-                (right.content_hash, right_occurrence),
-                (left.content_hash, left_occurrence),
-            )
-        };
-    format!(
-        "similar-code:v2:{extraction_semantics_version}:{:016x}:{}:{:016x}:{}",
-        first.0, first.1, second.0, second.1
-    )
+    if (left.source_sha256, left_occurrence) <= (right.source_sha256, right_occurrence) {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
+fn update_snapshot_identity(hasher: &mut Sha256, vector: &FunctionVector) {
+    hasher.update(vector.source_sha256.as_bytes());
+    let occurrence = occurrence_identity(vector);
+    hasher.update(
+        u64::try_from(occurrence.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hasher.update(occurrence.as_bytes());
+}
+
+fn selection_key(function: &SimilarCodeSelectionInput<'_>) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fallow:similar-code:corpus-selection:v1\0");
+    hasher.update(function.source_sha256.as_bytes());
+    let occurrence = occurrence_identity_for_location(function.location);
+    hasher.update(
+        u64::try_from(occurrence.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hasher.update(occurrence.as_bytes());
+    hasher.finalize().into()
+}
+
+fn format_digest_id(prefix: &str, digest: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(prefix.len().saturating_add(digest.len() * 2));
+    output.push_str(prefix);
+    for byte in digest {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 fn occurrence_identity(vector: &FunctionVector) -> String {
-    let location = normalized_location(&vector.location);
+    occurrence_identity_for_location(&vector.location)
+}
+
+fn occurrence_identity_for_location(location: &FunctionLocation) -> String {
+    let location = normalized_location(location);
     let path = location.file;
     format!(
-        "{}:{path}:{}:{}:{}:{}",
+        "{}:{path}:{}:{}:{}:{}:{}:{}",
         path.len(),
+        location.start_byte,
+        location.end_byte,
         location.start_line,
-        location.start_col,
+        location.start_column_utf8,
         location.end_line,
-        location.end_col
+        location.end_column_utf8
     )
 }
 
 fn normalized_location(location: &FunctionLocation) -> FunctionLocation {
     FunctionLocation {
         file: location.file.replace('\\', "/"),
+        start_byte: location.start_byte,
+        end_byte: location.end_byte,
         start_line: location.start_line,
-        start_col: location.start_col,
+        start_column_utf8: location.start_column_utf8,
         end_line: location.end_line,
-        end_col: location.end_col,
+        end_column_utf8: location.end_column_utf8,
     }
 }
 
@@ -749,11 +938,33 @@ const fn pair_count(functions: usize) -> usize {
     functions.saturating_mul(functions.saturating_sub(1)) / 2
 }
 
+fn functions_within_comparison_budget(max_functions: usize, max_comparisons: usize) -> usize {
+    let mut low = 0usize;
+    let mut high = max_functions;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        let middle_wide = u128::try_from(middle).unwrap_or(u128::MAX);
+        let comparisons = middle_wide.saturating_mul(middle_wide.saturating_sub(1)) / 2;
+        if comparisons <= u128::try_from(max_comparisons).unwrap_or(u128::MAX) {
+            low = middle;
+        } else {
+            high = middle.saturating_sub(1);
+        }
+    }
+    low
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const DIMENSIONS: usize = 256;
+
+    fn digest(seed: u64) -> SimilarCodeSourceDigest {
+        let mut bytes = [0; 32];
+        bytes[24..].copy_from_slice(&seed.to_be_bytes());
+        SimilarCodeSourceDigest::new(bytes)
+    }
 
     fn vector(file: &str, hash: u64, first: f32, second: f32) -> FunctionVector {
         let mut values = vec![0.0; DIMENSIONS];
@@ -762,12 +973,14 @@ mod tests {
         FunctionVector {
             location: FunctionLocation {
                 file: file.into(),
+                start_byte: 0,
+                end_byte: 100,
                 start_line: 1,
-                start_col: 0,
+                start_column_utf8: 0,
                 end_line: 10,
-                end_col: 1,
+                end_column_utf8: 1,
             },
-            content_hash: hash,
+            source_sha256: digest(hash),
             extraction_semantics_version: EXTRACTION_SEMANTICS_VERSION,
             values,
         }
@@ -799,9 +1012,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.candidates.len(), 1);
-        assert_eq!(
-            result.candidates[0].id,
-            "similar-code:v2:1:0000000000000010:8:src/a.ts:1:0:10:1:0000000000000020:8:src/b.ts:1:0:10:1"
+        assert!(
+            result.candidates[0]
+                .candidate_id
+                .starts_with("similar-code:candidate:v1:")
+        );
+        assert!(
+            result.candidates[0]
+                .review_key
+                .starts_with("similar-code:review:v1:")
         );
         assert_eq!(
             result.candidates[0].verification_status,
@@ -873,10 +1092,102 @@ mod tests {
         let ids = result
             .candidates
             .iter()
-            .map(|candidate| candidate.id.as_str())
+            .map(|candidate| candidate.candidate_id.as_str())
+            .collect::<rustc_hash::FxHashSet<_>>();
+        let review_keys = result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.review_key.as_str())
             .collect::<rustc_hash::FxHashSet<_>>();
 
         assert_eq!(ids.len(), result.candidates.len());
+        assert_eq!(review_keys.len(), 1);
+    }
+
+    #[test]
+    fn review_key_survives_moves_while_candidate_id_tracks_snapshot() {
+        let original = evaluate_similar_code(
+            &[
+                vector("src/a.ts", 1, 1.0, 0.0),
+                vector("src/b.ts", 2, 1.0, 0.0),
+            ],
+            0.9,
+            limits(),
+            EXTRACTION_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let moved = evaluate_similar_code(
+            &[
+                vector("packages/core/a.ts", 1, 1.0, 0.0),
+                vector("packages/core/b.ts", 2, 1.0, 0.0),
+            ],
+            0.9,
+            limits(),
+            EXTRACTION_SEMANTICS_VERSION,
+        )
+        .unwrap();
+
+        assert_ne!(
+            original.candidates[0].candidate_id,
+            moved.candidates[0].candidate_id
+        );
+        assert_eq!(
+            original.candidates[0].review_key,
+            moved.candidates[0].review_key
+        );
+    }
+
+    #[test]
+    fn comparison_budget_selects_a_stable_fair_corpus_and_checks_every_pair() {
+        let vectors = (0..6)
+            .map(|index| vector(&format!("src/{index}.ts"), index, 1.0, 0.0))
+            .collect::<Vec<_>>();
+        let mut bounded = limits();
+        bounded.max_functions = vectors.len();
+        bounded.max_comparisons = 3;
+        bounded.max_candidates = 3;
+
+        let inputs = vectors
+            .iter()
+            .map(|vector| SimilarCodeSelectionInput {
+                location: &vector.location,
+                source_sha256: vector.source_sha256,
+            })
+            .collect::<Vec<_>>();
+        let corpus = select_similar_code_corpus(&inputs, bounded).unwrap();
+        let expected = corpus
+            .selected_indices
+            .iter()
+            .copied()
+            .map(|index| vectors[index].location.file.as_str())
+            .collect::<rustc_hash::FxHashSet<_>>();
+
+        let direct =
+            evaluate_similar_code(&vectors, 0.9, bounded, EXTRACTION_SEMANTICS_VERSION).unwrap();
+        let embedded = corpus
+            .selected_indices
+            .iter()
+            .map(|&index| vectors[index].clone())
+            .collect::<Vec<_>>();
+        let result = evaluate_selected_similar_code(
+            &embedded,
+            &corpus,
+            0.9,
+            bounded,
+            EXTRACTION_SEMANTICS_VERSION,
+        )
+        .unwrap();
+        let selected = result
+            .candidates
+            .iter()
+            .flat_map(|candidate| [candidate.left.file.as_str(), candidate.right.file.as_str()])
+            .collect::<rustc_hash::FxHashSet<_>>();
+
+        assert_eq!(result.completion.functions_considered, 3);
+        assert_eq!(result.completion.comparisons_performed, 3);
+        assert_eq!(selected, expected);
+        assert_eq!(result.completion.skipped, corpus.skipped);
+        assert_eq!(result, direct);
     }
 
     #[test]
@@ -972,7 +1283,7 @@ mod tests {
     fn duplicate_stable_function_identity_fails_independent_of_input_order() {
         let first = vector("src/a.ts", 1, 1.0, 0.0);
         let mut conflicting = first.clone();
-        conflicting.content_hash = 2;
+        conflicting.source_sha256 = digest(2);
         conflicting.values[0] = 0.5;
         conflicting.values[1] = 0.5;
 
@@ -990,7 +1301,7 @@ mod tests {
     #[test]
     fn vector_cache_is_separate_bounded_and_revision_keyed() {
         let key = |hash, revision: &str| VectorCacheKey {
-            function_content_hash: hash,
+            function_source_sha256: digest(hash),
             extraction_semantics_version: EXTRACTION_SEMANTICS_VERSION,
             model_id: "fixture-model".to_string(),
             model_revision: revision.to_string(),

@@ -635,6 +635,7 @@ pub enum Workflow {
     RuntimeCoverageSetup,
     Impact,
     Security,
+    SimilarCode,
     Fix,
     Explain,
     ProjectInventory,
@@ -663,7 +664,8 @@ impl Workflow {
             | Workflow::Health
             | Workflow::Dupes
             | Workflow::CodeQualityReview
-            | Workflow::Security => true,
+            | Workflow::Security
+            | Workflow::SimilarCode => true,
             Workflow::DependencyCleanup
             | Workflow::GithubAction
             | Workflow::GitlabCi
@@ -787,6 +789,7 @@ pub enum AnalysisMode {
     RuntimeCoverage,
     ProductionCoverage,
     Security,
+    SimilarCode,
     Fix,
     Unknown,
 }
@@ -2374,7 +2377,8 @@ fn followup_kind(workflow: Workflow) -> FollowupKind {
         Workflow::Dupes => FollowupKind::Dupes,
         Workflow::Fix => FollowupKind::Fix,
         Workflow::Explain => FollowupKind::Explain,
-        Workflow::DependencyCleanup
+        Workflow::SimilarCode
+        | Workflow::DependencyCleanup
         | Workflow::CodeQualityReview
         | Workflow::GithubAction
         | Workflow::GitlabCi
@@ -2935,6 +2939,7 @@ mod tests {
             Workflow::Dupes,
             Workflow::CodeQualityReview,
             Workflow::Security,
+            Workflow::SimilarCode,
         ] {
             assert!(
                 workflow.surfaces_findings(),

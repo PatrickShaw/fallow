@@ -11,14 +11,21 @@ use std::hint::black_box;
 use std::mem::size_of;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use fallow_engine::duplicates::similar_code::{
+use fallow_engine::similar_code::{
     EXTRACTION_SEMANTICS_VERSION, FunctionLocation, FunctionVector, SimilarCodeLimits,
-    SimilarCodeVectorCache, VectorCacheKey, evaluate_similar_code, validate_function_vectors,
+    SimilarCodeSourceDigest, SimilarCodeVectorCache, VectorCacheKey, evaluate_similar_code,
+    validate_function_vectors,
 };
 
 const VALIDATION_FUNCTIONS: usize = 1_000;
 const RETRIEVAL_FUNCTIONS: usize = 256;
 const VECTOR_DIMENSIONS: usize = 256;
+
+fn digest(seed: u64) -> SimilarCodeSourceDigest {
+    let mut bytes = [0; 32];
+    bytes[24..].copy_from_slice(&seed.to_be_bytes());
+    SimilarCodeSourceDigest::new(bytes)
+}
 
 fn fixture_vectors(functions: usize, clustered: bool) -> Vec<FunctionVector> {
     (0..functions)
@@ -38,12 +45,14 @@ fn fixture_vectors(functions: usize, clustered: bool) -> Vec<FunctionVector> {
             FunctionVector {
                 location: FunctionLocation {
                     file: format!("src/module-{index:04}.ts"),
+                    start_byte: 0,
+                    end_byte: 200,
                     start_line: 1,
-                    start_col: 0,
+                    start_column_utf8: 0,
                     end_line: 20,
-                    end_col: 1,
+                    end_column_utf8: 1,
                 },
-                content_hash: index as u64,
+                source_sha256: digest(u64::try_from(index).unwrap_or(u64::MAX)),
                 extraction_semantics_version: EXTRACTION_SEMANTICS_VERSION,
                 values,
             }
@@ -104,7 +113,7 @@ fn bench_similar_code(c: &mut Criterion) {
     });
 
     let cache_key = VectorCacheKey {
-        function_content_hash: 42,
+        function_source_sha256: digest(42),
         extraction_semantics_version: EXTRACTION_SEMANTICS_VERSION,
         model_id: "fixture-model".to_string(),
         model_revision: "fixture-model@immutable".to_string(),
@@ -122,7 +131,7 @@ fn bench_similar_code(c: &mut Criterion) {
         bencher.iter(|| {
             let mut cache = SimilarCodeVectorCache::new(4 * 1024 * 1024);
             let mut key = cache_key.clone();
-            key.function_content_hash = index;
+            key.function_source_sha256 = digest(index);
             index = index.wrapping_add(1);
             black_box(cache.insert(key, vec![1.0; VECTOR_DIMENSIONS]));
         });

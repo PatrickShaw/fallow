@@ -5,22 +5,22 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_router};
 
 use crate::params::{
     AnalyzeParams, AuditParams, CheckChangedParams, CheckRuntimeCoverageParams, CodeExecuteParams,
-    DecisionSurfaceParams, ExplainParams, FeatureFlagsParams, FindDupesParams, FixParams,
-    GetTokenBlastRadiusParams, GuardParams, HealthParams, ImpactAllParams, ImpactClosureParams,
-    ImpactParams, InspectTargetParams, ListBoundariesParams, ListSuppressionsParams,
-    ProjectInfoParams, RecommendParams, SecurityCandidatesParams, SemanticImpactParams,
-    SemanticSymbolParams, TraceCloneParams, TraceDependencyParams, TraceExportParams,
-    TraceFileParams,
+    DecisionSurfaceParams, ExplainParams, FeatureFlagsParams, FindDupesParams,
+    FindSimilarCodeParams, FixParams, GetTokenBlastRadiusParams, GuardParams, HealthParams,
+    ImpactAllParams, ImpactClosureParams, ImpactParams, InspectSimilarCodeParams,
+    InspectTargetParams, ListBoundariesParams, ListSuppressionsParams, ProjectInfoParams,
+    RecommendParams, SecurityCandidatesParams, SemanticImpactParams, SemanticSymbolParams,
+    TraceCloneParams, TraceDependencyParams, TraceExportParams, TraceFileParams,
 };
 use crate::tools::{
     execute_code_mode, inspect_target, run_analyze, run_audit, run_check_changed,
     run_check_runtime_coverage, run_decision_surface, run_explain, run_feature_flags,
-    run_find_dupes, run_fix_apply, run_fix_preview, run_get_blast_radius,
+    run_find_dupes, run_find_similar_code, run_fix_apply, run_fix_preview, run_get_blast_radius,
     run_get_cleanup_candidates, run_get_hot_paths, run_get_importance, run_get_token_blast_radius,
-    run_guard, run_health, run_impact, run_impact_all, run_impact_closure, run_list_boundaries,
-    run_list_suppressions, run_project_info, run_recommend, run_security_candidates,
-    run_symbol_impact, run_symbol_trace, run_trace_clone_tool, run_trace_dependency_tool,
-    run_trace_export_tool, run_trace_file_tool,
+    run_guard, run_health, run_impact, run_impact_all, run_impact_closure,
+    run_inspect_similar_code, run_list_boundaries, run_list_suppressions, run_project_info,
+    run_recommend, run_security_candidates, run_symbol_impact, run_symbol_trace,
+    run_trace_clone_tool, run_trace_dependency_tool, run_trace_export_tool, run_trace_file_tool,
 };
 
 #[cfg(test)]
@@ -74,7 +74,7 @@ fn resolve_binary() -> String {
 )]
 #[tool_router]
 impl FallowMcp {
-    /// Execute a bounded, read-only JavaScript Code Mode snippet against fallow's MCP host API. `code` must be a JavaScript function expression or function body that receives `{ fallow, root }` and returns a JSON-serializable value. The embedded sandbox exposes only a typed `fallow` object with read-only analysis calls: analyze, combined, checkChanged, securityCandidates, findDupes, projectInfo, traceExport, traceFile, impactClosure, traceDependency, traceClone, checkHealth, audit, explain, listBoundaries, featureFlags, impact, checkRuntimeCoverage, getHotPaths, getBlastRadius, getImportance, getCleanupCandidates, plus `fallow.run(tool, params)` for the same allowlist. Mutating fix tools are intentionally not exposed. The sandbox has no filesystem, network, imports, eval, Function, process, require, Deno, Bun, or shell access. `root` is injected into host calls that omit params.root. `timeout_ms` caps JS execution and subprocess-backed host calls. In Code Mode, analyze, findDupes, checkHealth, and audit stay subprocess-backed and are killed on timeout. API-backed host calls use `timeout_ms` as a response deadline; in-process analysis may finish after a timeout response. `max_output_bytes` caps total fallow JSON read by host calls.
+    /// Execute a bounded, read-only JavaScript Code Mode snippet against fallow's MCP host API. `code` must be a JavaScript function expression or function body that receives `{ fallow, root }` and returns a JSON-serializable value. The embedded sandbox exposes only a typed `fallow` object with read-only analysis calls: analyze, combined, checkChanged, securityCandidates, findSimilarCode, inspectSimilarCode, findDupes, projectInfo, traceExport, traceFile, impactClosure, traceDependency, traceClone, checkHealth, audit, explain, listBoundaries, featureFlags, impact, checkRuntimeCoverage, getHotPaths, getBlastRadius, getImportance, getCleanupCandidates, plus `fallow.run(tool, params)` for the same allowlist. Mutating fix tools are intentionally not exposed. The sandbox has no filesystem, network, imports, eval, Function, process, require, Deno, Bun, or shell access. `root` is injected into host calls that omit params.root. `timeout_ms` caps JS execution and subprocess-backed host calls. In Code Mode, analyze, findSimilarCode, inspectSimilarCode, findDupes, checkHealth, and audit stay subprocess-backed and are killed on timeout. API-backed host calls use `timeout_ms` as a response deadline; in-process analysis may finish after a timeout response. `max_output_bytes` caps total fallow JSON read by host calls.
     #[tool(annotations(read_only_hint = true, open_world_hint = true))]
     async fn code_execute(
         &self,
@@ -117,6 +117,24 @@ impl FallowMcp {
         params: Parameters<SecurityCandidatesParams>,
     ) -> Result<CallToolResult, McpError> {
         run_security_candidates(&self.binary, params.0).await
+    }
+
+    /// Find semantically similar functions with Fallow's exact pinned local model. Results are unverified candidates, not probabilities, duplication findings, refactor instructions, or CI gates. Source stays on the local machine. Each candidate carries stable candidate_id and review_key identities, exact locations, reproducible provider/model provenance, completion accounting, and read-only inspect/review actions. The command never downloads a model: if explicit setup has not happened, it returns structured guidance to run `fallow similar-code setup --local`. Use threshold only as a candidate-retrieval cutoff, then call inspect_similar_code before deciding whether two functions are behaviorally equivalent or safe to consolidate. Supports root, config, workspace, changed_since, changed_workspaces, paths, threshold, min_lines, top, no_cache, and threads. Large projects can exceed the default 120s subprocess timeout; raise FALLOW_TIMEOUT_SECS when needed.
+    #[tool(annotations(read_only_hint = true, open_world_hint = true))]
+    async fn find_similar_code(
+        &self,
+        params: Parameters<FindSimilarCodeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        run_find_similar_code(&self.binary, params.0).await
+    }
+
+    /// Reproduce one unverified candidate from find_similar_code and return a bounded source-grounded evidence packet. The packet includes both source windows, syntactic behavior hints, and available Fallow context such as graph relationships, reachability, callers/callees, ownership, churn, tests, and deterministic clone overlap. Missing evidence is represented explicitly, never inferred. This remains read-only and never declares behavioral equivalence or refactor safety. Pass the exact candidate_id and the same discovery scope/options used for the original run.
+    #[tool(annotations(read_only_hint = true, open_world_hint = true))]
+    async fn inspect_similar_code(
+        &self,
+        params: Parameters<InspectSimilarCodeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        run_inspect_similar_code(&self.binary, params.0).await
     }
 
     /// Inspect one file or exported symbol and return one typed evidence bundle. Address a file with target={type:"file", file:"src/a.ts"}; address a symbol with target={type:"symbol", file:"src/a.ts", export_name:"foo"}. Composes existing read-only analysis systems only: trace_file, trace_export for symbols, file-scoped dead-code actions, duplication groups filtered to the file, complexity findings filtered to the file, security candidates scoped to the file, and the impact closure for the file (the transitive affected-but-not-in-diff set plus the coordination gap: modules that consume this file's contract but are not shown alongside it; a syntactic attention pointer, not a correctness proof). Set include_churn=true to attach target-level git churn from the in-process health hotspot subsystem; it is off by default, and missing git history is reported explicitly. production is forwarded only to child analyses that support it: trace, dead-code, and health. Symbol targets include file-scoped evidence with explicit scope fields because file:line enclosing-symbol mapping is a follow-up. This bundled query runs independent evidence analyses in parallel; large repositories can exceed the default 120s subprocess timeout, so raise FALLOW_TIMEOUT_SECS when needed.

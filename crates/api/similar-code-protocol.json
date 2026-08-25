@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "wire_protocol_version": 1,
+  "extraction_semantics_version": 1,
+  "analysis_operation": "embed-functions",
+  "status_operation": "status",
+  "setup_operation": "setup-local",
+  "session_envelope_types": [
+    "embed",
+    "shutdown"
+  ],
+  "model": {
+    "id": "jinaai/jina-embeddings-v2-base-code",
+    "revision": "516f4baf13dec4ddddda8631e019b5737c8bc250",
+    "license": "Apache-2.0",
+    "dimensions": 768,
+    "max_tokens": 1024,
+    "normalization": "mean-pooling-l2",
+    "artifacts": [
+      {
+        "path": "model.safetensors",
+        "size": 321767312,
+        "sha256": "8b53bfd4ae2cd586004a6ca4a16551b630a2a1b1d655ff1ee9be1286a1781c5b"
+      },
+      {
+        "path": "tokenizer.json",
+        "size": 2561316,
+        "sha256": "b01c78a902aa4facb2f47f95449f48e2f7bbfea5d2472ee2f6ce92323c6f86e5"
+      },
+      {
+        "path": "config.json",
+        "size": 1216,
+        "sha256": "e426aa684c7f9a95c5f020aa855faf93a24f065f5fad0c9e17b124670cabdea6"
+      }
+    ]
+  },
+  "sidecar": {
+    "binary": "fallow-similar-code",
+    "package": "fallow-similar-code",
+    "version_source": "workspace-package"
+  }
+}

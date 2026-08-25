@@ -2,10 +2,11 @@ use crate::params::*;
 use crate::tools::{
     ISSUE_TYPE_FLAGS, VALID_DUPES_MODES, build_analyze_args, build_audit_args,
     build_check_changed_args, build_check_runtime_coverage_args, build_explain_args,
-    build_feature_flags_args, build_find_dupes_args, build_fix_apply_args, build_fix_preview_args,
-    build_get_blast_radius_args, build_get_cleanup_candidates_args, build_get_hot_paths_args,
-    build_get_importance_args, build_get_token_blast_radius_args, build_guard_args,
-    build_health_args, build_impact_all_args, build_impact_args, build_impact_closure_args,
+    build_feature_flags_args, build_find_dupes_args, build_find_similar_code_args,
+    build_fix_apply_args, build_fix_preview_args, build_get_blast_radius_args,
+    build_get_cleanup_candidates_args, build_get_hot_paths_args, build_get_importance_args,
+    build_get_token_blast_radius_args, build_guard_args, build_health_args, build_impact_all_args,
+    build_impact_args, build_impact_closure_args, build_inspect_similar_code_args,
     build_list_boundaries_args, build_list_suppressions_args, build_project_info_args,
     build_security_candidates_args, build_trace_clone_args, build_trace_dependency_args,
     build_trace_export_args, build_trace_file_args,
@@ -532,6 +533,92 @@ fn security_candidates_args_do_not_expose_ci_or_write_surfaces() {
             "security_candidates must not emit {forbidden}, got {args:?}"
         );
     }
+}
+
+#[test]
+fn find_similar_code_args_minimal() {
+    let args = build_find_similar_code_args(&FindSimilarCodeParams::default()).unwrap();
+    assert_eq!(args, ["similar-code", "--format", "json", "--quiet"]);
+}
+
+#[test]
+fn find_similar_code_args_include_bounded_scope() {
+    let params = FindSimilarCodeParams {
+        root: Some("/repo".to_owned()),
+        changed_since: Some("origin/main".to_owned()),
+        paths: Some(vec!["src/a.ts".to_owned(), "src/b.ts".to_owned()]),
+        threshold: Some(0.91),
+        min_lines: Some(5),
+        top: Some(20),
+        ..Default::default()
+    };
+    let args = build_find_similar_code_args(&params).unwrap();
+    assert_eq!(
+        args,
+        [
+            "similar-code",
+            "--format",
+            "json",
+            "--quiet",
+            "--root",
+            "/repo",
+            "--changed-since",
+            "origin/main",
+            "--file",
+            "src/a.ts",
+            "--file",
+            "src/b.ts",
+            "--threshold",
+            "0.91",
+            "--min-lines",
+            "5",
+            "--top",
+            "20",
+        ]
+    );
+}
+
+#[test]
+fn find_similar_code_rejects_invalid_threshold() {
+    let params = FindSimilarCodeParams {
+        threshold: Some(1.1),
+        ..Default::default()
+    };
+    let error = build_find_similar_code_args(&params).unwrap_err();
+    assert!(parse_validation_message(&error).contains("threshold"));
+}
+
+#[test]
+fn inspect_similar_code_requires_and_forwards_candidate_id() {
+    let params = InspectSimilarCodeParams {
+        candidate_id: "sc_abc123".to_owned(),
+        root: Some("/repo".to_owned()),
+        config: None,
+        allow_remote_extends: None,
+        workspace: None,
+        changed_since: None,
+        changed_workspaces: None,
+        paths: None,
+        threshold: None,
+        min_lines: None,
+        top: None,
+        no_cache: None,
+        threads: None,
+    };
+    let args = build_inspect_similar_code_args(&params).unwrap();
+    assert_eq!(
+        args,
+        [
+            "similar-code",
+            "--format",
+            "json",
+            "--quiet",
+            "--root",
+            "/repo",
+            "inspect",
+            "sc_abc123",
+        ]
+    );
 }
 
 #[test]

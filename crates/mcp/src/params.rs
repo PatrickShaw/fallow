@@ -270,6 +270,89 @@ pub struct SecurityCandidatesParams {
     pub threads: Option<usize>,
 }
 
+/// Parameters for advisory semantic similar-code discovery.
+///
+/// The exact first-party model runs locally. This tool never performs model
+/// setup and returns an actionable structured error when explicit setup is
+/// still required.
+#[derive(Default, Deserialize, JsonSchema)]
+pub struct FindSimilarCodeParams {
+    pub root: Option<String>,
+
+    pub config: Option<String>,
+
+    /// Allow trusted HTTPS config inheritance for this request.
+    pub allow_remote_extends: Option<bool>,
+
+    /// Scope candidate reporting to selected workspace roots. Mutually
+    /// exclusive with `changed_workspaces`.
+    pub workspace: Option<String>,
+
+    /// Git ref used to report candidate pairs touching changed files.
+    pub changed_since: Option<String>,
+
+    /// Scope candidate reporting to workspaces touched since this git ref.
+    pub changed_workspaces: Option<String>,
+
+    /// Report candidate pairs touching one of these project-relative files.
+    pub paths: Option<Vec<String>>,
+
+    /// Minimum cosine similarity from zero through one. This is not a
+    /// probability or verification verdict.
+    pub threshold: Option<f64>,
+
+    /// Minimum extracted source lines per function.
+    pub min_lines: Option<usize>,
+
+    /// Cap returned candidates after bounded full-corpus comparison.
+    pub top: Option<usize>,
+
+    pub no_cache: Option<bool>,
+
+    pub threads: Option<usize>,
+}
+
+/// Parameters for reproducing one similar-code candidate and collecting its
+/// bounded source-grounded evidence packet.
+#[derive(Deserialize, JsonSchema)]
+pub struct InspectSimilarCodeParams {
+    /// Snapshot-stable candidate identity returned by `find_similar_code`.
+    pub candidate_id: String,
+
+    pub root: Option<String>,
+
+    pub config: Option<String>,
+
+    /// Allow trusted HTTPS config inheritance for this request.
+    pub allow_remote_extends: Option<bool>,
+
+    /// Scope candidate reporting to selected workspace roots. Mutually
+    /// exclusive with `changed_workspaces`.
+    pub workspace: Option<String>,
+
+    /// Git ref used to reproduce candidate reporting scope.
+    pub changed_since: Option<String>,
+
+    /// Scope candidate reporting to workspaces touched since this git ref.
+    pub changed_workspaces: Option<String>,
+
+    /// Reproduce candidate reporting scope for selected project-relative files.
+    pub paths: Option<Vec<String>>,
+
+    /// Minimum cosine similarity used for candidate reproduction.
+    pub threshold: Option<f64>,
+
+    /// Minimum extracted source lines per function.
+    pub min_lines: Option<usize>,
+
+    /// Candidate cap used for reproduction.
+    pub top: Option<usize>,
+
+    pub no_cache: Option<bool>,
+
+    pub threads: Option<usize>,
+}
+
 #[derive(Default, Deserialize, JsonSchema)]
 pub struct FindDupesParams {
     pub root: Option<String>,

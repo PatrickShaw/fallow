@@ -143,6 +143,15 @@
         "minCorpusSizeForTokenCache": 5000
       }
     },
+    "similarCode": {
+      "description": "Configures the explicit local `similar-code` candidate workflow:\n`threshold` (0.80, model-specific cosine floor), `minLines` (3), and\nadditional `ignore` globs. Provider identity, setup, executables,\nendpoints, credentials, and consent cannot be set by project config.",
+      "$ref": "#/$defs/SimilarCodeConfig",
+      "default": {
+        "threshold": 0.8,
+        "minLines": 3,
+        "ignore": []
+      }
+    },
     "health": {
       "description": "Sets complexity and health thresholds for `fallow health` (also applied in combined `fallow` and `fallow audit`): `maxCyclomatic` (20), `maxCognitive` (15), `maxCrap` (30.0, findings at or above this are reported), `crapRefactorBand` (5, cyclomatic band below `maxCyclomatic` where a secondary refactor action is added), `maxUnitSize` (max function lines before a large-function finding, 60), `coverage`/`coverageRoot` (Istanbul coverage path and path-prefix strip for accurate CRAP), `ignore` globs (remove files from findings AND the health score), `thresholdOverrides` (per-file/per-function ceilings via `files`/`functions`/`maxCyclomatic`/`maxCognitive`/`maxCrap`/`maxUnitSize`/`reason`), `ownership` (`botPatterns` and `emailMode` for `--ownership`), and `suggestInlineSuppression` (true, emit `suppress-line` action hints in JSON). Raise thresholds to relax which functions are flagged, wire `coverage` for real CRAP scores, or exempt generated/test files via `ignore` (drops them from the score too) or `thresholdOverrides` (keeps them visible under a higher ceiling). The four `max*` thresholds govern findings only and never move `health_score`: its penalties use fixed calibration so grades stay comparable across projects, and `ignore` is the lever that removes files from the score.",
       "$ref": "#/$defs/HealthConfig",
@@ -985,6 +994,36 @@
           ]
         }
       }
+    },
+    "SimilarCodeConfig": {
+      "description": "Project-owned tuning for the explicit `fallow similar-code` workflow.\n\nProvider identity, executable discovery, model setup, credentials, and\nconsent are intentionally absent. Project configuration cannot select code\ndestinations or authorize model downloads.",
+      "type": "object",
+      "properties": {
+        "threshold": {
+          "description": "Minimum model-specific cosine similarity retained as an unverified\ncandidate. It is not a probability or refactor-safety verdict.",
+          "type": "number",
+          "format": "double",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "default": 0.8
+        },
+        "minLines": {
+          "description": "Minimum source line count for a function to enter model inference.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 1,
+          "default": 3
+        },
+        "ignore": {
+          "description": "Additional project-root-relative globs excluded only from similar-code\nextraction. Global `ignorePatterns` remain authoritative first.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
     },
     "HealthConfig": {
       "description": "Configuration for complexity health metrics (`fallow health`).",

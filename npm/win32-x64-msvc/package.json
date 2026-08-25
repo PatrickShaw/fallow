@@ -15,6 +15,8 @@
   ],
   "files": [
     "fallow.exe",
-    "fallow.exe.sig"
+    "fallow.exe.sig",
+    "fallow-similar-code.exe",
+    "fallow-similar-code.exe.sig"
   ]
 }

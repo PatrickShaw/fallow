@@ -29,6 +29,9 @@ Use this file for a fast architectural map before editing or reviewing.
 - `crates/license/`: offline license verification and feature entitlements.
 - `crates/security/`: data-driven security source and sink catalogue.
 - `crates/v8-coverage/`: V8 coverage parsing and normalization.
+- `tools/similar-code-sidecar/`: pinned local Candle inference and model setup
+  for opt-in semantic similar-code discovery.
+- `npm/fallow-similar-code*/`: exact-version companion and platform packages.
 - `crates/benchmarks/`: internal Rust benchmark support.
 - `editors/vscode/`: VS Code extension and LSP client.
 - `viz-frontend/`: browser visualization source, tests, and generated assets.
@@ -80,6 +83,11 @@ Find the first incorrect stage before editing:
 - `crates/engine/src/results.rs`: engine result carriers.
 - `crates/engine/src/duplicates.rs` and `duplication_detector/`: duplication
   orchestration and detection.
+- `crates/engine/src/similar_code.rs`: provider-neutral semantic candidate
+  admission, vector validation, comparison, ranking, and stable identities.
+- `crates/api/src/similar_code/` and `runtime/similar_code.rs`: verified local
+  provider transport, vector cache, orchestration, inspect evidence, and verdict
+  joining.
 - `crates/engine/src/health/`: scoring, hotspots, targets, and coverage gaps.
 - `crates/api/src/runtime/`: typed programmatic run entry points.
 - `crates/output/src/issue_contract.rs`: output-facing issue metadata.

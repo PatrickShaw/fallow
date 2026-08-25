@@ -15,6 +15,7 @@ use super::format::OutputFormat;
 use super::health::HealthConfig;
 use super::resolve::ResolveConfig;
 use super::rules::{PartialRulesConfig, RulesConfig, Severity};
+use super::similar_code::SimilarCodeConfig;
 use super::used_class_members::UsedClassMemberRule;
 use crate::external_plugin::{ExternalPluginDef, discover_external_plugins};
 
@@ -263,6 +264,8 @@ pub struct ResolvedConfig {
     pub unused_component_props_ignore: Option<regex::Regex>,
     /// Clone-detection settings, passed through unchanged.
     pub duplicates: DuplicatesConfig,
+    /// Explicit similar-code candidate settings, passed through unchanged.
+    pub similar_code: SimilarCodeConfig,
     /// Health and complexity thresholds, passed through unchanged.
     pub health: HealthConfig,
     /// TypeScript semantic-analysis opt-in, passed through unchanged.
@@ -768,6 +771,7 @@ impl FallowConfig {
             ignore_decorators: self.ignore_decorators,
             unused_component_props_ignore,
             duplicates: self.duplicates,
+            similar_code: self.similar_code,
             health: self.health,
             type_aware: self.type_aware,
             rules: production_rules.rules,
@@ -868,6 +872,7 @@ mod tests {
             ignore_decorators: vec![],
             unused_component_props: crate::UnusedComponentPropsConfig::default(),
             duplicates: DuplicatesConfig::default(),
+            similar_code: SimilarCodeConfig::default(),
             health: HealthConfig::default(),
             rules: RulesConfig::default(),
             boundaries: BoundaryConfig::default(),
@@ -922,6 +927,7 @@ mod tests {
             ignore_decorators: vec![],
             unused_component_props: crate::UnusedComponentPropsConfig::default(),
             duplicates: DuplicatesConfig::default(),
+            similar_code: SimilarCodeConfig::default(),
             health: HealthConfig::default(),
             rules: RulesConfig::default(),
             boundaries: BoundaryConfig::default(),
@@ -987,6 +993,7 @@ mod tests {
             ignore_decorators: vec![],
             unused_component_props: crate::UnusedComponentPropsConfig::default(),
             duplicates: DuplicatesConfig::default(),
+            similar_code: SimilarCodeConfig::default(),
             health: HealthConfig::default(),
             rules: RulesConfig::default(),
             boundaries: BoundaryConfig::default(),
@@ -1060,6 +1067,7 @@ mod tests {
             ignore_decorators: vec![],
             unused_component_props: crate::UnusedComponentPropsConfig::default(),
             duplicates: DuplicatesConfig::default(),
+            similar_code: SimilarCodeConfig::default(),
             health: HealthConfig::default(),
             rules: RulesConfig::default(),
             boundaries: BoundaryConfig::default(),
@@ -1165,6 +1173,7 @@ mod tests {
             ignore_decorators: vec![],
             unused_component_props: crate::UnusedComponentPropsConfig::default(),
             duplicates: DuplicatesConfig::default(),
+            similar_code: SimilarCodeConfig::default(),
             health: HealthConfig::default(),
             rules: RulesConfig::default(),
             boundaries: BoundaryConfig::default(),
@@ -1229,6 +1238,7 @@ mod tests {
             ignore_decorators: vec![],
             unused_component_props: crate::UnusedComponentPropsConfig::default(),
             duplicates: DuplicatesConfig::default(),
+            similar_code: SimilarCodeConfig::default(),
             health: HealthConfig::default(),
             rules: RulesConfig::default(),
             boundaries: BoundaryConfig::default(),

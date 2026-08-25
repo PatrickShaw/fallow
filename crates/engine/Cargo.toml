@@ -36,6 +36,7 @@ oxc_syntax = { workspace = true }
 oxc_coverage_instrument = { workspace = true }
 rayon = { workspace = true }
 rustc-hash = { workspace = true }
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
@@ -61,4 +62,8 @@ harness = false
 
 [[bench]]
 name = "dupes_pipeline"
+harness = false
+
+[[bench]]
+name = "similar_code"
 harness = false

@@ -21,6 +21,7 @@ mod project_info;
 mod recommend;
 mod security;
 mod semantic;
+mod similar_code;
 mod suppressions;
 mod trace;
 
@@ -58,6 +59,10 @@ pub use project_info::{build_project_info_args, run_project_info};
 pub use recommend::run_recommend;
 pub use security::{build_security_candidates_args, run_security_candidates};
 pub use semantic::{run_symbol_impact, run_symbol_trace};
+pub use similar_code::{
+    build_find_similar_code_args, build_inspect_similar_code_args, run_find_similar_code,
+    run_inspect_similar_code,
+};
 #[cfg(test)]
 pub use suppressions::build_list_suppressions_args;
 pub use suppressions::run_list_suppressions;

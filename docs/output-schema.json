@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Fallow JSON Output Schemas",
-  "description": "Schemas for the JSON output of fallow commands. Object-shaped envelopes covered by the `FallowOutput` contract carry a top-level `kind` discriminator. Current kind values: `audit`, `explain`, `inspect_target`, `trace`, `review-envelope`, `review-reconcile`, `coverage-setup`, `coverage-analyze`, `list-boundaries`, `list-workspaces`, `health`, `dupes`, `dead-code-grouped`, `impact`, `impact-cross-repo`, `security`, `security-survivors`, `security-blind-spots`, `dead-code`, `combined`, `feature-flags`, `audit-brief`, `decision-surface`, `review-walkthrough-guide`, `review-walkthrough-validation`, `suppression-inventory`, `type-aware-status`. Consumers should branch on `kind` instead of probing for unique field presence. `CodeClimateOutput` is a bare JSON array (per the Code Climate / GitLab Code Quality spec) and stays a sibling root branch discriminated by checking whether the document root is an array. `ErrorOutput` is the `--format json` failure document, emitted on stdout with a non-zero exit; it carries no `kind` and is discriminated by the `error: true` field.",
+  "description": "Schemas for the JSON output of fallow commands. Object-shaped envelopes covered by the `FallowOutput` contract carry a top-level `kind` discriminator. Current kind values: `audit`, `explain`, `inspect_target`, `trace`, `review-envelope`, `review-reconcile`, `coverage-setup`, `coverage-analyze`, `list-boundaries`, `list-workspaces`, `health`, `dupes`, `dead-code-grouped`, `impact`, `impact-cross-repo`, `security`, `security-survivors`, `security-blind-spots`, `dead-code`, `combined`, `feature-flags`, `audit-brief`, `decision-surface`, `review-walkthrough-guide`, `review-walkthrough-validation`, `suppression-inventory`, `type-aware-status`, `similar-code`, `similar-code-inspect`, `similar-code-review`. Consumers should branch on `kind` instead of probing for unique field presence. `CodeClimateOutput` is a bare JSON array (per the Code Climate / GitLab Code Quality spec) and stays a sibling root branch discriminated by checking whether the document root is an array. `ErrorOutput` is the `--format json` failure document, emitted on stdout with a non-zero exit; it carries no `kind` and is discriminated by the `error: true` field.",
   "oneOf": [
     {
       "$ref": "#/definitions/FallowOutput"
@@ -9258,6 +9258,66 @@
                 "kind": {
                   "type": "string",
                   "const": "type-aware-status"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            }
+          ]
+        },
+        {
+          "description": "`fallow similar-code --format json`. Independently versioned, local-only\nunverified semantic candidates with reproducible generation provenance and\ntyped completion accounting.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SimilarCodeOutput"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "similar-code"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            }
+          ]
+        },
+        {
+          "description": "`fallow similar-code inspect --format json`. Bounded source-grounded\npacket for one immutable candidate. Read-only and independently versioned.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SimilarCodeInspectOutput"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "similar-code-inspect"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            }
+          ]
+        },
+        {
+          "description": "`fallow similar-code review --format json`. Deterministically joins raw\ncandidates with a separate verdict document without mutating candidate truth.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SimilarCodeReviewOutput"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "similar-code-review"
                 }
               },
               "required": [
@@ -22776,6 +22836,1550 @@
         "references"
       ],
       "description": "Direct references that credit one namespace of an export binding."
+    },
+    "SimilarCodeOutput": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "Independent envelope schema version.",
+          "$ref": "#/definitions/SimilarCodeSchemaVersion"
+        },
+        "version": {
+          "description": "Fallow version that produced this output.",
+          "$ref": "#/definitions/ToolVersion"
+        },
+        "elapsed_ms": {
+          "description": "End-to-end elapsed milliseconds.",
+          "$ref": "#/definitions/ElapsedMs"
+        },
+        "generation": {
+          "description": "Immutable provider, model, and parameter provenance.",
+          "$ref": "#/definitions/SimilarCodeGeneration"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodeCandidate"
+          },
+          "description": "Deterministically ordered unverified candidates."
+        },
+        "completion": {
+          "description": "Typed completion and boundedness accounting.",
+          "$ref": "#/definitions/SimilarCodeCompletion"
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodeDiagnostic"
+          },
+          "description": "Non-severity diagnostics in deterministic order."
+        }
+      },
+      "required": [
+        "schema_version",
+        "version",
+        "elapsed_ms",
+        "generation",
+        "candidates",
+        "completion",
+        "diagnostics"
+      ],
+      "description": "Raw `fallow similar-code --format json` output."
+    },
+    "SimilarCodeInspectOutput": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "Independent inspect envelope schema version.",
+          "$ref": "#/definitions/SimilarCodeInspectSchemaVersion"
+        },
+        "version": {
+          "description": "Fallow version that produced this output.",
+          "$ref": "#/definitions/ToolVersion"
+        },
+        "elapsed_ms": {
+          "description": "End-to-end elapsed milliseconds.",
+          "$ref": "#/definitions/ElapsedMs"
+        },
+        "generation": {
+          "description": "Generation provenance copied from the candidate document.",
+          "$ref": "#/definitions/SimilarCodeGeneration"
+        },
+        "candidate": {
+          "description": "Immutable raw candidate being inspected.",
+          "$ref": "#/definitions/SimilarCodeCandidate"
+        },
+        "packet": {
+          "description": "Bounded source-grounded inspect packet.",
+          "$ref": "#/definitions/SimilarCodeInspectPacket"
+        },
+        "completion": {
+          "description": "Typed completion and boundedness accounting.",
+          "$ref": "#/definitions/SimilarCodeCompletion"
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodeDiagnostic"
+          },
+          "description": "Non-severity diagnostics in deterministic order."
+        }
+      },
+      "required": [
+        "schema_version",
+        "version",
+        "elapsed_ms",
+        "generation",
+        "candidate",
+        "packet",
+        "completion",
+        "diagnostics"
+      ],
+      "description": "`fallow similar-code inspect --format json` output."
+    },
+    "SimilarCodeReviewOutput": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "Independent review envelope schema version.",
+          "$ref": "#/definitions/SimilarCodeReviewSchemaVersion"
+        },
+        "version": {
+          "description": "Fallow version that produced this output.",
+          "$ref": "#/definitions/ToolVersion"
+        },
+        "elapsed_ms": {
+          "description": "End-to-end elapsed milliseconds.",
+          "$ref": "#/definitions/ElapsedMs"
+        },
+        "generation": {
+          "description": "Immutable generation provenance copied from the candidate document.",
+          "$ref": "#/definitions/SimilarCodeGeneration"
+        },
+        "review": {
+          "description": "Input document provenance for this deterministic join.",
+          "$ref": "#/definitions/SimilarCodeReviewProvenance"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodeReviewedCandidate"
+          },
+          "description": "Raw candidates joined with verdicts in candidate order."
+        },
+        "completion": {
+          "description": "Typed completion and boundedness accounting.",
+          "$ref": "#/definitions/SimilarCodeCompletion"
+        },
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodeDiagnostic"
+          },
+          "description": "Non-severity diagnostics in deterministic order."
+        }
+      },
+      "required": [
+        "schema_version",
+        "version",
+        "elapsed_ms",
+        "generation",
+        "review",
+        "candidates",
+        "completion",
+        "diagnostics"
+      ],
+      "description": "`fallow similar-code review --format json` output."
+    },
+    "SimilarCodeStatusOutput": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "Independent status schema version.",
+          "$ref": "#/definitions/SimilarCodeStatusSchemaVersion"
+        },
+        "version": {
+          "description": "Fallow version producing the status envelope.",
+          "$ref": "#/definitions/ToolVersion"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "description": "Companion protocol version."
+        },
+        "companion_version": {
+          "type": "string",
+          "description": "Exact companion package version."
+        },
+        "model_ready": {
+          "type": "boolean",
+          "description": "Whether every pinned model artifact is ready and verified."
+        },
+        "model_id": {
+          "type": "string",
+          "description": "Immutable model identifier."
+        },
+        "model_revision": {
+          "type": "string",
+          "description": "Immutable model revision."
+        },
+        "dimensions": {
+          "type": "integer",
+          "description": "Embedding width."
+        },
+        "max_tokens": {
+          "type": "integer",
+          "description": "Maximum tokenizer length."
+        },
+        "license": {
+          "type": "string",
+          "description": "Model license identifier."
+        },
+        "cache_dir": {
+          "type": "string",
+          "description": "Local model cache directory."
+        },
+        "download_bytes": {
+          "type": "integer",
+          "description": "Expected download size for all pinned artifacts."
+        },
+        "analysis_offline": {
+          "type": "boolean",
+          "description": "Whether source analysis stays local and offline."
+        },
+        "integrity_verified": {
+          "type": "boolean",
+          "description": "Whether all installed artifacts passed integrity validation."
+        },
+        "problem": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Actionable readiness problem when the model is unavailable."
+        },
+        "downloaded": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether this setup invocation downloaded new bytes."
+        }
+      },
+      "required": [
+        "schema_version",
+        "version",
+        "protocol_version",
+        "companion_version",
+        "model_ready",
+        "model_id",
+        "model_revision",
+        "dimensions",
+        "max_tokens",
+        "license",
+        "cache_dir",
+        "download_bytes",
+        "analysis_offline",
+        "integrity_verified"
+      ],
+      "description": "Machine-readable readiness of the exact local companion and pinned model."
+    },
+    "SimilarCodeCacheClearOutput": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "description": "Independent cache-clear schema version.",
+          "$ref": "#/definitions/SimilarCodeCacheClearSchemaVersion"
+        },
+        "version": {
+          "description": "Fallow version producing the cache-clear envelope.",
+          "$ref": "#/definitions/ToolVersion"
+        },
+        "removed": {
+          "type": "boolean",
+          "description": "Whether an existing vector cache was removed."
+        },
+        "model_removed": {
+          "type": "boolean",
+          "description": "Whether model artifacts were removed. Version 1 always emits false."
+        }
+      },
+      "required": [
+        "schema_version",
+        "version",
+        "removed",
+        "model_removed"
+      ],
+      "description": "Result of explicitly clearing the derived project-local vector cache."
+    },
+    "SimilarCodeVerdictInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "description": "Independent verdict document schema version.",
+          "$ref": "#/definitions/SimilarCodeVerdictSchemaVersion"
+        },
+        "verdicts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodeVerdict"
+          },
+          "description": "Verdicts in deterministic candidate order."
+        }
+      },
+      "required": [
+        "schema_version",
+        "verdicts"
+      ],
+      "description": "Versioned external verdict document consumed by review."
+    },
+    "SimilarCodeSchemaVersion": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "1",
+          "description": "Initial independent contract."
+        }
+      ],
+      "description": "Version singleton for raw similar-code output."
+    },
+    "SimilarCodeInspectSchemaVersion": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "1",
+          "description": "Initial independent contract."
+        }
+      ],
+      "description": "Version singleton for a similar-code inspect packet."
+    },
+    "SimilarCodeReviewSchemaVersion": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "1",
+          "description": "Initial independent contract."
+        }
+      ],
+      "description": "Version singleton for reviewed similar-code output."
+    },
+    "SimilarCodeVerdictSchemaVersion": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "1",
+          "description": "Initial independent verdict contract."
+        }
+      ],
+      "description": "Version singleton for the separate human or agent verdict document."
+    },
+    "SimilarCodeGeneration": {
+      "type": "object",
+      "properties": {
+        "extraction_semantics_version": {
+          "type": "integer",
+          "description": "Version of extraction and normalization semantics used for both IDs."
+        },
+        "provider": {
+          "description": "Local provider provenance.",
+          "$ref": "#/definitions/SimilarCodeProviderProvenance"
+        },
+        "model": {
+          "description": "Immutable model provenance.",
+          "$ref": "#/definitions/SimilarCodeModelProvenance"
+        },
+        "parameters": {
+          "description": "Effective generation parameters.",
+          "$ref": "#/definitions/SimilarCodeGenerationParameters"
+        },
+        "threshold": {
+          "type": "number",
+          "description": "Minimum cosine similarity admitted into the candidate set."
+        },
+        "min_lines": {
+          "type": "integer",
+          "description": "Minimum source line count admitted into function extraction."
+        }
+      },
+      "required": [
+        "extraction_semantics_version",
+        "provider",
+        "model",
+        "parameters",
+        "threshold",
+        "min_lines"
+      ],
+      "description": "Complete provenance needed to reproduce candidate generation."
+    },
+    "SimilarCodeProviderProvenance": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "Provider family. Version 1 accepts only the official local companion.",
+          "$ref": "#/definitions/SimilarCodeProvider"
+        },
+        "companion_version": {
+          "type": "string",
+          "description": "Exact companion package version."
+        },
+        "protocol_version": {
+          "type": "integer",
+          "description": "Companion protocol version negotiated for this run."
+        },
+        "source_left_machine": {
+          "type": "boolean",
+          "description": "Whether source content left the local machine. Version 1 requires false."
+        }
+      },
+      "required": [
+        "provider",
+        "companion_version",
+        "protocol_version",
+        "source_left_machine"
+      ],
+      "description": "Immutable local provider provenance for one generation run."
+    },
+    "SimilarCodeProvider": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "official-local-companion",
+          "description": "Exact-version official companion executed locally."
+        }
+      ],
+      "description": "Provider families admitted by the version 1 public contract."
+    },
+    "SimilarCodeModelProvenance": {
+      "type": "object",
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "description": "Stable model identifier."
+        },
+        "revision": {
+          "type": "string",
+          "description": "Immutable model revision."
+        },
+        "artifact_sha256": {
+          "type": "string",
+          "description": "SHA-256 digest of the exact model artifact bytes."
+        },
+        "license": {
+          "type": "string",
+          "description": "SPDX license identifier or reviewed license label."
+        },
+        "dimensions": {
+          "type": "integer",
+          "description": "Embedding vector dimensions."
+        }
+      },
+      "required": [
+        "model_id",
+        "revision",
+        "artifact_sha256",
+        "license",
+        "dimensions"
+      ],
+      "description": "Immutable model artifact provenance."
+    },
+    "SimilarCodeGenerationParameters": {
+      "type": "object",
+      "properties": {
+        "dtype": {
+          "type": "string",
+          "description": "Numeric representation used for model inference."
+        },
+        "pooling": {
+          "type": "string",
+          "description": "Pooling strategy applied to model output."
+        },
+        "normalized": {
+          "type": "boolean",
+          "description": "Whether vectors were normalized before comparison."
+        },
+        "batch_size": {
+          "type": "integer",
+          "description": "Maximum inference batch size used by the run."
+        },
+        "max_tokens": {
+          "type": "integer",
+          "description": "Maximum tokenizer length before deterministic truncation."
+        },
+        "parameter_sha256": {
+          "type": "string",
+          "description": "Digest over the complete effective generation parameter set."
+        }
+      },
+      "required": [
+        "dtype",
+        "pooling",
+        "normalized",
+        "batch_size",
+        "max_tokens",
+        "parameter_sha256"
+      ],
+      "description": "Parameters that materially affect generated embeddings and scores."
+    },
+    "SimilarCodeCandidate": {
+      "type": "object",
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "description": "Snapshot-stable opaque candidate identity."
+        },
+        "review_key": {
+          "type": "string",
+          "description": "Content-stable key used for safe line-movement rebinding."
+        },
+        "left": {
+          "description": "First location in deterministic pair order.",
+          "$ref": "#/definitions/SimilarCodeLocation"
+        },
+        "right": {
+          "description": "Second location in deterministic pair order.",
+          "$ref": "#/definitions/SimilarCodeLocation"
+        },
+        "similarity": {
+          "type": "number",
+          "description": "Cosine similarity reported by the pinned provider and model."
+        },
+        "similarity_band": {
+          "description": "Stable score band for consumers that do not need the raw score.",
+          "$ref": "#/definitions/SimilarCodeSimilarityBand"
+        },
+        "verification_status": {
+          "description": "Raw candidates are always explicitly unverified.",
+          "$ref": "#/definitions/SimilarCodeVerificationStatus"
+        },
+        "enrichment": {
+          "description": "Availability of optional deterministic and runtime context.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentAvailability"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodeAction"
+          },
+          "description": "Read-only inspect and review affordances."
+        }
+      },
+      "required": [
+        "candidate_id",
+        "review_key",
+        "left",
+        "right",
+        "similarity",
+        "similarity_band",
+        "verification_status",
+        "enrichment",
+        "actions"
+      ],
+      "description": "One unverified semantic similar-code candidate."
+    },
+    "SimilarCodeLocation": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Project-root-relative, forward-slash path."
+        },
+        "name": {
+          "type": "string",
+          "description": "Extracted function or method name."
+        },
+        "start_line": {
+          "type": "integer",
+          "description": "One-based inclusive start line."
+        },
+        "start_column": {
+          "type": "integer",
+          "description": "One-based inclusive start column."
+        },
+        "end_line": {
+          "type": "integer",
+          "description": "One-based inclusive end line."
+        },
+        "end_column": {
+          "type": "integer",
+          "description": "One-based inclusive end column."
+        },
+        "source_sha256": {
+          "type": "string",
+          "description": "SHA-256 digest of the exact extracted function source."
+        }
+      },
+      "required": [
+        "path",
+        "name",
+        "start_line",
+        "start_column",
+        "end_line",
+        "end_column",
+        "source_sha256"
+      ],
+      "description": "Exact named location of one candidate function."
+    },
+    "SimilarCodeSimilarityBand": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "moderate",
+          "description": "Candidate is close to the configured lower threshold."
+        },
+        {
+          "type": "string",
+          "const": "high",
+          "description": "Candidate has a strong semantic similarity score."
+        },
+        {
+          "type": "string",
+          "const": "very-high",
+          "description": "Candidate has an exceptionally high semantic similarity score."
+        }
+      ],
+      "description": "Stable, coarse interpretation of a candidate score."
+    },
+    "SimilarCodeVerificationStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "unverified",
+          "description": "Candidate generation is discovery only and has not verified behavior."
+        }
+      ],
+      "description": "Verification state of a raw semantic candidate."
+    },
+    "SimilarCodeEnrichmentAvailability": {
+      "type": "object",
+      "properties": {
+        "graph_relationship": {
+          "description": "Import or workspace relationship evidence.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentState"
+        },
+        "entry_point_reachability": {
+          "description": "Entry-point reachability evidence.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentState"
+        },
+        "callers": {
+          "description": "Direct caller evidence.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentState"
+        },
+        "callees": {
+          "description": "Direct callee evidence.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentState"
+        },
+        "ownership": {
+          "description": "Ownership evidence.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentState"
+        },
+        "churn": {
+          "description": "Churn evidence.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentState"
+        },
+        "tests": {
+          "description": "Test relationship evidence.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentState"
+        },
+        "deterministic_clone_coverage": {
+          "description": "Deterministic clone coverage evidence.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentState"
+        },
+        "runtime": {
+          "description": "Runtime evidence.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentState"
+        }
+      },
+      "required": [
+        "graph_relationship",
+        "entry_point_reachability",
+        "callers",
+        "callees",
+        "ownership",
+        "churn",
+        "tests",
+        "deterministic_clone_coverage",
+        "runtime"
+      ],
+      "description": "Availability of every supported source-grounded enrichment."
+    },
+    "SimilarCodeEnrichmentState": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "available",
+          "description": "Evidence is included in the inspect packet."
+        },
+        {
+          "type": "string",
+          "const": "unavailable",
+          "description": "Evidence was requested but could not be obtained."
+        },
+        {
+          "type": "string",
+          "const": "not-requested",
+          "description": "Evidence was not requested for this run."
+        }
+      ],
+      "description": "Explicit availability state for one optional enrichment source."
+    },
+    "SimilarCodeAction": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "Stable action identifier.",
+          "$ref": "#/definitions/SimilarCodeActionType"
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the read-only operation."
+        },
+        "read_only": {
+          "type": "boolean",
+          "description": "Explicit mutation guarantee. Version 1 requires this to be true."
+        }
+      },
+      "required": [
+        "action",
+        "description",
+        "read_only"
+      ],
+      "description": "Read-only follow-up exposed for a candidate."
+    },
+    "SimilarCodeActionType": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "inspect",
+          "description": "Build a bounded source-grounded inspect packet."
+        },
+        {
+          "type": "string",
+          "const": "review",
+          "description": "Join this candidate with an external verdict document."
+        }
+      ],
+      "description": "Read-only actions supported by the candidate workflow."
+    },
+    "SimilarCodeCompletion": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "description": "Overall completion status. Only `complete` makes an empty set conclusive.",
+          "$ref": "#/definitions/SimilarCodeCompletionStatus"
+        },
+        "phases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodePhaseCompletion"
+          },
+          "description": "Per-phase completion in pipeline order."
+        },
+        "limits": {
+          "description": "Effective run limits.",
+          "$ref": "#/definitions/SimilarCodeLimits"
+        },
+        "skips": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodeSkip"
+          },
+          "description": "Aggregated skips in phase and reason order."
+        },
+        "cache": {
+          "description": "Privacy-safe vector cache accounting.",
+          "$ref": "#/definitions/SimilarCodeCacheSummary"
+        },
+        "provider_inference_ms": {
+          "type": "integer",
+          "description": "Aggregate model inference wall time reported by the local provider."
+        }
+      },
+      "required": [
+        "status",
+        "phases",
+        "limits",
+        "skips",
+        "cache",
+        "provider_inference_ms"
+      ],
+      "description": "Typed completion, limit, skip, and cache accounting."
+    },
+    "SimilarCodeCompletionStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "complete",
+          "description": "Every admitted generation phase completed."
+        },
+        {
+          "type": "string",
+          "const": "partial",
+          "description": "One or more limits, skips, or timeouts made the result partial."
+        }
+      ],
+      "description": "Overall trustworthiness of an emitted result set."
+    },
+    "SimilarCodePhaseCompletion": {
+      "type": "object",
+      "properties": {
+        "phase": {
+          "description": "Pipeline phase.",
+          "$ref": "#/definitions/SimilarCodePhase"
+        },
+        "status": {
+          "description": "Whether this phase completed, skipped, or returned partial data.",
+          "$ref": "#/definitions/SimilarCodePhaseStatus"
+        },
+        "processed": {
+          "type": "integer",
+          "description": "Number of admitted inputs processed by this phase."
+        },
+        "total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Total admitted inputs known to this phase, when available."
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Stable explanation when the phase did not complete."
+        }
+      },
+      "required": [
+        "phase",
+        "status",
+        "processed"
+      ],
+      "description": "Accounting for one bounded generation phase."
+    },
+    "SimilarCodePhase": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "discovery",
+          "description": "Discover eligible source files."
+        },
+        {
+          "type": "string",
+          "const": "extraction",
+          "description": "Extract and normalize supported functions."
+        },
+        {
+          "type": "string",
+          "const": "cache",
+          "description": "Load or populate the local vector cache."
+        },
+        {
+          "type": "string",
+          "const": "embedding",
+          "description": "Generate embeddings with the official local companion."
+        },
+        {
+          "type": "string",
+          "const": "validation",
+          "description": "Validate provider output before using it."
+        },
+        {
+          "type": "string",
+          "const": "comparison",
+          "description": "Compare vectors and select bounded candidates."
+        },
+        {
+          "type": "string",
+          "const": "enrichment",
+          "description": "Build optional deterministic context."
+        }
+      ],
+      "description": "Bounded phase names in the similar-code pipeline."
+    },
+    "SimilarCodePhaseStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "complete",
+          "description": "Phase completed its admitted scope."
+        },
+        {
+          "type": "string",
+          "const": "partial",
+          "description": "Phase returned bounded partial results."
+        },
+        {
+          "type": "string",
+          "const": "skipped",
+          "description": "Phase was intentionally not run."
+        },
+        {
+          "type": "string",
+          "const": "timed-out",
+          "description": "Phase reached its configured timeout."
+        }
+      ],
+      "description": "Completion state for one generation phase."
+    },
+    "SimilarCodeLimits": {
+      "type": "object",
+      "properties": {
+        "max_files": {
+          "type": "integer",
+          "description": "Maximum source files admitted."
+        },
+        "max_functions": {
+          "type": "integer",
+          "description": "Maximum extracted functions admitted."
+        },
+        "max_source_bytes": {
+          "type": "integer",
+          "description": "Maximum aggregate normalized source bytes admitted."
+        },
+        "max_function_bytes": {
+          "type": "integer",
+          "description": "Maximum normalized bytes admitted for one function."
+        },
+        "max_batch_size": {
+          "type": "integer",
+          "description": "Maximum embedding batch size."
+        },
+        "max_vector_bytes": {
+          "type": "integer",
+          "description": "Maximum vector bytes retained for comparison."
+        },
+        "max_comparisons": {
+          "type": "integer",
+          "description": "Maximum pair comparisons performed."
+        },
+        "max_candidates": {
+          "type": "integer",
+          "description": "Maximum candidates returned."
+        },
+        "max_neighbors_per_function": {
+          "type": "integer",
+          "description": "Maximum returned neighbors per function."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "description": "End-to-end timeout in milliseconds."
+        }
+      },
+      "required": [
+        "max_files",
+        "max_functions",
+        "max_source_bytes",
+        "max_function_bytes",
+        "max_batch_size",
+        "max_vector_bytes",
+        "max_comparisons",
+        "max_candidates",
+        "max_neighbors_per_function",
+        "timeout_ms"
+      ],
+      "description": "Effective resource limits for a similar-code run."
+    },
+    "SimilarCodeSkip": {
+      "type": "object",
+      "properties": {
+        "phase": {
+          "description": "Phase that skipped the work.",
+          "$ref": "#/definitions/SimilarCodePhase"
+        },
+        "reason": {
+          "description": "Stable skip reason.",
+          "$ref": "#/definitions/SimilarCodeSkipReason"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of inputs skipped for this phase and reason."
+        }
+      },
+      "required": [
+        "phase",
+        "reason",
+        "count"
+      ],
+      "description": "Count of skipped work for a stable reason."
+    },
+    "SimilarCodeSkipReason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "below-minimum-lines",
+          "description": "Function was shorter than the configured minimum source-line count."
+        },
+        {
+          "type": "string",
+          "const": "unsupported-function",
+          "description": "Syntax form is outside the supported extraction contract."
+        },
+        {
+          "type": "string",
+          "const": "generated-source",
+          "description": "Generated source was excluded."
+        },
+        {
+          "type": "string",
+          "const": "function-too-large",
+          "description": "One function exceeded the per-function byte limit."
+        },
+        {
+          "type": "string",
+          "const": "input-limit",
+          "description": "File or function admission limit was reached."
+        },
+        {
+          "type": "string",
+          "const": "source-bytes-limit",
+          "description": "Aggregate source byte limit was reached."
+        },
+        {
+          "type": "string",
+          "const": "vector-memory-limit",
+          "description": "Vector memory limit was reached."
+        },
+        {
+          "type": "string",
+          "const": "comparison-limit",
+          "description": "Pair comparison limit was reached."
+        },
+        {
+          "type": "string",
+          "const": "candidate-limit",
+          "description": "Candidate result limit was reached."
+        },
+        {
+          "type": "string",
+          "const": "neighbor-limit",
+          "description": "Per-function neighbor limit was reached."
+        },
+        {
+          "type": "string",
+          "const": "timeout",
+          "description": "Provider or overall timeout was reached."
+        },
+        {
+          "type": "string",
+          "const": "provider-failure",
+          "description": "Local provider failed after returning a usable subset of vectors."
+        },
+        {
+          "type": "string",
+          "const": "token-truncation",
+          "description": "Provider tokenization truncated an otherwise admitted source fragment."
+        },
+        {
+          "type": "string",
+          "const": "enrichment-unavailable",
+          "description": "Optional enrichment source was unavailable."
+        }
+      ],
+      "description": "Stable reasons why admitted work was skipped or truncated."
+    },
+    "SimilarCodeCacheSummary": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "description": "Aggregate cache outcome.",
+          "$ref": "#/definitions/SimilarCodeCacheStatus"
+        },
+        "hits": {
+          "type": "integer",
+          "description": "Valid vector cache hits."
+        },
+        "misses": {
+          "type": "integer",
+          "description": "Vector cache misses."
+        },
+        "writes": {
+          "type": "integer",
+          "description": "Newly written vector cache entries."
+        },
+        "invalid_entries": {
+          "type": "integer",
+          "description": "Corrupt or incompatible entries ignored safely."
+        }
+      },
+      "required": [
+        "status",
+        "hits",
+        "misses",
+        "writes",
+        "invalid_entries"
+      ],
+      "description": "Privacy-safe cache accounting. Source fragments are never represented."
+    },
+    "SimilarCodeCacheStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "disabled",
+          "description": "Cache use was disabled."
+        },
+        {
+          "type": "string",
+          "const": "hit",
+          "description": "Every requested vector was found in the cache."
+        },
+        {
+          "type": "string",
+          "const": "miss",
+          "description": "No requested vector was found in the cache."
+        },
+        {
+          "type": "string",
+          "const": "mixed",
+          "description": "The run used both cached and newly generated vectors."
+        }
+      ],
+      "description": "Vector cache outcome for a run."
+    },
+    "SimilarCodeDiagnostic": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "description": "Stable diagnostic domain.",
+          "$ref": "#/definitions/SimilarCodeDiagnosticDomain"
+        },
+        "code": {
+          "type": "string",
+          "description": "Stable machine-readable code."
+        },
+        "message": {
+          "type": "string",
+          "description": "Bounded human-readable explanation."
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Optional project-root-relative path."
+        }
+      },
+      "required": [
+        "domain",
+        "code",
+        "message"
+      ],
+      "description": "Actionable diagnostic without a severity or gate implication."
+    },
+    "SimilarCodeDiagnosticDomain": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "workspace",
+          "description": "Source discovery or workspace interpretation."
+        },
+        {
+          "type": "string",
+          "const": "extraction",
+          "description": "Function extraction or normalization."
+        },
+        {
+          "type": "string",
+          "const": "provider",
+          "description": "Local provider execution or protocol validation."
+        },
+        {
+          "type": "string",
+          "const": "cache",
+          "description": "Local vector cache handling."
+        },
+        {
+          "type": "string",
+          "const": "enrichment",
+          "description": "Optional source-grounded enrichment."
+        },
+        {
+          "type": "string",
+          "const": "review",
+          "description": "Verdict matching and review-key rebinding."
+        }
+      ],
+      "description": "Non-severity diagnostic domain for similar-code generation."
+    },
+    "SimilarCodeInspectPacket": {
+      "type": "object",
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "description": "Candidate identity this packet describes."
+        },
+        "review_key": {
+          "type": "string",
+          "description": "Content-stable review key this packet describes."
+        },
+        "availability": {
+          "description": "Availability of every optional evidence source.",
+          "$ref": "#/definitions/SimilarCodeEnrichmentAvailability"
+        },
+        "graph_relationship": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Graph relationship label, when relationship evidence is available."
+        },
+        "left": {
+          "description": "Evidence for the candidate's first location.",
+          "$ref": "#/definitions/SimilarCodeSideEvidence"
+        },
+        "right": {
+          "description": "Evidence for the candidate's second location.",
+          "$ref": "#/definitions/SimilarCodeSideEvidence"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "review_key",
+        "availability",
+        "left",
+        "right"
+      ],
+      "description": "Bounded source-grounded packet for one immutable candidate."
+    },
+    "SimilarCodeSideEvidence": {
+      "type": "object",
+      "properties": {
+        "source_window": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Bounded source window included only in inspect output, never raw output or cache."
+        },
+        "parameter_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Declared parameter count when extraction supplied it."
+        },
+        "is_async": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the inspected function is declared async."
+        },
+        "is_generator": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the inspected function is a generator."
+        },
+        "has_await": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the inspected function contains an await expression."
+        },
+        "has_throw": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the inspected function contains a throw expression."
+        },
+        "side_effect_hint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SimilarCodeSideEffectHint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Conservative syntactic side-effect classification."
+        },
+        "entry_point_reachable": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the function is reachable from a configured entry point."
+        },
+        "callers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodeNamedReference"
+          },
+          "description": "Bounded, deterministically ordered direct callers."
+        },
+        "callees": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SimilarCodeNamedReference"
+          },
+          "description": "Bounded, deterministically ordered direct callees."
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Bounded, deterministically ordered ownership labels."
+        },
+        "churn_commits": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Recent commit count in the configured churn window."
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Bounded, root-relative related test paths."
+        },
+        "deterministic_clone_coverage": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Fraction covered by deterministic clone groups, from zero through one."
+        },
+        "runtime_observations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Runtime observation count when compatible runtime evidence is present."
+        }
+      },
+      "required": [
+        "callers",
+        "callees",
+        "owners",
+        "tests"
+      ],
+      "description": "Bounded evidence for one side of an inspect packet."
+    },
+    "SimilarCodeSideEffectHint": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "pure-looking",
+          "description": "No syntactic side-effect signal was found."
+        },
+        {
+          "type": "string",
+          "const": "may-have-side-effects",
+          "description": "The function contains a syntactic side-effect signal."
+        },
+        {
+          "type": "string",
+          "const": "unknown",
+          "description": "The available evidence is insufficient to classify the function."
+        }
+      ],
+      "description": "Conservative syntactic side-effect hint for an inspected function."
+    },
+    "SimilarCodeNamedReference": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Project-root-relative, forward-slash path."
+        },
+        "name": {
+          "type": "string",
+          "description": "Referenced symbol name."
+        },
+        "line": {
+          "type": "integer",
+          "description": "One-based source line."
+        }
+      },
+      "required": [
+        "path",
+        "name",
+        "line"
+      ],
+      "description": "One named graph reference used in an inspect packet."
+    },
+    "SimilarCodeVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "description": "Snapshot identity from the raw candidate."
+        },
+        "review_key": {
+          "type": "string",
+          "description": "Content-stable identity from the raw candidate."
+        },
+        "candidate_worthy": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the pair is useful enough to review. Null means undecided."
+        },
+        "behaviorally_equivalent": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the two functions behave equivalently. Null means undecided."
+        },
+        "refactor_safe": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether consolidation is safe. Null means undecided."
+        },
+        "outcome": {
+          "description": "Domain interpretation independent of the three judgments.",
+          "$ref": "#/definitions/SimilarCodeDomainOutcome"
+        },
+        "rationale": {
+          "type": "string",
+          "description": "Bounded explanation grounded in the inspected sources."
+        }
+      },
+      "required": [
+        "candidate_id",
+        "review_key",
+        "outcome",
+        "rationale"
+      ],
+      "description": "Separate verdict input for one immutable candidate."
+    },
+    "SimilarCodeDomainOutcome": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "same-responsibility",
+          "description": "Functions implement the same responsibility."
+        },
+        {
+          "type": "string",
+          "const": "related-but-distinct",
+          "description": "Functions are related but intentionally serve distinct responsibilities."
+        },
+        {
+          "type": "string",
+          "const": "intentional-duplication",
+          "description": "Duplication is understood and intentional."
+        },
+        {
+          "type": "string",
+          "const": "unrelated",
+          "description": "Pair is not meaningfully related."
+        },
+        {
+          "type": "string",
+          "const": "needs-human-review",
+          "description": "Available evidence does not support a verdict."
+        }
+      ],
+      "description": "Domain outcome assigned by review, never by candidate generation."
+    },
+    "SimilarCodeVerdictMatch": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "candidate-id",
+          "description": "Verdict matched the exact snapshot candidate identity."
+        },
+        {
+          "type": "string",
+          "const": "review-key",
+          "description": "Verdict was rebound unambiguously through both content digests."
+        },
+        {
+          "type": "string",
+          "const": "unverified",
+          "description": "No verdict was supplied for this candidate."
+        },
+        {
+          "type": "string",
+          "const": "ambiguous-review-key",
+          "description": "Review-key rebinding was ambiguous and therefore refused."
+        }
+      ],
+      "description": "How review matched an external verdict to the current candidate."
+    },
+    "SimilarCodeReviewedCandidate": {
+      "type": "object",
+      "properties": {
+        "candidate": {
+          "description": "Immutable raw candidate, unchanged by review.",
+          "$ref": "#/definitions/SimilarCodeCandidate"
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SimilarCodeVerdict"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Safely matched external verdict, absent when still unverified."
+        },
+        "verdict_match": {
+          "description": "Match or abstention path used by review.",
+          "$ref": "#/definitions/SimilarCodeVerdictMatch"
+        },
+        "outcome": {
+          "description": "Domain outcome. Unverified or ambiguous entries use `needs-human-review`.",
+          "$ref": "#/definitions/SimilarCodeDomainOutcome"
+        }
+      },
+      "required": [
+        "candidate",
+        "verdict_match",
+        "outcome"
+      ],
+      "description": "One candidate joined with its separate verdict, if safely matched."
+    },
+    "SimilarCodeReviewProvenance": {
+      "type": "object",
+      "properties": {
+        "candidates_sha256": {
+          "type": "string",
+          "description": "SHA-256 digest of the exact candidate JSON input bytes."
+        },
+        "verdicts_sha256": {
+          "type": "string",
+          "description": "SHA-256 digest of the exact verdict JSON input bytes."
+        }
+      },
+      "required": [
+        "candidates_sha256",
+        "verdicts_sha256"
+      ],
+      "description": "Digests that make the review join reproducible without exposing source."
+    },
+    "SimilarCodeStatusSchemaVersion": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "1",
+          "description": "Initial independent status contract."
+        }
+      ],
+      "description": "Version singleton for local-provider status output."
+    },
+    "SimilarCodeCacheClearSchemaVersion": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "1",
+          "description": "Initial independent cache-mutation contract."
+        }
+      ],
+      "description": "Version singleton for vector-cache clear output."
     }
   }
 }

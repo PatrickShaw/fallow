@@ -47,3 +47,6 @@ vulnerabilit = "vulnerabilit"
 # `sais` is the SA-IS algorithm (Suffix Array by Induced Sorting) used for
 # clone-detection suffix array construction, not a misspelling of "says".
 sais = "sais"
+# Candle API identifiers used by the local similar-code model implementation.
+mmaped = "mmaped"
+arange = "arange"

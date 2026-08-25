@@ -24,7 +24,7 @@
 
 
 /**
- * Schemas for the JSON output of fallow commands. Object-shaped envelopes covered by the `FallowOutput` contract carry a top-level `kind` discriminator. Current kind values: `audit`, `explain`, `inspect_target`, `trace`, `review-envelope`, `review-reconcile`, `coverage-setup`, `coverage-analyze`, `list-boundaries`, `list-workspaces`, `health`, `dupes`, `dead-code-grouped`, `impact`, `impact-cross-repo`, `security`, `security-survivors`, `security-blind-spots`, `dead-code`, `combined`, `feature-flags`, `audit-brief`, `decision-surface`, `review-walkthrough-guide`, `review-walkthrough-validation`, `suppression-inventory`, `type-aware-status`. Consumers should branch on `kind` instead of probing for unique field presence. `CodeClimateOutput` is a bare JSON array (per the Code Climate / GitLab Code Quality spec) and stays a sibling root branch discriminated by checking whether the document root is an array. `ErrorOutput` is the `--format json` failure document, emitted on stdout with a non-zero exit; it carries no `kind` and is discriminated by the `error: true` field.
+ * Schemas for the JSON output of fallow commands. Object-shaped envelopes covered by the `FallowOutput` contract carry a top-level `kind` discriminator. Current kind values: `audit`, `explain`, `inspect_target`, `trace`, `review-envelope`, `review-reconcile`, `coverage-setup`, `coverage-analyze`, `list-boundaries`, `list-workspaces`, `health`, `dupes`, `dead-code-grouped`, `impact`, `impact-cross-repo`, `security`, `security-survivors`, `security-blind-spots`, `dead-code`, `combined`, `feature-flags`, `audit-brief`, `decision-surface`, `review-walkthrough-guide`, `review-walkthrough-validation`, `suppression-inventory`, `type-aware-status`, `similar-code`, `similar-code-inspect`, `similar-code-review`. Consumers should branch on `kind` instead of probing for unique field presence. `CodeClimateOutput` is a bare JSON array (per the Code Climate / GitLab Code Quality spec) and stays a sibling root branch discriminated by checking whether the document root is an array. `ErrorOutput` is the `--format json` failure document, emitted on stdout with a non-zero exit; it carries no `kind` and is discriminated by the `error: true` field.
  */
 export type FallowJsonOutput = (FallowOutput | CodeClimateOutput | ErrorOutput)
 /**
@@ -98,6 +98,12 @@ kind: "review-walkthrough-validation"
 kind: "suppression-inventory"
 }) | (TypeAwareStatusOutput & {
 kind: "type-aware-status"
+}) | (SimilarCodeOutput & {
+kind: "similar-code"
+}) | (SimilarCodeInspectOutput & {
+kind: "similar-code-inspect"
+}) | (SimilarCodeReviewOutput & {
+kind: "similar-code-review"
 }))
 /**
  * Schema projection for the audit envelope's exact version.
@@ -1043,6 +1049,74 @@ export type SuppressionInventoryOrigin = "comment"
  * Schema projection for the type-aware status envelope's exact version.
  */
 export type TypeAwareStatusSchemaVersion = 8
+/**
+ * Version singleton for raw similar-code output.
+ */
+export type SimilarCodeSchemaVersion = "1"
+/**
+ * Provider families admitted by the version 1 public contract.
+ */
+export type SimilarCodeProvider = "official-local-companion"
+/**
+ * Stable, coarse interpretation of a candidate score.
+ */
+export type SimilarCodeSimilarityBand = ("moderate" | "high" | "very-high")
+/**
+ * Verification state of a raw semantic candidate.
+ */
+export type SimilarCodeVerificationStatus = "unverified"
+/**
+ * Explicit availability state for one optional enrichment source.
+ */
+export type SimilarCodeEnrichmentState = ("available" | "unavailable" | "not-requested")
+/**
+ * Read-only actions supported by the candidate workflow.
+ */
+export type SimilarCodeActionType = ("inspect" | "review")
+/**
+ * Overall trustworthiness of an emitted result set.
+ */
+export type SimilarCodeCompletionStatus = ("complete" | "partial")
+/**
+ * Bounded phase names in the similar-code pipeline.
+ */
+export type SimilarCodePhase = ("discovery" | "extraction" | "cache" | "embedding" | "validation" | "comparison" | "enrichment")
+/**
+ * Completion state for one generation phase.
+ */
+export type SimilarCodePhaseStatus = ("complete" | "partial" | "skipped" | "timed-out")
+/**
+ * Stable reasons why admitted work was skipped or truncated.
+ */
+export type SimilarCodeSkipReason = ("below-minimum-lines" | "unsupported-function" | "generated-source" | "function-too-large" | "input-limit" | "source-bytes-limit" | "vector-memory-limit" | "comparison-limit" | "candidate-limit" | "neighbor-limit" | "timeout" | "provider-failure" | "token-truncation" | "enrichment-unavailable")
+/**
+ * Vector cache outcome for a run.
+ */
+export type SimilarCodeCacheStatus = ("disabled" | "hit" | "miss" | "mixed")
+/**
+ * Non-severity diagnostic domain for similar-code generation.
+ */
+export type SimilarCodeDiagnosticDomain = ("workspace" | "extraction" | "provider" | "cache" | "enrichment" | "review")
+/**
+ * Version singleton for a similar-code inspect packet.
+ */
+export type SimilarCodeInspectSchemaVersion = "1"
+/**
+ * Conservative syntactic side-effect hint for an inspected function.
+ */
+export type SimilarCodeSideEffectHint = ("pure-looking" | "may-have-side-effects" | "unknown")
+/**
+ * Version singleton for reviewed similar-code output.
+ */
+export type SimilarCodeReviewSchemaVersion = "1"
+/**
+ * Domain outcome assigned by review, never by candidate generation.
+ */
+export type SimilarCodeDomainOutcome = ("same-responsibility" | "related-but-distinct" | "intentional-duplication" | "unrelated" | "needs-human-review")
+/**
+ * How review matched an external verdict to the current candidate.
+ */
+export type SimilarCodeVerdictMatch = ("candidate-id" | "review-key" | "unverified" | "ambiguous-review-key")
 /**
  * Discriminator value for [`CodeClimateIssue::kind`].
  */
@@ -13182,6 +13256,530 @@ backend_version?: (string | null)
  * How to make the companion available, when it is not.
  */
 remediation?: (string | null)
+}
+/**
+ * Raw `fallow similar-code --format json` output.
+ */
+export interface SimilarCodeOutput {
+schema_version: SimilarCodeSchemaVersion
+version: ToolVersion
+elapsed_ms: ElapsedMs
+generation: SimilarCodeGeneration
+/**
+ * Deterministically ordered unverified candidates.
+ */
+candidates: SimilarCodeCandidate[]
+completion: SimilarCodeCompletion
+/**
+ * Non-severity diagnostics in deterministic order.
+ */
+diagnostics: SimilarCodeDiagnostic[]
+}
+/**
+ * Complete provenance needed to reproduce candidate generation.
+ */
+export interface SimilarCodeGeneration {
+/**
+ * Version of extraction and normalization semantics used for both IDs.
+ */
+extraction_semantics_version: number
+provider: SimilarCodeProviderProvenance
+model: SimilarCodeModelProvenance
+parameters: SimilarCodeGenerationParameters
+/**
+ * Minimum cosine similarity admitted into the candidate set.
+ */
+threshold: number
+/**
+ * Minimum source line count admitted into function extraction.
+ */
+min_lines: number
+}
+/**
+ * Immutable local provider provenance for one generation run.
+ */
+export interface SimilarCodeProviderProvenance {
+provider: SimilarCodeProvider
+/**
+ * Exact companion package version.
+ */
+companion_version: string
+/**
+ * Companion protocol version negotiated for this run.
+ */
+protocol_version: number
+/**
+ * Whether source content left the local machine. Version 1 requires false.
+ */
+source_left_machine: boolean
+}
+/**
+ * Immutable model artifact provenance.
+ */
+export interface SimilarCodeModelProvenance {
+/**
+ * Stable model identifier.
+ */
+model_id: string
+/**
+ * Immutable model revision.
+ */
+revision: string
+/**
+ * SHA-256 digest of the exact model artifact bytes.
+ */
+artifact_sha256: string
+/**
+ * SPDX license identifier or reviewed license label.
+ */
+license: string
+/**
+ * Embedding vector dimensions.
+ */
+dimensions: number
+}
+/**
+ * Parameters that materially affect generated embeddings and scores.
+ */
+export interface SimilarCodeGenerationParameters {
+/**
+ * Numeric representation used for model inference.
+ */
+dtype: string
+/**
+ * Pooling strategy applied to model output.
+ */
+pooling: string
+/**
+ * Whether vectors were normalized before comparison.
+ */
+normalized: boolean
+/**
+ * Maximum inference batch size used by the run.
+ */
+batch_size: number
+/**
+ * Maximum tokenizer length before deterministic truncation.
+ */
+max_tokens: number
+/**
+ * Digest over the complete effective generation parameter set.
+ */
+parameter_sha256: string
+}
+/**
+ * One unverified semantic similar-code candidate.
+ */
+export interface SimilarCodeCandidate {
+/**
+ * Snapshot-stable opaque candidate identity.
+ */
+candidate_id: string
+/**
+ * Content-stable key used for safe line-movement rebinding.
+ */
+review_key: string
+left: SimilarCodeLocation
+right: SimilarCodeLocation
+/**
+ * Cosine similarity reported by the pinned provider and model.
+ */
+similarity: number
+similarity_band: SimilarCodeSimilarityBand
+verification_status: SimilarCodeVerificationStatus
+enrichment: SimilarCodeEnrichmentAvailability
+/**
+ * Read-only inspect and review affordances.
+ */
+actions: SimilarCodeAction[]
+}
+/**
+ * Exact named location of one candidate function.
+ */
+export interface SimilarCodeLocation {
+/**
+ * Project-root-relative, forward-slash path.
+ */
+path: string
+/**
+ * Extracted function or method name.
+ */
+name: string
+/**
+ * One-based inclusive start line.
+ */
+start_line: number
+/**
+ * One-based inclusive start column.
+ */
+start_column: number
+/**
+ * One-based inclusive end line.
+ */
+end_line: number
+/**
+ * One-based inclusive end column.
+ */
+end_column: number
+/**
+ * SHA-256 digest of the exact extracted function source.
+ */
+source_sha256: string
+}
+/**
+ * Availability of every supported source-grounded enrichment.
+ */
+export interface SimilarCodeEnrichmentAvailability {
+graph_relationship: SimilarCodeEnrichmentState
+entry_point_reachability: SimilarCodeEnrichmentState
+callers: SimilarCodeEnrichmentState
+callees: SimilarCodeEnrichmentState
+ownership: SimilarCodeEnrichmentState
+churn: SimilarCodeEnrichmentState
+tests: SimilarCodeEnrichmentState
+deterministic_clone_coverage: SimilarCodeEnrichmentState
+runtime: SimilarCodeEnrichmentState
+}
+/**
+ * Read-only follow-up exposed for a candidate.
+ */
+export interface SimilarCodeAction {
+action: SimilarCodeActionType
+/**
+ * Human-readable description of the read-only operation.
+ */
+description: string
+/**
+ * Explicit mutation guarantee. Version 1 requires this to be true.
+ */
+read_only: boolean
+}
+/**
+ * Typed completion, limit, skip, and cache accounting.
+ */
+export interface SimilarCodeCompletion {
+status: SimilarCodeCompletionStatus
+/**
+ * Per-phase completion in pipeline order.
+ */
+phases: SimilarCodePhaseCompletion[]
+limits: SimilarCodeLimits
+/**
+ * Aggregated skips in phase and reason order.
+ */
+skips: SimilarCodeSkip[]
+cache: SimilarCodeCacheSummary
+/**
+ * Aggregate model inference wall time reported by the local provider.
+ */
+provider_inference_ms: number
+}
+/**
+ * Accounting for one bounded generation phase.
+ */
+export interface SimilarCodePhaseCompletion {
+phase: SimilarCodePhase
+status: SimilarCodePhaseStatus
+/**
+ * Number of admitted inputs processed by this phase.
+ */
+processed: number
+/**
+ * Total admitted inputs known to this phase, when available.
+ */
+total?: (number | null)
+/**
+ * Stable explanation when the phase did not complete.
+ */
+reason?: (string | null)
+}
+/**
+ * Effective resource limits for a similar-code run.
+ */
+export interface SimilarCodeLimits {
+/**
+ * Maximum source files admitted.
+ */
+max_files: number
+/**
+ * Maximum extracted functions admitted.
+ */
+max_functions: number
+/**
+ * Maximum aggregate normalized source bytes admitted.
+ */
+max_source_bytes: number
+/**
+ * Maximum normalized bytes admitted for one function.
+ */
+max_function_bytes: number
+/**
+ * Maximum embedding batch size.
+ */
+max_batch_size: number
+/**
+ * Maximum vector bytes retained for comparison.
+ */
+max_vector_bytes: number
+/**
+ * Maximum pair comparisons performed.
+ */
+max_comparisons: number
+/**
+ * Maximum candidates returned.
+ */
+max_candidates: number
+/**
+ * Maximum returned neighbors per function.
+ */
+max_neighbors_per_function: number
+/**
+ * End-to-end timeout in milliseconds.
+ */
+timeout_ms: number
+}
+/**
+ * Count of skipped work for a stable reason.
+ */
+export interface SimilarCodeSkip {
+phase: SimilarCodePhase
+reason: SimilarCodeSkipReason
+/**
+ * Number of inputs skipped for this phase and reason.
+ */
+count: number
+}
+/**
+ * Privacy-safe cache accounting. Source fragments are never represented.
+ */
+export interface SimilarCodeCacheSummary {
+status: SimilarCodeCacheStatus
+/**
+ * Valid vector cache hits.
+ */
+hits: number
+/**
+ * Vector cache misses.
+ */
+misses: number
+/**
+ * Newly written vector cache entries.
+ */
+writes: number
+/**
+ * Corrupt or incompatible entries ignored safely.
+ */
+invalid_entries: number
+}
+/**
+ * Actionable diagnostic without a severity or gate implication.
+ */
+export interface SimilarCodeDiagnostic {
+domain: SimilarCodeDiagnosticDomain
+/**
+ * Stable machine-readable code.
+ */
+code: string
+/**
+ * Bounded human-readable explanation.
+ */
+message: string
+/**
+ * Optional project-root-relative path.
+ */
+path?: (string | null)
+}
+/**
+ * `fallow similar-code inspect --format json` output.
+ */
+export interface SimilarCodeInspectOutput {
+schema_version: SimilarCodeInspectSchemaVersion
+version: ToolVersion
+elapsed_ms: ElapsedMs
+generation: SimilarCodeGeneration
+candidate: SimilarCodeCandidate
+packet: SimilarCodeInspectPacket
+completion: SimilarCodeCompletion
+/**
+ * Non-severity diagnostics in deterministic order.
+ */
+diagnostics: SimilarCodeDiagnostic[]
+}
+/**
+ * Bounded source-grounded packet for one immutable candidate.
+ */
+export interface SimilarCodeInspectPacket {
+/**
+ * Candidate identity this packet describes.
+ */
+candidate_id: string
+/**
+ * Content-stable review key this packet describes.
+ */
+review_key: string
+availability: SimilarCodeEnrichmentAvailability
+/**
+ * Graph relationship label, when relationship evidence is available.
+ */
+graph_relationship?: (string | null)
+left: SimilarCodeSideEvidence
+right: SimilarCodeSideEvidence
+}
+/**
+ * Bounded evidence for one side of an inspect packet.
+ */
+export interface SimilarCodeSideEvidence {
+/**
+ * Bounded source window included only in inspect output, never raw output or cache.
+ */
+source_window?: (string | null)
+/**
+ * Declared parameter count when extraction supplied it.
+ */
+parameter_count?: (number | null)
+/**
+ * Whether the inspected function is declared async.
+ */
+is_async?: (boolean | null)
+/**
+ * Whether the inspected function is a generator.
+ */
+is_generator?: (boolean | null)
+/**
+ * Whether the inspected function contains an await expression.
+ */
+has_await?: (boolean | null)
+/**
+ * Whether the inspected function contains a throw expression.
+ */
+has_throw?: (boolean | null)
+/**
+ * Conservative syntactic side-effect classification.
+ */
+side_effect_hint?: (SimilarCodeSideEffectHint | null)
+/**
+ * Whether the function is reachable from a configured entry point.
+ */
+entry_point_reachable?: (boolean | null)
+/**
+ * Bounded, deterministically ordered direct callers.
+ */
+callers: SimilarCodeNamedReference[]
+/**
+ * Bounded, deterministically ordered direct callees.
+ */
+callees: SimilarCodeNamedReference[]
+/**
+ * Bounded, deterministically ordered ownership labels.
+ */
+owners: string[]
+/**
+ * Recent commit count in the configured churn window.
+ */
+churn_commits?: (number | null)
+/**
+ * Bounded, root-relative related test paths.
+ */
+tests: string[]
+/**
+ * Fraction covered by deterministic clone groups, from zero through one.
+ */
+deterministic_clone_coverage?: (number | null)
+/**
+ * Runtime observation count when compatible runtime evidence is present.
+ */
+runtime_observations?: (number | null)
+}
+/**
+ * One named graph reference used in an inspect packet.
+ */
+export interface SimilarCodeNamedReference {
+/**
+ * Project-root-relative, forward-slash path.
+ */
+path: string
+/**
+ * Referenced symbol name.
+ */
+name: string
+/**
+ * One-based source line.
+ */
+line: number
+}
+/**
+ * `fallow similar-code review --format json` output.
+ */
+export interface SimilarCodeReviewOutput {
+schema_version: SimilarCodeReviewSchemaVersion
+version: ToolVersion
+elapsed_ms: ElapsedMs
+generation: SimilarCodeGeneration
+review: SimilarCodeReviewProvenance
+/**
+ * Raw candidates joined with verdicts in candidate order.
+ */
+candidates: SimilarCodeReviewedCandidate[]
+completion: SimilarCodeCompletion
+/**
+ * Non-severity diagnostics in deterministic order.
+ */
+diagnostics: SimilarCodeDiagnostic[]
+}
+/**
+ * Digests that make the review join reproducible without exposing source.
+ */
+export interface SimilarCodeReviewProvenance {
+/**
+ * SHA-256 digest of the exact candidate JSON input bytes.
+ */
+candidates_sha256: string
+/**
+ * SHA-256 digest of the exact verdict JSON input bytes.
+ */
+verdicts_sha256: string
+}
+/**
+ * One candidate joined with its separate verdict, if safely matched.
+ */
+export interface SimilarCodeReviewedCandidate {
+candidate: SimilarCodeCandidate
+/**
+ * Safely matched external verdict, absent when still unverified.
+ */
+verdict?: (SimilarCodeVerdict | null)
+verdict_match: SimilarCodeVerdictMatch
+outcome: SimilarCodeDomainOutcome
+}
+/**
+ * Separate verdict input for one immutable candidate.
+ */
+export interface SimilarCodeVerdict {
+/**
+ * Snapshot identity from the raw candidate.
+ */
+candidate_id: string
+/**
+ * Content-stable identity from the raw candidate.
+ */
+review_key: string
+/**
+ * Whether the pair is useful enough to review. Null means undecided.
+ */
+candidate_worthy?: (boolean | null)
+/**
+ * Whether the two functions behave equivalently. Null means undecided.
+ */
+behaviorally_equivalent?: (boolean | null)
+/**
+ * Whether consolidation is safe. Null means undecided.
+ */
+refactor_safe?: (boolean | null)
+outcome: SimilarCodeDomainOutcome
+/**
+ * Bounded explanation grounded in the inspected sources.
+ */
+rationale: string
 }
 /**
  * Single CodeClimate-compatible issue inside [`CodeClimateOutput`].

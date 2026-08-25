@@ -116,6 +116,28 @@ pub const MCP_TOOLS: &[McpToolInfo] = &[
         read_only: true,
     },
     McpToolInfo {
+        name: "find_similar_code",
+        kind: "analysis",
+        description: "Find unverified semantically similar function candidates with the exact pinned local model",
+        cli_command: Some("fallow similar-code --format json --quiet"),
+        key_params: &["threshold", "min_lines", "top", "changed_since", "paths"],
+        license: McpToolLicense::Free,
+        license_note: None,
+        read_only: true,
+    },
+    McpToolInfo {
+        name: "inspect_similar_code",
+        kind: "trace",
+        description: "Reproduce one semantic candidate and collect bounded source-grounded evidence for agent verification",
+        cli_command: Some(
+            "fallow similar-code --threshold <threshold> --min-lines <min-lines> inspect <candidate-id> --format json --quiet",
+        ),
+        key_params: &["candidate_id", "threshold", "min_lines"],
+        license: McpToolLicense::Free,
+        license_note: None,
+        read_only: true,
+    },
+    McpToolInfo {
         name: "inspect_target",
         kind: "analysis",
         description: "One evidence bundle for a file or exported symbol: trace, dead-code actions, duplication, complexity, and security candidates",
@@ -497,9 +519,9 @@ pub struct CapabilityParityRow {
 /// (api runner / napi export / MCP tool) exposes each fallow capability, and why
 /// a surface is deliberately absent.
 ///
-/// Only three capabilities are first-class on ALL three surfaces (dead-code,
-/// duplication, feature-flags: the aligned primitives). The napi addon ships a
-/// deliberately narrow set of seven whole-project analysis primitives and has NO
+/// Four capabilities are first-class on all three surfaces (dead-code,
+/// duplication, similar-code, and feature-flags). The napi addon ships a
+/// deliberately narrow set of eight whole-project analysis primitives and has NO
 /// fix, trace, impact, audit, or introspection surface; the MCP server is the
 /// broad agent surface and folds several api/napi primitives (circular deps,
 /// boundary violations, complexity, health-runner) into `analyze` / `check_health`
@@ -518,6 +540,13 @@ pub const CAPABILITY_PARITY: &[CapabilityParityRow] = &[
         api_runner: Some("run_duplication"),
         napi_export: Some("detectDuplication"),
         mcp_tool: Some("find_dupes"),
+        omission_note: None,
+    },
+    CapabilityParityRow {
+        capability: "semantic similar-code discovery",
+        api_runner: Some("run_similar_code"),
+        napi_export: Some("detectSimilarCode"),
+        mcp_tool: Some("find_similar_code"),
         omission_note: None,
     },
     CapabilityParityRow {
@@ -564,7 +593,7 @@ pub const CAPABILITY_PARITY: &[CapabilityParityRow] = &[
             "Runner-injected health entry point that napi's computeHealth binds. The MCP surface for health is `check_health`, which uses the run_health convenience wrapper; same capability, different entry point.",
         ),
     },
-    // -- MCP tool + api runner, no napi export (addon ships only the seven
+    // -- MCP tool + api runner, no napi export (addon ships only the eight
     //    whole-project primitives). --
     CapabilityParityRow {
         capability: "health / hotspots",
@@ -702,6 +731,15 @@ pub const CAPABILITY_PARITY: &[CapabilityParityRow] = &[
         mcp_tool: Some("security_candidates"),
         omission_note: Some(
             "Security candidate surfacing. MCP shells out to `fallow security`; no fallow_api run_* runner and no napi export.",
+        ),
+    },
+    CapabilityParityRow {
+        capability: "semantic similar-code inspection",
+        api_runner: None,
+        napi_export: None,
+        mcp_tool: Some("inspect_similar_code"),
+        omission_note: Some(
+            "Source-grounded verification of one similar-code candidate. MCP shells out to `fallow similar-code inspect`; discovery is the aligned run_similar_code / detectSimilarCode / find_similar_code capability, while this bounded evidence packet has no standalone api runner or napi export.",
         ),
     },
     CapabilityParityRow {
@@ -1039,6 +1077,7 @@ mod tests {
             [
                 "dead-code analysis",
                 "code duplication",
+                "semantic similar-code discovery",
                 "feature-flag detection"
             ],
             "the set of capabilities exposed on all three surfaces changed; update the parity \

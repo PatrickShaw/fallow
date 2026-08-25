@@ -907,6 +907,36 @@
       "flags": []
     },
     {
+      "name": "similar-code",
+      "description": "Find semantically similar functions with a pinned local model (opt-in)",
+      "flags": [
+        {
+          "name": "--threshold",
+          "type": "string",
+          "required": false,
+          "description": "Minimum cosine similarity retained as an unverified candidate"
+        },
+        {
+          "name": "--min-lines",
+          "type": "string",
+          "required": false,
+          "description": "Minimum source lines per extracted function"
+        },
+        {
+          "name": "--top",
+          "type": "string",
+          "required": false,
+          "description": "Cap displayed candidates after bounded full-corpus comparison"
+        },
+        {
+          "name": "--file",
+          "type": "string",
+          "required": false,
+          "description": "Report pairs touching one of these project-relative files"
+        }
+      ]
+    },
+    {
       "name": "inspect",
       "description": "Inspect one file or exported symbol as a bundled evidence query",
       "flags": [
@@ -6532,6 +6562,36 @@
           "surface",
           "changed_since",
           "paths"
+        ],
+        "license": "free",
+        "license_note": null,
+        "read_only": true
+      },
+      {
+        "name": "find_similar_code",
+        "kind": "analysis",
+        "description": "Find unverified semantically similar function candidates with the exact pinned local model",
+        "cli_command": "fallow similar-code --format json --quiet",
+        "key_params": [
+          "threshold",
+          "min_lines",
+          "top",
+          "changed_since",
+          "paths"
+        ],
+        "license": "free",
+        "license_note": null,
+        "read_only": true
+      },
+      {
+        "name": "inspect_similar_code",
+        "kind": "trace",
+        "description": "Reproduce one semantic candidate and collect bounded source-grounded evidence for agent verification",
+        "cli_command": "fallow similar-code --threshold <threshold> --min-lines <min-lines> inspect <candidate-id> --format json --quiet",
+        "key_params": [
+          "candidate_id",
+          "threshold",
+          "min_lines"
         ],
         "license": "free",
         "license_note": null,

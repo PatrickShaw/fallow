@@ -13,10 +13,13 @@ import {
   detectDeadCode,
   detectDuplication,
   detectFeatureFlags,
+  detectSimilarCode,
 } from "./index.js";
 
 const require = createRequire(import.meta.url);
 const { typeAwareCommand } = require("./type-aware-command.js");
+
+assert.equal(typeof detectSimilarCode, "function");
 
 function makeFixture() {
   const root = mkdtempSync(join(tmpdir(), "fallow-node-"));

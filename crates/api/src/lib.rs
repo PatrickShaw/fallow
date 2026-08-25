@@ -56,6 +56,8 @@ mod runtime_json;
 mod runtime_output;
 pub mod sarif_output;
 pub mod security_output;
+/// Local-only advisory similar-code discovery and provider status.
+pub mod similar_code;
 mod type_aware;
 pub mod ci_output {
     //! Compatibility re-exports for CI output builders now owned by
@@ -126,7 +128,7 @@ pub use explain::{
     unknown_explain_error,
 };
 pub use fallow_config::{AuditGate, HealthConfig, TypeAwareRequire};
-pub use fallow_output::RootEnvelopeMode;
+pub use fallow_output::{RootEnvelopeMode, serialize_similar_code_json_output};
 pub use fallow_types::trace::{
     CloneTrace, DependencyTrace, ExportReference, ExportTrace, FileTrace, ReExportChain,
     TracedCloneGroup, TracedExport, TracedReExport,
@@ -159,7 +161,8 @@ pub use output_contracts::{
     AuditOutput, BoundariesListLogicalGroup, BoundariesListRule, BoundariesListZone,
     BoundariesListing, CombinedOutput, FallowOutput, ImpactOutput, ListBoundariesOutput,
     ListEntryPointOutput, ListOutput, ListPluginOutput, ReviewBriefWireOutput, SecurityGate,
-    SecurityOutput, SecurityOutputConfig, SecuritySummaryOutput, TraceOutput, WorkspacesOutput,
+    SecurityOutput, SecurityOutputConfig, SecuritySummaryOutput, SimilarCodeOutput, TraceOutput,
+    WorkspacesOutput,
 };
 pub use runtime::{
     AuditProgrammaticKeySnapshot, AuditProgrammaticOutput, BoundaryViolationsOutput,
@@ -173,11 +176,11 @@ pub use runtime::{
     TraceCloneProgrammaticOutput, TraceDependencyOutput, TraceDependencyProgrammaticOutput,
     TraceExportOutput, TraceExportProgrammaticOutput, TraceExportTargetOutput, TraceFileOutput,
     TraceFileProgrammaticOutput, benchmark_trace_clone_compact_json,
-    benchmark_trace_graph_family_compact_json, load_health_config, run_audit,
-    run_boundary_violations, run_circular_dependencies, run_combined, run_complexity_with_runner,
-    run_dead_code, run_decision_surface, run_duplication, run_feature_flags, run_health,
-    run_health_with_runner, run_trace_clone, run_trace_dependency, run_trace_export,
-    run_trace_file, serialize_health_report_json,
+    benchmark_trace_graph_family_compact_json, inspect_similar_code, load_health_config,
+    review_similar_code, run_audit, run_boundary_violations, run_circular_dependencies,
+    run_combined, run_complexity_with_runner, run_dead_code, run_decision_surface, run_duplication,
+    run_feature_flags, run_health, run_health_with_runner, run_similar_code, run_trace_clone,
+    run_trace_dependency, run_trace_export, run_trace_file, serialize_health_report_json,
 };
 pub use runtime_json::{
     serialize_audit_programmatic_json, serialize_boundary_violations_programmatic_json,
@@ -644,6 +647,38 @@ pub struct DuplicationOptions {
     pub ignore_imports: Option<bool>,
     /// Cap on the number of reported clone groups.
     pub top: Option<usize>,
+}
+
+/// Options for local advisory similar-code discovery.
+#[derive(Debug, Clone, Default)]
+pub struct SimilarCodeOptions {
+    /// Shared project, config, cache, diff, and workspace options.
+    pub analysis: AnalysisOptions,
+    /// Model-specific cosine floor. `None` uses `similarCode.threshold`.
+    pub threshold: Option<f64>,
+    /// Minimum source lines per function. `None` uses
+    /// `similarCode.minLines`.
+    pub min_lines: Option<usize>,
+    /// Cap on displayed candidates after the full bounded comparison.
+    pub top: Option<usize>,
+    /// Restrict reported pairs to those where at least one side matches one of
+    /// these project-relative files. The full comparison corpus is retained.
+    pub files: Vec<PathBuf>,
+    /// Exact companion binary resolved and signature-verified by an official
+    /// distribution adapter such as the Node loader. `None` uses trusted
+    /// sibling discovery. Project config, PATH commands, and remote providers
+    /// must never populate this field.
+    #[doc(hidden)]
+    pub adapter_provider_path: Option<PathBuf>,
+}
+
+/// Options for one similar-code candidate inspection packet.
+#[derive(Debug, Clone)]
+pub struct SimilarCodeInspectOptions {
+    /// Discovery options used to reproduce the candidate snapshot.
+    pub similar_code: SimilarCodeOptions,
+    /// Snapshot-stable candidate identity returned by discovery.
+    pub candidate_id: String,
 }
 
 /// Options for export trace analysis.

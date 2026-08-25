@@ -1195,6 +1195,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "toml",
  "tracing",
@@ -1222,6 +1223,7 @@ dependencies = [
  "rayon",
  "regex",
  "rustc-hash 2.1.3",
+ "sha2 0.11.0",
  "tracing",
  "xxhash-rust",
 ]

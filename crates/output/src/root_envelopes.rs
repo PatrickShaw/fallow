@@ -345,6 +345,11 @@ pub enum FallowOutput<
     WalkthroughValidation,
     SuppressionInventory,
     TypeAwareStatus,
+    SimilarCode,
+    SimilarCodeInspect,
+    SimilarCodeReview,
+    SimilarCodeStatus,
+    SimilarCodeCacheClear,
 > {
     /// `fallow audit --format json`.
     #[serde(rename = "audit")]
@@ -430,6 +435,21 @@ pub enum FallowOutput<
     /// `fallow type-aware status --format json`.
     #[serde(rename = "type-aware-status")]
     TypeAwareStatus(TypeAwareStatus),
+    /// `fallow similar-code --format json`.
+    #[serde(rename = "similar-code")]
+    SimilarCode(SimilarCode),
+    /// `fallow similar-code inspect --format json`.
+    #[serde(rename = "similar-code-inspect")]
+    SimilarCodeInspect(SimilarCodeInspect),
+    /// `fallow similar-code review --format json`.
+    #[serde(rename = "similar-code-review")]
+    SimilarCodeReview(SimilarCodeReview),
+    /// `fallow similar-code status --format json` and successful setup output.
+    #[serde(rename = "similar-code-status")]
+    SimilarCodeStatus(SimilarCodeStatus),
+    /// `fallow similar-code cache clear --format json`.
+    #[serde(rename = "similar-code-cache-clear")]
+    SimilarCodeCacheClear(SimilarCodeCacheClear),
 }
 
 #[cfg(test)]

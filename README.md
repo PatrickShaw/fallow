@@ -73,6 +73,7 @@ The npm package ships the `fallow`, `fallow-lsp`, and `fallow-mcp` launchers plu
 - [Unused files, exports, types, enum and class members, and dependencies](https://docs.fallow.tools/analysis/dead-code)
 - [Circular dependencies and re-export cycles](https://docs.fallow.tools/analysis/dead-code), part of `fallow dead-code`
 - [Code duplication](https://docs.fallow.tools/analysis/duplication) with a suffix-array detector covering JS/TS and CSS-family stylesheets, plus Vue/Svelte/Astro component regions
+- Opt-in semantic similar-code candidates for functions that may share intent despite different syntax, using a pinned local model and explicit review (`fallow similar-code`)
 - [Complexity hotspots](https://docs.fallow.tools/explanations/health) and a 0 to 100 health score with a letter grade
 - [Architecture boundary violations](https://docs.fallow.tools/analysis/boundaries) with `bulletproof`, `layered`, `hexagonal`, and `feature-sliced` presets
 - [Design-system styling drift](https://docs.fallow.tools/analysis/css-analysis) for CSS and CSS-in-JS
@@ -110,6 +111,7 @@ Adopting on an existing codebase? `fallow audit` fails only on findings a change
 | `npx fallow dead-code --trace src/file.ts:symbol` | Prove a symbol is unused before deleting it |
 | `npx fallow dead-code --type-aware --symbol-impact src/file.ts:symbol` | Find exact consumers, affected files, and targeted tests for an export or `Class.method` |
 | [`npx fallow dupes`](https://docs.fallow.tools/cli/dupes) | Duplication; modes `strict`, `mild` (default), `weak`, `semantic` |
+| `npx fallow similar-code` | Opt-in semantic function candidates from a pinned local model; inspect and verify before any refactor |
 | [`npx fallow health --score`](https://docs.fallow.tools/cli/health) | Complexity, 0 to 100 health score, hotspots; `--css` adds structural CSS analytics |
 | [`npx fallow fix --dry-run`](https://docs.fallow.tools/cli/fix) | Preview auto-fixes; apply with `npx fallow fix` |
 | `npx fallow guard src/file.ts` | Which boundary rules apply to a file before editing |
@@ -130,6 +132,8 @@ Adopting on an existing codebase? `fallow audit` fails only on findings a change
 | `fallow inspect --file src/api.ts` | Evidence bundle for one file, or one symbol via `--symbol src/api.ts:client` |
 | `fallow trace src/utils.ts:formatDate` | Symbol-level call chains: callers up, callees down |
 | `fallow type-aware status` | Check whether the version-matched optional TypeScript companion is available |
+| `fallow similar-code status` | Check the exact local companion and pinned-model readiness without reading project source |
+| `fallow similar-code setup --local` | Explicitly download and verify the pinned local model |
 | `fallow watch` | Re-run analysis on file changes (interactive use; agents should not run it) |
 | `fallow flags` | Detect feature-flag patterns |
 | `fallow suppressions` | Inventory of `fallow-ignore` markers |
@@ -333,7 +337,7 @@ Details: [runtime coverage](https://docs.fallow.tools/analysis/runtime-coverage)
 - [VS Code extension](https://docs.fallow.tools/integrations/vscode)
 - Zed and Neovim setups under the [`editors/`](https://github.com/fallow-rs/fallow/tree/main/editors) tree ([Neovim guide](https://docs.fallow.tools/integrations/neovim))
 - The `fallow-lsp` server: diagnostics, hover, code actions, and code lenses. It resolves the project-local binary from a devDependency install
-- The Node API [`@fallow-cli/fallow-node`](https://docs.fallow.tools/integrations/node-bindings) exports `detectDeadCode`, `detectCircularDependencies`, `detectBoundaryViolations`, `detectDuplication`, `detectFeatureFlags`, `computeComplexity`, and `computeHealth`. See the [package API reference](crates/napi/README.md) for options and return types
+- The Node API [`@fallow-cli/fallow-node`](https://docs.fallow.tools/integrations/node-bindings) exports `detectDeadCode`, `detectCircularDependencies`, `detectBoundaryViolations`, `detectDuplication`, `detectSimilarCode`, `detectFeatureFlags`, `computeComplexity`, and `computeHealth`. See the [package API reference](crates/napi/README.md) for options and return types
 - [README badges](https://docs.fallow.tools/integrations/badges): `fallow health --format badge > badge.svg`
 
 ## Migrating from other tools

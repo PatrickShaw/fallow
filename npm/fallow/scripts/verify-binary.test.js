@@ -253,7 +253,7 @@ function makePlatformDir(privateKey, options) {
   const opts = options || {};
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fallow-vbtest-"));
   const ext = extForPlatformId(opts.platformId);
-  for (const base of ["fallow"]) {
+  for (const base of ["fallow", "fallow-similar-code"]) {
     const binaryPath = path.join(dir, `${base}${ext}`);
     const content = Buffer.from(`mock ${base} contents`);
     fs.writeFileSync(binaryPath, content);
@@ -395,7 +395,7 @@ test("verifyInstalled resolves a global npm install from the fallow package dire
   );
 
   const ext = process.platform === "win32" ? ".exe" : "";
-  for (const base of ["fallow"]) {
+  for (const base of ["fallow", "fallow-similar-code"]) {
     const binaryPath = path.join(platformDir, `${base}${ext}`);
     const content = Buffer.from(`global install ${base}`);
     fs.writeFileSync(binaryPath, content);
@@ -509,7 +509,7 @@ test("verifyInstalled honors FALLOW_SKIP_BINARY_VERIFY", async (t) => {
 function computeDigestsForDir(dir, platformId) {
   const ext = extForPlatformId(platformId);
   const out = {};
-  for (const base of ["fallow"]) {
+  for (const base of ["fallow", "fallow-similar-code"]) {
     const fileName = `${base}${ext}`;
     const full = path.join(dir, fileName);
     out[fileName] =
@@ -595,7 +595,7 @@ test("verifyInstalled falls back to the provider when the embedded digest is mis
     },
   });
   assert.equal(result.ok, true);
-  assert.equal(providerCalls, 1);
+  assert.equal(providerCalls, 2);
 });
 
 test("verifyInstalled falls back to the provider when fallowDigests is partial / malformed", async (t) => {
@@ -619,8 +619,8 @@ test("verifyInstalled falls back to the provider when fallowDigests is partial /
     },
   });
   assert.equal(result.ok, true);
-  // One call for the single shipped binary because its entry fails to normalize.
-  assert.equal(providerCalls, 1);
+  // Both shipped binaries fall back because their embedded entries are absent or malformed.
+  assert.equal(providerCalls, 2);
 });
 
 test("verifyInstalled returns digest-mismatch when the embedded digest disagrees with the binary", async (t) => {

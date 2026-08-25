@@ -9,6 +9,7 @@ mod parsing;
 mod resolution;
 mod resolve;
 mod rules;
+mod similar_code;
 mod used_class_members;
 
 #[expect(
@@ -42,6 +43,7 @@ pub use rules::{
     KNOWN_RULE_NAMES, PartialRulesConfig, RulesConfig, Severity, closest_known_rule_name,
     default_severity_for_kind, is_opt_in_kind,
 };
+pub use similar_code::SimilarCodeConfig;
 pub use used_class_members::{ScopedUsedClassMemberRule, UsedClassMemberRule};
 
 use schemars::JsonSchema;
@@ -313,6 +315,13 @@ pub struct FallowConfig {
     /// Configures clone detection: `enabled` (default true), `mode` (`strict`, `mild` default, `weak`, `semantic`, from least to most identifier/literal blinding; `strict` and `mild` are equivalent under fallow's AST tokenizer, `weak` blinds string literals, `semantic` blinds all identifiers and literals for Type-2 renamed-variable detection), `near` (false, add bounded function-scoped near-miss detection), `minTokens` (50), `minLines` (5), `minOccurrences` (integer >= 2, deserialization fails below 2), `threshold` (max duplication percentage, 0 = no limit), `ignore` globs, `ignoredClones` (reviewed clone keys to hide until their content or occurrence count changes), `ignoreDefaults` (true, merge built-in generated-file ignores), `skipLocal` (only report cross-directory clones), `crossLanguage` (strip TS type annotations to match .ts against .js), `ignoreImports` (true, strip ES import/re-export/top-level require wiring from the token stream), and `normalization` (per-flag `ignoreIdentifiers`/`ignoreStringValues`/`ignoreNumericValues` overrides on top of `mode`). Raise `minOccurrences` to focus on widespread copy-paste, enable `near` for gapped structural clones, or set `mode` to `semantic` to catch renamed-variable exact clones.
     #[serde(default)]
     pub duplicates: DuplicatesConfig,
+
+    /// Configures the explicit local `similar-code` candidate workflow:
+    /// `threshold` (0.80, model-specific cosine floor), `minLines` (3), and
+    /// additional `ignore` globs. Provider identity, setup, executables,
+    /// endpoints, credentials, and consent cannot be set by project config.
+    #[serde(default)]
+    pub similar_code: SimilarCodeConfig,
 
     /// Sets complexity and health thresholds for `fallow health` (also applied in combined `fallow` and `fallow audit`): `maxCyclomatic` (20), `maxCognitive` (15), `maxCrap` (30.0, findings at or above this are reported), `crapRefactorBand` (5, cyclomatic band below `maxCyclomatic` where a secondary refactor action is added), `maxUnitSize` (max function lines before a large-function finding, 60), `coverage`/`coverageRoot` (Istanbul coverage path and path-prefix strip for accurate CRAP), `ignore` globs (remove files from findings AND the health score), `thresholdOverrides` (per-file/per-function ceilings via `files`/`functions`/`maxCyclomatic`/`maxCognitive`/`maxCrap`/`maxUnitSize`/`reason`), `ownership` (`botPatterns` and `emailMode` for `--ownership`), and `suggestInlineSuppression` (true, emit `suppress-line` action hints in JSON). Raise thresholds to relax which functions are flagged, wire `coverage` for real CRAP scores, or exempt generated/test files via `ignore` (drops them from the score too) or `thresholdOverrides` (keeps them visible under a higher ceiling). The four `max*` thresholds govern findings only and never move `health_score`: its penalties use fixed calibration so grades stay comparable across projects, and `ignore` is the lever that removes files from the score.
     #[serde(default)]

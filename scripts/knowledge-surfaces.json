@@ -170,6 +170,10 @@
         "section": "verification"
       },
       {
+        "path": "docs/similar-code-analysis.md",
+        "section": "architecture"
+      },
+      {
         "path": "docs/styling-corpus-smoke.md",
         "section": "styling"
       },

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`fallow similar-code` adds opt-in semantic function discovery through a
+  pinned, verified local model.** It complements deterministic clone detection
+  with explicitly unverified candidates for functions that may share intent
+  despite different syntax. The separate workflow includes explicit local
+  setup, provider and model provenance, bounded completion accounting, a
+  persistent source-digest vector cache, source-grounded candidate inspection,
+  a fail-closed external verdict join, read-only MCP tools, and a Node API. It
+  is advisory and does not participate in bare analysis, audit gates, SARIF,
+  editor diagnostics, or auto-fix.
+
 - **size-limit presets, plugins, and config files are recognized**
   ([#2413](https://github.com/fallow-rs/fallow/pull/2413)). size-limit loads
   `@size-limit/*` and `size-limit-*` packages from `package.json` by convention

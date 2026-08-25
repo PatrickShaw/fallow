@@ -27,5 +27,53 @@ const configureTypeAwareCompanion = () => {
   }
 };
 
+let similarCodeCompanion;
+
+const resolveSimilarCodeCompanion = () => {
+  if (similarCodeCompanion !== undefined) return similarCodeCompanion;
+  try {
+    const manifestPath = require.resolve("fallow-similar-code/package.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    if (manifest.version !== packageVersion) {
+      throw new Error(
+        `similar-code companion version mismatch, expected ${packageVersion} but got ${manifest.version}`,
+      );
+    }
+    const {
+      resolveBinary,
+      resolvePlatformPackage,
+    } = require("fallow-similar-code/scripts/run-binary.js");
+    const { verifyBinary } = require("fallow-similar-code/scripts/verify-binary.js");
+    const binary = resolveBinary(resolvePlatformPackage());
+    const verification = verifyBinary(binary);
+    if (!verification.ok) {
+      throw new Error(`similar-code companion verification failed: ${verification.message}`);
+    }
+    similarCodeCompanion = { binary };
+  } catch (error) {
+    similarCodeCompanion = { error };
+  }
+  return similarCodeCompanion;
+};
+
+const similarCodeProviderError = (cause) => {
+  const error = new Error(
+    "The exact local similar-code companion is unavailable. Reinstall @fallow-cli/fallow-node, then run `fallow similar-code setup --local`.",
+  );
+  error.name = "FallowNodeError";
+  error.code = "FALLOW_SIMILAR_CODE_PROVIDER_NOT_READY";
+  error.exitCode = 3;
+  error.help = "Model setup is an explicit CLI action and is never started by the Node API.";
+  error.cause = cause;
+  return error;
+};
+
 configureTypeAwareCompanion();
-module.exports = require("./index.js");
+const binding = require("./index.js");
+const nativeDetectSimilarCode = binding.detectSimilarCode;
+binding.detectSimilarCode = (options = {}) => {
+  const companion = resolveSimilarCodeCompanion();
+  if (companion.error) throw similarCodeProviderError(companion.error);
+  return nativeDetectSimilarCode({ ...options, adapterProviderPath: companion.binary });
+};
+module.exports = binding;

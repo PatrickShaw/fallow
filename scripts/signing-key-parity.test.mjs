@@ -23,6 +23,7 @@ The base64 form of the public key above (\`${value.toString("base64")}\`) is can
 const surfaces = (overrides = {}) => ({
   vscodeSource: embedded("BINARY_SIGNING_PUBLIC_KEY"),
   npmVerifierSource: embedded("EMBEDDED_PUBLIC_KEY"),
+  companionVerifierSource: embedded("PUBLIC_KEY"),
   securityPolicy: securityPolicy(),
   ...overrides,
 });
@@ -64,6 +65,13 @@ test("either embedded consumer fails with its named surface", () => {
         surfaces({ npmVerifierSource: embedded("EMBEDDED_PUBLIC_KEY", changed) }),
       ),
     /npm verifier: embedded public key differs from VS Code/u,
+  );
+  assert.throws(
+    () =>
+      assertSigningKeyParity(
+        surfaces({ companionVerifierSource: embedded("PUBLIC_KEY", changed) }),
+      ),
+    /similar-code companion verifier: embedded public key differs from VS Code/u,
   );
 });
 

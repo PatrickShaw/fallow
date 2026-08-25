@@ -11,7 +11,7 @@
           },
           {
             "type": "command",
-            "command": "if jq -r '.tool_input.command' | grep -q '^git commit'; then cargo fmt --all 2>/dev/null; typos; fi",
+            "command": "if jq -r '.tool_input.command' | grep -q '^git commit'; then staged=$(git diff --cached --name-only --diff-filter=ACMR); rs=$(printf '%s\\n' \"$staged\" | grep '\\.rs$' || true); [ -n \"$rs\" ] && printf '%s\\n' \"$rs\" | tr '\\n' '\\0' | xargs -0 rustfmt --edition 2024 2>/dev/null; [ -n \"$staged\" ] && printf '%s\\n' \"$staged\" | tr '\\n' '\\0' | xargs -0 typos; true; fi",
             "statusMessage": "Pre-commit: formatting and typo check..."
           }
         ]

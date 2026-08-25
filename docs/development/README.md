@@ -11,7 +11,7 @@ Start with the smallest route that matches the task:
   integration surfaces.
 - [AI tooling](ai-tooling.md) when changing agent instructions, skills, or
   adapters.
-- [Agent template](agent-template.md) when adding a new repository-tracked
+- [Agent template](../../.agents/agents/_template.md) when adding a new repository-tracked
   specialist agent.
 - [Knowledge architecture](knowledge-architecture.md) when changing
   documentation ownership, synchronization, or publication.

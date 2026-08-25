@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
+use globset::GlobSet;
 use oxc_resolver::Resolver;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
@@ -430,11 +431,19 @@ impl CanonicalizeCache {
     }
 }
 
+/// Which of a tsconfig's glob lists a compiled [`GlobSet`] came from.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum TsconfigGlobKind {
+    Include,
+    Exclude,
+}
+
 /// Session-local cache for tsconfig helper lookups used during import resolution.
 #[derive(Default)]
 pub(super) struct TsconfigCache {
     json: DashMap<PathBuf, Option<Arc<Value>>>,
     chains: DashMap<PathBuf, Arc<[PathBuf]>>,
+    glob_sets: DashMap<(PathBuf, TsconfigGlobKind), Option<Arc<GlobSet>>>,
 }
 
 impl TsconfigCache {
@@ -465,6 +474,27 @@ impl TsconfigCache {
     /// Store the computed tsconfig chain for a source file.
     pub fn store_chain(&self, from_file: &Path, chain: Arc<[PathBuf]>) {
         self.chains.insert(from_file.to_path_buf(), chain);
+    }
+
+    /// Return a tsconfig's compiled glob set, building it on first miss.
+    ///
+    /// Building one probes the filesystem to tell bare directory patterns from
+    /// file patterns, so recompiling it for every candidate file is wasteful.
+    /// A list with no usable pattern is cached as `None`.
+    pub fn glob_set(
+        &self,
+        tsconfig_path: &Path,
+        kind: TsconfigGlobKind,
+        build: impl FnOnce() -> Option<GlobSet>,
+    ) -> Option<Arc<GlobSet>> {
+        let key = (tsconfig_path.to_path_buf(), kind);
+        if let Some(value) = self.glob_sets.get(&key) {
+            return value.clone();
+        }
+
+        let value = build().map(Arc::new);
+        self.glob_sets.insert(key, value.clone());
+        value
     }
 }
 
@@ -645,6 +675,82 @@ mod tests {
                 });
             }
         });
+    }
+
+    #[test]
+    fn tsconfig_cache_builds_a_glob_set_once_per_list() {
+        let cache = TsconfigCache::default();
+        let path = Path::new("/project/tsconfig.json");
+        let builds = std::sync::atomic::AtomicUsize::new(0);
+        let build = || {
+            builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut builder = globset::GlobSetBuilder::new();
+            builder.add(globset::Glob::new("/project/src/**/*").unwrap());
+            builder.build().ok()
+        };
+
+        let first = cache
+            .glob_set(path, TsconfigGlobKind::Include, build)
+            .unwrap();
+        let second = cache
+            .glob_set(path, TsconfigGlobKind::Include, build)
+            .unwrap();
+
+        assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first.is_match("/project/src/index.ts"));
+    }
+
+    /// `include` and `exclude` are different lists in the same tsconfig, so they
+    /// must not share a cache entry.
+    #[test]
+    fn tsconfig_cache_keys_glob_sets_by_kind() {
+        let cache = TsconfigCache::default();
+        let path = Path::new("/project/tsconfig.json");
+        let compile = |pattern: &str| {
+            let mut builder = globset::GlobSetBuilder::new();
+            builder.add(globset::Glob::new(pattern).unwrap());
+            builder.build().ok()
+        };
+
+        let include = cache
+            .glob_set(path, TsconfigGlobKind::Include, || {
+                compile("/project/src/**/*")
+            })
+            .unwrap();
+        let exclude = cache
+            .glob_set(path, TsconfigGlobKind::Exclude, || {
+                compile("/project/dist/**/*")
+            })
+            .unwrap();
+
+        assert!(include.is_match("/project/src/index.ts"));
+        assert!(!include.is_match("/project/dist/index.js"));
+        assert!(exclude.is_match("/project/dist/index.js"));
+    }
+
+    /// A list with no usable pattern is cached so it is not recompiled.
+    #[test]
+    fn tsconfig_cache_caches_an_unbuildable_glob_set() {
+        let cache = TsconfigCache::default();
+        let path = Path::new("/project/tsconfig.json");
+        let builds = std::sync::atomic::AtomicUsize::new(0);
+        let build = || {
+            builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        };
+
+        assert!(
+            cache
+                .glob_set(path, TsconfigGlobKind::Include, build)
+                .is_none()
+        );
+        assert!(
+            cache
+                .glob_set(path, TsconfigGlobKind::Include, build)
+                .is_none()
+        );
+        assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

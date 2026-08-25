@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use oxc_resolver::{Resolution, ResolveError, ResolveOptions, Resolver};
 use serde_json::Value;
 
@@ -21,7 +21,7 @@ use super::path_info::{
     normalize_npm_specifier,
 };
 use super::react_native::{build_condition_names, build_extensions};
-use super::types::{DenoImportMapEntry, ResolveContext, ResolveResult};
+use super::types::{DenoImportMapEntry, ResolveContext, ResolveResult, TsconfigGlobKind};
 
 /// Create an `oxc_resolver` instance with standard configuration.
 ///
@@ -361,13 +361,22 @@ fn tsconfig_applies_to_file(
             .iter()
             .filter_map(Value::as_str)
             .map(|file| resolve_tsconfig_relative_path(tsconfig_dir, file))
-            .any(|file| same_path(&file, from_file));
+            .any(|file| same_path(ctx, &file, from_file));
     }
 
     let include_matches = json
         .get("include")
         .and_then(Value::as_array)
-        .is_none_or(|include| glob_values_match(tsconfig_dir, include, from_file));
+        .is_none_or(|include| {
+            tsconfig_globs_match(
+                ctx,
+                tsconfig_path,
+                TsconfigGlobKind::Include,
+                tsconfig_dir,
+                include,
+                from_file,
+            )
+        });
     if !include_matches {
         return false;
     }
@@ -375,10 +384,35 @@ fn tsconfig_applies_to_file(
     !json
         .get("exclude")
         .and_then(Value::as_array)
-        .is_some_and(|exclude| glob_values_match(tsconfig_dir, exclude, from_file))
+        .is_some_and(|exclude| {
+            tsconfig_globs_match(
+                ctx,
+                tsconfig_path,
+                TsconfigGlobKind::Exclude,
+                tsconfig_dir,
+                exclude,
+                from_file,
+            )
+        })
 }
 
-fn glob_values_match(base_dir: &Path, values: &[Value], path: &Path) -> bool {
+/// Match `path` against one of a tsconfig's glob lists, reusing the compiled
+/// [`GlobSet`] across every file tested against that same list.
+fn tsconfig_globs_match(
+    ctx: &ResolveContext<'_>,
+    tsconfig_path: &Path,
+    kind: TsconfigGlobKind,
+    base_dir: &Path,
+    values: &[Value],
+    path: &Path,
+) -> bool {
+    ctx.tsconfig_cache
+        .glob_set(tsconfig_path, kind, || build_glob_set(base_dir, values))
+        .is_some_and(|set| set.is_match(path))
+}
+
+/// Compile a tsconfig glob list, or `None` when it yields no usable pattern.
+fn build_glob_set(base_dir: &Path, values: &[Value]) -> Option<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     let mut has_patterns = false;
     for value in values.iter().filter_map(Value::as_str) {
@@ -395,7 +429,10 @@ fn glob_values_match(base_dir: &Path, values: &[Value], path: &Path) -> bool {
         builder.add(glob);
         has_patterns = true;
     }
-    has_patterns && builder.build().is_ok_and(|set| set.is_match(path))
+    if !has_patterns {
+        return None;
+    }
+    builder.build().ok()
 }
 
 fn has_glob_meta(value: &str) -> bool {
@@ -413,11 +450,12 @@ fn resolve_tsconfig_relative_path(base_dir: &Path, path: &str) -> PathBuf {
     }
 }
 
-fn same_path(left: &Path, right: &Path) -> bool {
+fn same_path(ctx: &ResolveContext<'_>, left: &Path, right: &Path) -> bool {
     left == right
-        || dunce::canonicalize(left)
-            .ok()
-            .zip(dunce::canonicalize(right).ok())
+        || ctx
+            .canonicalize_cache
+            .get(left)
+            .zip(ctx.canonicalize_cache.get(right))
             .is_some_and(|(left, right)| left == right)
 }
 
@@ -1883,7 +1921,7 @@ mod tests {
     use crate::resolve::types::{CanonicalizeCache, ResolveContext, TsconfigCache};
 
     use super::{
-        SpecifierNormalization, extension_alias_matches, glob_values_match, has_glob_meta,
+        SpecifierNormalization, extension_alias_matches, has_glob_meta,
         is_bare_style_package_reference, is_bare_style_subpath, is_js_ts_extension,
         is_node_modules_path, is_plain_css_file, is_relative_tsconfig_extends,
         is_safe_static_dir_relative_path, is_storybook_preview_html, is_style_file,
@@ -2767,6 +2805,11 @@ mod tests {
             static_dir_relative_path("/assetsExtra/file.js", "/assets"),
             None
         );
+    }
+
+    /// Compile `values` relative to `base_dir` and test `path` against them.
+    fn glob_values_match(base_dir: &Path, values: &[serde_json::Value], path: &Path) -> bool {
+        super::build_glob_set(base_dir, values).is_some_and(|set| set.is_match(path))
     }
 
     // ---- glob_values_match: invalid glob is skipped (line 362) ----

@@ -151,6 +151,25 @@ test("Fallow skills preserve exit status and avoid volatile plugin counts", () =
   }
 });
 
+test("Fallow skills preserve similar-code agent safety rules", () => {
+  const skillEntrypoints = [".agents/skills/fallow/SKILL.md", "npm/fallow/skills/fallow/SKILL.md"];
+
+  for (const path of skillEntrypoints) {
+    const skill = readFileSync(path, "utf8");
+    for (const required of [
+      "discovery only",
+      "Agents must not authorize setup",
+      "Inspect a candidate before judging it",
+      "candidate_worthy",
+      "behaviorally_equivalent",
+      "refactor_safe",
+      "abstain when evidence is incomplete",
+    ]) {
+      assert.match(skill, new RegExp(required, "u"), `${path} is missing: ${required}`);
+    }
+  }
+});
+
 test("NAPI declarations have one canonical public source", () => {
   const packageJson = readJson("crates/napi/package.json");
   const entry = readFileSync("crates/napi/index.d.ts", "utf8");

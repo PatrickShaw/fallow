@@ -79,6 +79,7 @@ mod security_help;
 mod setup_hooks;
 mod signal;
 mod similar_code_cli;
+mod similar_code_help;
 mod suppressions;
 mod task_matrix;
 mod telemetry;
@@ -122,6 +123,7 @@ pub(crate) use runtime_support::{
 #[cfg(test)]
 use security_help::{SECURITY_UNSUPPORTED_GLOBAL_LONGS, SecurityHelpTarget};
 use security_help::{render_security_help, security_help_target};
+use similar_code_help::{render_similar_code_help, similar_code_help_target};
 
 const DEFAULT_MIN_INVOCATIONS_HOT: u64 = 100;
 
@@ -3441,6 +3443,7 @@ fn dispatch_subcommand(command: Command, dispatch: &DispatchContext<'_>) -> Exit
             workspace: cli.workspace.as_deref(),
             changed_workspaces: cli.changed_workspaces.as_deref(),
             explain: cli.explain,
+            quiet,
             output,
             json_style: dispatch.json_style,
             threshold,

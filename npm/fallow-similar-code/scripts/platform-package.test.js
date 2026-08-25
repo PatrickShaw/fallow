@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { getPlatformPackage } = require("./platform-package");
+const { getPlatformPackage, isPlatformPackage } = require("./platform-package");
 
 test("maps every supported target to its platform package", () => {
   assert.equal(
@@ -22,4 +22,6 @@ test("maps every supported target to its platform package", () => {
     "@fallow-cli/fallow-similar-code-win32-x64-msvc",
   );
   assert.equal(getPlatformPackage("freebsd", "x64"), undefined);
+  assert.equal(isPlatformPackage("@fallow-cli/fallow-similar-code-darwin-arm64"), true);
+  assert.equal(isPlatformPackage("@fallow-cli/darwin-arm64"), false);
 });

@@ -9,7 +9,7 @@ use crate::cli_format::{Format, FormatConfig, format_from_env, parse_format_arg,
 use crate::cli_telemetry::{TelemetryRun, record_run_epilogue};
 use crate::{
     Cli, Command, emit_known_failure, emit_known_failure_with_style, rayon_pool, regression,
-    report, runtime_support, security_help_target, telemetry,
+    report, runtime_support, security_help_target, similar_code_help_target, telemetry,
 };
 
 /// Build the tracing filter for the CLI.
@@ -100,6 +100,14 @@ fn validate_input_flags(
     {
         return Err(validation_failure(&format!(
             "{flag} is not valid with `fallow security`."
+        )));
+    }
+
+    if matches!(&cli.command, Some(Command::SimilarCode { .. }))
+        && let Some(flag) = crate::similar_code_help::unsupported_similar_code_option(cli)
+    {
+        return Err(validation_failure(&format!(
+            "{flag} is not valid with this `fallow similar-code` command."
         )));
     }
 
@@ -286,11 +294,11 @@ where
 }
 
 fn raw_args_use_legacy_check_alias() -> bool {
-    args_use_legacy_check_alias(std::env::args())
+    args_use_legacy_check_alias(std::env::args_os().map(|arg| arg.to_string_lossy().into_owned()))
 }
 
 fn raw_args_invoked_review_alias() -> bool {
-    args_invoked_review_alias(std::env::args())
+    args_invoked_review_alias(std::env::args_os().map(|arg| arg.to_string_lossy().into_owned()))
 }
 
 fn warn_legacy_check_alias_if_needed(used_legacy_check_alias: bool, quiet: bool) {
@@ -413,6 +421,12 @@ pub fn run_pre_dispatch_checks(
 
 fn handle_cli_parse_error(err: &clap::Error) -> ExitCode {
     let exit_code = u8::try_from(err.exit_code()).unwrap_or(2);
+    if err.kind() == clap::error::ErrorKind::DisplayHelp
+        && let Some(target) = similar_code_help_target(std::env::args_os().skip(1))
+    {
+        print!("{}", crate::render_similar_code_help(target));
+        return ExitCode::SUCCESS;
+    }
     if err.kind() == clap::error::ErrorKind::DisplayHelp
         && let Some(target) = security_help_target(std::env::args_os().skip(1))
     {

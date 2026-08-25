@@ -321,39 +321,49 @@ fn run_similar_code_inner(
     let mut functions = Vec::new();
     let mut extracted_source_bytes = 0usize;
     let mut extraction_skips = BTreeMap::new();
+    let mut source_read_failures = 0usize;
     let mut diagnostics = Vec::new();
     let files = session.files();
     let admitted_files = files.len().min(MAX_FILES);
     let omitted_files = files.len().saturating_sub(admitted_files);
-    for file in files.iter().take(admitted_files) {
-        let relative = root_relative(session.root(), &file.path);
-        if ignore.is_match(&relative) {
-            continue;
-        }
-        let source = match std::fs::read_to_string(&file.path) {
-            Ok(source) => source,
-            Err(error) => {
-                diagnostics.push(SimilarCodeDiagnostic {
-                    domain: SimilarCodeDiagnosticDomain::Extraction,
-                    code: "FALLOW_SIMILAR_CODE_SOURCE_READ_FAILED".to_owned(),
-                    message: format!("failed to read source: {error}"),
-                    path: Some(relative),
-                });
-                continue;
-            }
-        };
+    let eligible_files = files
+        .iter()
+        .take(admitted_files)
+        .filter_map(|file| {
+            let relative = root_relative(session.root(), &file.path);
+            (!ignore.is_match(&relative)).then_some((file, relative))
+        })
+        .collect::<Vec<_>>();
+    for (file_index, (file, relative)) in eligible_files.iter().enumerate() {
         let remaining_functions = extraction_limits
             .max_functions
             .saturating_sub(functions.len());
         let remaining_bytes = extraction_limits
             .max_total_source_bytes
             .saturating_sub(extracted_source_bytes);
-        if remaining_functions == 0 || remaining_bytes == 0 {
-            add_skip(&mut extraction_skips, SimilarCodeSkipReason::InputLimit, 1);
+        if let Some(reason) = exhausted_extraction_limit(remaining_functions, remaining_bytes) {
+            add_skip(
+                &mut extraction_skips,
+                reason,
+                remaining_extraction_inputs(eligible_files.len(), file_index),
+            );
             break;
         }
+        let source = match std::fs::read_to_string(&file.path) {
+            Ok(source) => source,
+            Err(error) => {
+                source_read_failures = source_read_failures.saturating_add(1);
+                diagnostics.push(SimilarCodeDiagnostic {
+                    domain: SimilarCodeDiagnosticDomain::Extraction,
+                    code: "FALLOW_SIMILAR_CODE_SOURCE_READ_FAILED".to_owned(),
+                    message: format!("failed to read source: {error}"),
+                    path: Some(relative.clone()),
+                });
+                continue;
+            }
+        };
         let extracted = fallow_engine::source::similar_code::extract(
-            Path::new(&relative),
+            Path::new(relative),
             &source,
             SimilarCodeExtractionLimits {
                 max_functions: remaining_functions,
@@ -477,9 +487,7 @@ fn run_similar_code_inner(
         candidates.truncate(top);
     }
 
-    let extraction_complete = extraction_skips.iter().all(|(reason, count)| {
-        *count == 0 || matches!(reason, SimilarCodeSkipReason::BelowMinimumLines)
-    });
+    let extraction_complete = extraction_is_complete(&extraction_skips, source_read_failures);
     let mut skips = extraction_skips
         .into_iter()
         .map(|(reason, count)| SimilarCodeSkip {
@@ -567,6 +575,7 @@ fn run_similar_code_inner(
             phase_completeness,
             missing_vectors,
             embedding.truncated_functions,
+            source_read_failures,
         ),
         limits: output_limits(engine_limits, extraction_limits),
         skips,
@@ -1322,6 +1331,7 @@ fn phases(
     completeness: PhaseCompleteness,
     missing_vectors: usize,
     truncated_functions: usize,
+    source_read_failures: usize,
 ) -> Vec<SimilarCodePhaseCompletion> {
     vec![
         phase(
@@ -1338,8 +1348,12 @@ fn phases(
             extracted_functions,
             None,
             (!completeness.extraction).then(|| {
-                "one or more function forms or source fragments were outside extraction limits"
-                    .to_owned()
+                if source_read_failures > 0 {
+                    "one or more admitted source files could not be read".to_owned()
+                } else {
+                    "one or more function forms or source fragments were outside extraction limits"
+                        .to_owned()
+                }
             }),
         ),
         phase(
@@ -1614,6 +1628,33 @@ fn add_skip(
     *skips.entry(reason).or_default() += count;
 }
 
+fn extraction_is_complete(
+    skips: &BTreeMap<SimilarCodeSkipReason, usize>,
+    source_read_failures: usize,
+) -> bool {
+    source_read_failures == 0
+        && skips.iter().all(|(reason, count)| {
+            *count == 0 || matches!(reason, SimilarCodeSkipReason::BelowMinimumLines)
+        })
+}
+
+const fn remaining_extraction_inputs(total: usize, current_index: usize) -> usize {
+    total.saturating_sub(current_index)
+}
+
+const fn exhausted_extraction_limit(
+    remaining_functions: usize,
+    remaining_source_bytes: usize,
+) -> Option<SimilarCodeSkipReason> {
+    if remaining_functions == 0 {
+        Some(SimilarCodeSkipReason::InputLimit)
+    } else if remaining_source_bytes == 0 {
+        Some(SimilarCodeSkipReason::SourceBytesLimit)
+    } else {
+        None
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().fold(
         String::with_capacity(bytes.len().saturating_mul(2)),
@@ -1701,6 +1742,7 @@ mod tests {
             },
             0,
             0,
+            0,
         );
 
         assert_eq!(phases[0].status, SimilarCodePhaseStatus::Complete);
@@ -1709,6 +1751,30 @@ mod tests {
         assert_eq!(phases[3].status, SimilarCodePhaseStatus::Complete);
         assert_eq!(phases[4].status, SimilarCodePhaseStatus::Complete);
         assert_eq!(phases[5].status, SimilarCodePhaseStatus::Complete);
+    }
+
+    #[test]
+    fn similar_code_extraction_completion_counts_limits_and_read_failures_honestly() {
+        let mut skips = BTreeMap::from([(SimilarCodeSkipReason::BelowMinimumLines, 2)]);
+        assert!(extraction_is_complete(&skips, 0));
+        assert!(!extraction_is_complete(&skips, 1));
+
+        skips.insert(SimilarCodeSkipReason::InputLimit, 3);
+        assert!(!extraction_is_complete(&skips, 0));
+        assert_eq!(remaining_extraction_inputs(7, 3), 4);
+    }
+
+    #[test]
+    fn similar_code_exhausted_extraction_budget_uses_the_specific_skip_reason() {
+        assert_eq!(
+            exhausted_extraction_limit(0, 1),
+            Some(SimilarCodeSkipReason::InputLimit)
+        );
+        assert_eq!(
+            exhausted_extraction_limit(1, 0),
+            Some(SimilarCodeSkipReason::SourceBytesLimit)
+        );
+        assert_eq!(exhausted_extraction_limit(1, 1), None);
     }
 
     #[test]

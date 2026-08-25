@@ -40,16 +40,20 @@ const resolveSimilarCodeCompanion = () => {
       );
     }
     const {
-      resolveBinary,
+      resolveBinaryArtifact,
       resolvePlatformPackage,
     } = require("fallow-similar-code/scripts/run-binary.js");
     const { verifyBinary } = require("fallow-similar-code/scripts/verify-binary.js");
-    const binary = resolveBinary(resolvePlatformPackage());
-    const verification = verifyBinary(binary);
+    const artifact = resolveBinaryArtifact(resolvePlatformPackage());
+    const verification = verifyBinary(artifact);
     if (!verification.ok) {
-      throw new Error(`similar-code companion verification failed: ${verification.message}`);
+      const error = new Error(
+        `similar-code companion verification failed: ${verification.message}`,
+      );
+      error.code = verification.code;
+      throw error;
     }
-    similarCodeCompanion = { binary };
+    similarCodeCompanion = { binary: artifact.binaryPath };
   } catch (error) {
     similarCodeCompanion = { error };
   }

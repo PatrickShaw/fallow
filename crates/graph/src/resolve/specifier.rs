@@ -21,7 +21,7 @@ use super::path_info::{
     normalize_npm_specifier,
 };
 use super::react_native::{build_condition_names, build_extensions};
-use super::types::{DenoImportMapEntry, ResolveContext, ResolveResult};
+use super::types::{DenoImportMapEntry, ResolveContext, ResolveResult, TsconfigChain};
 
 /// Create an `oxc_resolver` instance with standard configuration.
 ///
@@ -254,13 +254,48 @@ fn nearest_tsconfig_path(root: &Path, from_file: &Path) -> Option<PathBuf> {
     }
 }
 
-fn local_tsconfig_chain(ctx: &ResolveContext<'_>, from_file: &Path) -> Arc<[PathBuf]> {
+fn local_tsconfig_chain(ctx: &ResolveContext<'_>, from_file: &Path) -> Arc<TsconfigChain> {
     if let Some(chain) = ctx.tsconfig_cache.chain(from_file) {
         return chain;
     }
-    let chain: Arc<[PathBuf]> = local_tsconfig_chain_uncached(ctx, from_file).into();
+    let entries = local_tsconfig_chain_uncached(ctx, from_file);
+    let chain = Arc::new(resolve_tsconfig_chain(&entries, |path| {
+        read_tsconfig_json_cached(ctx, path)
+    }));
     ctx.tsconfig_cache
         .store_chain(from_file, Arc::clone(&chain));
+    chain
+}
+
+/// Record which chain entry declares each option, so that resolving a specifier
+/// is a lookup rather than another walk.
+fn resolve_tsconfig_chain(
+    entries: &[PathBuf],
+    mut read: impl FnMut(&Path) -> Option<Arc<Value>>,
+) -> TsconfigChain {
+    let mut chain = TsconfigChain::default();
+    for entry in entries {
+        let Some(json) = read(entry) else {
+            continue;
+        };
+        let Some(options) = json.get("compilerOptions") else {
+            continue;
+        };
+        let declared = options.get("paths");
+        if chain.paths.is_none() && declared.is_some() {
+            chain.paths = Some(entry.clone());
+        }
+        if chain.paths_object.is_none() && declared.and_then(Value::as_object).is_some() {
+            chain.paths_object = Some(entry.clone());
+        }
+        if chain.base_url.is_none() && options.get("baseUrl").is_some() {
+            chain.base_url = Some(entry.clone());
+        }
+        if chain.root_dirs.is_none() && options.get("rootDirs").and_then(Value::as_array).is_some()
+        {
+            chain.root_dirs = Some(entry.clone());
+        }
+    }
     chain
 }
 
@@ -656,20 +691,21 @@ fn matches_nearest_tsconfig_path_alias(
     from_file: &Path,
     specifier: &str,
 ) -> bool {
-    for tsconfig_path in local_tsconfig_chain(ctx, from_file).iter() {
-        let Some(paths) = read_tsconfig_json_cached(ctx, tsconfig_path).and_then(|json| {
-            json.get("compilerOptions")
-                .and_then(|compiler_options| compiler_options.get("paths"))
-                .and_then(Value::as_object)
-                .cloned()
-        }) else {
-            continue;
-        };
-        return paths
-            .keys()
-            .any(|pattern| path_alias_pattern_matches(pattern, specifier));
-    }
-    false
+    let chain = local_tsconfig_chain(ctx, from_file);
+    let Some(tsconfig_path) = chain.paths_object.as_ref() else {
+        return false;
+    };
+    let Some(json) = read_tsconfig_json_cached(ctx, tsconfig_path) else {
+        return false;
+    };
+    json.get("compilerOptions")
+        .and_then(|compiler_options| compiler_options.get("paths"))
+        .and_then(Value::as_object)
+        .is_some_and(|paths| {
+            paths
+                .keys()
+                .any(|pattern| path_alias_pattern_matches(pattern, specifier))
+        })
 }
 
 fn try_nearest_tsconfig_path_alias(
@@ -683,41 +719,15 @@ fn try_nearest_tsconfig_path_alias(
             .extension()
             .is_some_and(|extension| extension == "scss" || extension == "sass");
     let chain = local_tsconfig_chain(ctx, from_file);
-    for tsconfig_path in chain.iter() {
-        let Some(json) = read_tsconfig_json_cached(ctx, tsconfig_path) else {
-            continue;
-        };
-        let has_paths = json
-            .get("compilerOptions")
-            .and_then(|compiler_options| compiler_options.get("paths"))
-            .is_some();
-        if let Some(result) =
-            try_tsconfig_paths_from_config(ctx, tsconfig_path, &json, specifier, style_context)
-        {
-            return Some(result);
-        }
-        if has_paths {
-            return None;
-        }
+    // A declared `paths` is authoritative: the nearest one that declares it
+    // decides the outcome, and `baseUrl` is never consulted afterwards.
+    if let Some(tsconfig_path) = chain.paths.as_ref() {
+        let json = read_tsconfig_json_cached(ctx, tsconfig_path)?;
+        return try_tsconfig_paths_from_config(ctx, tsconfig_path, &json, specifier, style_context);
     }
-    for tsconfig_path in chain.iter() {
-        let Some(json) = read_tsconfig_json_cached(ctx, tsconfig_path) else {
-            continue;
-        };
-        let has_base_url = json
-            .get("compilerOptions")
-            .and_then(|compiler_options| compiler_options.get("baseUrl"))
-            .is_some();
-        if let Some(result) =
-            try_tsconfig_base_url_from_config(ctx, tsconfig_path, &json, specifier, style_context)
-        {
-            return Some(result);
-        }
-        if has_base_url {
-            return None;
-        }
-    }
-    None
+    let tsconfig_path = chain.base_url.as_ref()?;
+    let json = read_tsconfig_json_cached(ctx, tsconfig_path)?;
+    try_tsconfig_base_url_from_config(ctx, tsconfig_path, &json, specifier, style_context)
 }
 
 fn try_tsconfig_paths_from_config(
@@ -1827,44 +1837,33 @@ fn try_tsconfig_root_dirs(
     if !specifier.starts_with('.') {
         return None;
     }
-    for tsconfig_path in local_tsconfig_chain(ctx, from_file).iter() {
-        let Some(json) = read_tsconfig_json_cached(ctx, tsconfig_path) else {
-            continue;
-        };
-        let Some(compiler_options) = json.get("compilerOptions") else {
-            continue;
-        };
-        let has_root_dirs = compiler_options.get("rootDirs").is_some();
-        let Some(root_dirs) = compiler_options.get("rootDirs").and_then(Value::as_array) else {
-            continue;
-        };
-        let tsconfig_dir = tsconfig_path.parent().unwrap_or(ctx.root);
-        let roots: Vec<PathBuf> = root_dirs
-            .iter()
-            .filter_map(Value::as_str)
-            .map(|root_dir| {
-                let root_dir = Path::new(root_dir);
-                if root_dir.is_absolute() {
-                    root_dir.to_path_buf()
-                } else {
-                    tsconfig_dir.join(root_dir)
-                }
-            })
-            .collect();
-        let from_dir = from_file.parent().unwrap_or(from_file);
-        for root in &roots {
-            let Ok(relative_dir) = from_dir.strip_prefix(root) else {
-                continue;
-            };
-            for candidate_root in &roots {
-                let candidate = candidate_root.join(relative_dir).join(specifier);
-                if let Some(result) = try_tsconfig_alias_target(ctx, &candidate, false) {
-                    return Some(result);
-                }
+    let chain = local_tsconfig_chain(ctx, from_file);
+    let tsconfig_path = chain.root_dirs.as_ref()?;
+    let json = read_tsconfig_json_cached(ctx, tsconfig_path)?;
+    let root_dirs = json.get("compilerOptions")?.get("rootDirs")?.as_array()?;
+    let tsconfig_dir = tsconfig_path.parent().unwrap_or(ctx.root);
+    let roots: Vec<PathBuf> = root_dirs
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|root_dir| {
+            let root_dir = Path::new(root_dir);
+            if root_dir.is_absolute() {
+                root_dir.to_path_buf()
+            } else {
+                tsconfig_dir.join(root_dir)
             }
-        }
-        if has_root_dirs {
-            return None;
+        })
+        .collect();
+    let from_dir = from_file.parent().unwrap_or(from_file);
+    for root in &roots {
+        let Ok(relative_dir) = from_dir.strip_prefix(root) else {
+            continue;
+        };
+        for candidate_root in &roots {
+            let candidate = candidate_root.join(relative_dir).join(specifier);
+            if let Some(result) = try_tsconfig_alias_target(ctx, &candidate, false) {
+                return Some(result);
+            }
         }
     }
     None
@@ -2891,5 +2890,112 @@ mod tests {
             result.to_string_lossy().replace('\\', "/"),
             "/project/src/Button.ts"
         );
+    }
+
+    // ---- resolve_tsconfig_chain ----
+
+    /// Resolve a chain from in-memory tsconfigs, given as `(path, json)` pairs.
+    /// A path with no pair stands in for one that fails to load.
+    fn chain_of(entries: &[(&str, &str)]) -> super::TsconfigChain {
+        let paths: Vec<PathBuf> = entries
+            .iter()
+            .map(|(path, _)| PathBuf::from(path))
+            .collect();
+        super::resolve_tsconfig_chain(&paths, |path| {
+            entries
+                .iter()
+                .find(|(entry, json)| Path::new(entry) == path && !json.is_empty())
+                .map(|(_, json)| std::sync::Arc::new(serde_json::from_str(json).unwrap()))
+        })
+    }
+
+    /// The nearest declaration wins, so a later entry must not override it.
+    #[test]
+    fn resolve_tsconfig_chain_records_the_nearest_declaration() {
+        let chain = chain_of(&[
+            (
+                "/p/near.json",
+                r#"{"compilerOptions":{"paths":{"@a/*":["a/*"]}}}"#,
+            ),
+            (
+                "/p/far.json",
+                r#"{"compilerOptions":{"paths":{"@b/*":["b/*"]},"baseUrl":"."}}"#,
+            ),
+        ]);
+
+        assert_eq!(chain.paths, Some(PathBuf::from("/p/near.json")));
+        assert_eq!(chain.paths_object, Some(PathBuf::from("/p/near.json")));
+        assert_eq!(chain.base_url, Some(PathBuf::from("/p/far.json")));
+        assert!(chain.root_dirs.is_none());
+    }
+
+    #[test]
+    fn resolve_tsconfig_chain_records_nothing_when_no_entry_declares_anything() {
+        let chain = chain_of(&[("/p/bare.json", r#"{"compilerOptions":{}}"#)]);
+
+        assert!(chain.paths.is_none());
+        assert!(chain.paths_object.is_none());
+        assert!(chain.base_url.is_none());
+        assert!(chain.root_dirs.is_none());
+    }
+
+    #[test]
+    fn resolve_tsconfig_chain_ignores_an_entry_without_compiler_options() {
+        let chain = chain_of(&[
+            (
+                "/p/solution.json",
+                r#"{"references":[{"path":"./app.json"}]}"#,
+            ),
+            ("/p/app.json", r#"{"compilerOptions":{"baseUrl":"."}}"#),
+        ]);
+
+        assert_eq!(chain.base_url, Some(PathBuf::from("/p/app.json")));
+    }
+
+    /// A malformed `paths` still stops the alias lookup, but is skipped when
+    /// searching for a usable alias table.
+    #[test]
+    fn resolve_tsconfig_chain_separates_declared_paths_from_usable_paths() {
+        let chain = chain_of(&[
+            ("/p/malformed.json", r#"{"compilerOptions":{"paths":7}}"#),
+            (
+                "/p/usable.json",
+                r#"{"compilerOptions":{"paths":{"@a/*":["a/*"]}}}"#,
+            ),
+        ]);
+
+        assert_eq!(chain.paths, Some(PathBuf::from("/p/malformed.json")));
+        assert_eq!(chain.paths_object, Some(PathBuf::from("/p/usable.json")));
+    }
+
+    /// `rootDirs` is only usable as an array; a scalar is skipped.
+    #[test]
+    fn resolve_tsconfig_chain_ignores_non_array_root_dirs() {
+        let chain = chain_of(&[
+            (
+                "/p/scalar.json",
+                r#"{"compilerOptions":{"rootDirs":"src"}}"#,
+            ),
+            (
+                "/p/array.json",
+                r#"{"compilerOptions":{"rootDirs":["src","generated"]}}"#,
+            ),
+        ]);
+
+        assert_eq!(chain.root_dirs, Some(PathBuf::from("/p/array.json")));
+    }
+
+    /// An entry that fails to load must not stop the search.
+    #[test]
+    fn resolve_tsconfig_chain_skips_unreadable_entries() {
+        let chain = chain_of(&[
+            ("/p/unreadable.json", ""),
+            (
+                "/p/usable.json",
+                r#"{"compilerOptions":{"paths":{"@a/*":["a/*"]}}}"#,
+            ),
+        ]);
+
+        assert_eq!(chain.paths, Some(PathBuf::from("/p/usable.json")));
     }
 }

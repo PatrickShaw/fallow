@@ -430,11 +430,32 @@ impl CanonicalizeCache {
     }
 }
 
+/// Which tsconfig in a source file's chain declares each option that resolution
+/// consults.
+///
+/// TypeScript takes the *nearest* declaration, and which entry that is depends
+/// only on the chain — not on the specifier being resolved. Recording it once
+/// keeps per-specifier work to a single lookup instead of a fresh walk of the
+/// whole chain.
+#[derive(Default)]
+pub(super) struct TsconfigChain {
+    /// First entry declaring `compilerOptions.paths`, whatever its JSON type.
+    pub paths: Option<PathBuf>,
+    /// First entry declaring `compilerOptions.paths` as an object. Differs from
+    /// [`Self::paths`] only for a malformed `paths`, which callers treat
+    /// differently: one stops at it, the other looks past it.
+    pub paths_object: Option<PathBuf>,
+    /// First entry declaring `compilerOptions.baseUrl`.
+    pub base_url: Option<PathBuf>,
+    /// First entry declaring `compilerOptions.rootDirs` as an array.
+    pub root_dirs: Option<PathBuf>,
+}
+
 /// Session-local cache for tsconfig helper lookups used during import resolution.
 #[derive(Default)]
 pub(super) struct TsconfigCache {
     json: DashMap<PathBuf, Option<Arc<Value>>>,
-    chains: DashMap<PathBuf, Arc<[PathBuf]>>,
+    chains: DashMap<PathBuf, Arc<TsconfigChain>>,
 }
 
 impl TsconfigCache {
@@ -458,12 +479,12 @@ impl TsconfigCache {
     }
 
     /// Return the cached tsconfig chain for a source file, if one exists.
-    pub fn chain(&self, from_file: &Path) -> Option<Arc<[PathBuf]>> {
+    pub fn chain(&self, from_file: &Path) -> Option<Arc<TsconfigChain>> {
         self.chains.get(from_file).map(|entry| Arc::clone(&entry))
     }
 
     /// Store the computed tsconfig chain for a source file.
-    pub fn store_chain(&self, from_file: &Path, chain: Arc<[PathBuf]>) {
+    pub fn store_chain(&self, from_file: &Path, chain: Arc<TsconfigChain>) {
         self.chains.insert(from_file.to_path_buf(), chain);
     }
 }
@@ -619,7 +640,10 @@ mod tests {
         let from_file = Path::new("/project/src/index.ts");
         assert!(cache.chain(from_file).is_none());
 
-        let chain: Arc<[PathBuf]> = vec![PathBuf::from("/project/tsconfig.json")].into();
+        let chain = Arc::new(TsconfigChain {
+            paths: Some(PathBuf::from("/project/tsconfig.json")),
+            ..TsconfigChain::default()
+        });
         cache.store_chain(from_file, Arc::clone(&chain));
 
         assert!(Arc::ptr_eq(&cache.chain(from_file).unwrap(), &chain));

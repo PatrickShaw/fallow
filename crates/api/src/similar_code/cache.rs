@@ -11,7 +11,8 @@ use super::protocol::{
     MODEL_NORMALIZATION, MODEL_REVISION, WIRE_PROTOCOL_VERSION,
 };
 
-const MAGIC: &[u8; 8] = b"FSCVEC01";
+const MAGIC: &[u8; 8] = b"FSCVEC02";
+const TOKEN_TRUNCATED_FLAG: u8 = 1;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const HEADER_BYTES: usize = 8 + 4 + 4 + 4 + 32 + 4;
 
@@ -24,15 +25,31 @@ pub(super) enum CacheLoadState {
     Corrupt,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CachedVector {
+    pub(super) values: Vec<f32>,
+    pub(super) token_truncated: bool,
+}
+
 pub(super) struct VectorCache {
     path: PathBuf,
-    entries: FxHashMap<SimilarCodeSourceDigest, Vec<f32>>,
+    entries: FxHashMap<SimilarCodeSourceDigest, CachedVector>,
     dirty: bool,
     disabled: bool,
     pub(super) load_state: CacheLoadState,
 }
 
 impl VectorCache {
+    fn empty(path: PathBuf, load_state: CacheLoadState) -> Self {
+        Self {
+            path,
+            entries: FxHashMap::default(),
+            dirty: load_state == CacheLoadState::Corrupt,
+            disabled: false,
+            load_state,
+        }
+    }
+
     pub(super) fn load(cache_dir: &Path, disabled: bool) -> Self {
         let path = cache_path(cache_dir);
         if disabled {
@@ -44,26 +61,31 @@ impl VectorCache {
                 load_state: CacheLoadState::Disabled,
             };
         }
-        let Some(bytes) = std::fs::read(&path)
-            .ok()
-            .filter(|bytes| bytes.len() <= MAX_CACHE_BYTES)
-        else {
-            return Self {
-                path,
-                entries: FxHashMap::default(),
-                dirty: false,
-                disabled: false,
-                load_state: CacheLoadState::Missing,
-            };
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(&path).is_err() =>
+            {
+                return Self::empty(path, CacheLoadState::Missing);
+            }
+            Err(_) => return Self::empty(path, CacheLoadState::Corrupt),
+        };
+        if !metadata.is_file() || metadata.len() > MAX_CACHE_BYTES as u64 {
+            return Self::empty(path, CacheLoadState::Corrupt);
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) if bytes.len() <= MAX_CACHE_BYTES => bytes,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(&path).is_err() =>
+            {
+                return Self::empty(path, CacheLoadState::Missing);
+            }
+            Ok(_) | Err(_) => return Self::empty(path, CacheLoadState::Corrupt),
         };
         let Some(entries) = decode_cache(&bytes) else {
-            return Self {
-                path,
-                entries: FxHashMap::default(),
-                dirty: false,
-                disabled: false,
-                load_state: CacheLoadState::Corrupt,
-            };
+            return Self::empty(path, CacheLoadState::Corrupt);
         };
         Self {
             path,
@@ -74,18 +96,32 @@ impl VectorCache {
         }
     }
 
-    pub(super) fn get(&self, digest: &SimilarCodeSourceDigest) -> Option<&[f32]> {
-        self.entries.get(digest).map(Vec::as_slice)
+    pub(super) fn get(&self, digest: &SimilarCodeSourceDigest) -> Option<&CachedVector> {
+        self.entries.get(digest)
     }
 
-    pub(super) fn insert(&mut self, digest: SimilarCodeSourceDigest, values: Vec<f32>) {
+    pub(super) fn insert(
+        &mut self,
+        digest: SimilarCodeSourceDigest,
+        values: Vec<f32>,
+        token_truncated: bool,
+    ) -> bool {
         if self.disabled
             || values.len() != MODEL_DIMENSIONS
             || values.iter().any(|value| !value.is_finite())
         {
-            return;
+            return false;
         }
-        self.dirty |= self.entries.insert(digest, values).is_none();
+        let entry = CachedVector {
+            values,
+            token_truncated,
+        };
+        if self.entries.get(&digest) == Some(&entry) {
+            return false;
+        }
+        self.entries.insert(digest, entry);
+        self.dirty = true;
+        true
     }
 
     pub(super) fn save(&mut self) -> Result<bool, String> {
@@ -154,7 +190,7 @@ fn cache_path(cache_dir: &Path) -> PathBuf {
 }
 
 fn record_bytes() -> usize {
-    32 + MODEL_DIMENSIONS * std::mem::size_of::<f32>()
+    32 + 1 + MODEL_DIMENSIONS * std::mem::size_of::<f32>()
 }
 
 fn max_records() -> usize {
@@ -164,7 +200,7 @@ fn max_records() -> usize {
         .unwrap_or(0)
 }
 
-fn encode_cache(entries: &FxHashMap<SimilarCodeSourceDigest, Vec<f32>>) -> Vec<u8> {
+fn encode_cache(entries: &FxHashMap<SimilarCodeSourceDigest, CachedVector>) -> Vec<u8> {
     let mut ordered = entries.iter().collect::<Vec<_>>();
     ordered.sort_by_key(|(digest, _)| **digest);
     ordered.truncate(max_records());
@@ -175,16 +211,17 @@ fn encode_cache(entries: &FxHashMap<SimilarCodeSourceDigest, Vec<f32>>) -> Vec<u
     bytes.extend_from_slice(&(MODEL_DIMENSIONS as u32).to_le_bytes());
     bytes.extend_from_slice(&parameter_digest());
     bytes.extend_from_slice(&(ordered.len() as u32).to_le_bytes());
-    for (digest, values) in ordered {
+    for (digest, entry) in ordered {
         bytes.extend_from_slice(digest.as_bytes());
-        for value in values {
+        bytes.push(u8::from(entry.token_truncated) * TOKEN_TRUNCATED_FLAG);
+        for value in &entry.values {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
     }
     bytes
 }
 
-fn decode_cache(bytes: &[u8]) -> Option<FxHashMap<SimilarCodeSourceDigest, Vec<f32>>> {
+fn decode_cache(bytes: &[u8]) -> Option<FxHashMap<SimilarCodeSourceDigest, CachedVector>> {
     if bytes.len() < HEADER_BYTES || bytes.get(..8)? != MAGIC {
         return None;
     }
@@ -208,6 +245,11 @@ fn decode_cache(bytes: &[u8]) -> Option<FxHashMap<SimilarCodeSourceDigest, Vec<f
     for _ in 0..count {
         let digest = SimilarCodeSourceDigest::new(bytes.get(cursor..cursor + 32)?.try_into().ok()?);
         cursor += 32;
+        let flags = *bytes.get(cursor)?;
+        cursor += 1;
+        if flags & !TOKEN_TRUNCATED_FLAG != 0 {
+            return None;
+        }
         let mut values = Vec::with_capacity(MODEL_DIMENSIONS);
         for _ in 0..MODEL_DIMENSIONS {
             let value = f32::from_le_bytes(bytes.get(cursor..cursor + 4)?.try_into().ok()?);
@@ -217,7 +259,11 @@ fn decode_cache(bytes: &[u8]) -> Option<FxHashMap<SimilarCodeSourceDigest, Vec<f
             }
             values.push(value);
         }
-        if entries.insert(digest, values).is_some() {
+        let entry = CachedVector {
+            values,
+            token_truncated: flags & TOKEN_TRUNCATED_FLAG != 0,
+        };
+        if entries.insert(digest, entry).is_some() {
             return None;
         }
     }
@@ -242,20 +288,27 @@ mod tests {
         vec![value; MODEL_DIMENSIONS]
     }
 
+    fn entry(value: f32, token_truncated: bool) -> CachedVector {
+        CachedVector {
+            values: vector(value),
+            token_truncated,
+        }
+    }
+
     #[test]
     fn round_trip_uses_full_digest_and_fixed_parameters() {
         let digest = SimilarCodeSourceDigest::new([7; 32]);
         let mut entries = FxHashMap::default();
-        entries.insert(digest, vector(0.25));
+        entries.insert(digest, entry(0.25, true));
         let decoded = decode_cache(&encode_cache(&entries)).unwrap();
-        assert_eq!(decoded[&digest], vector(0.25));
+        assert_eq!(decoded[&digest], entry(0.25, true));
     }
 
     #[test]
     fn corruption_and_parameter_drift_are_misses() {
         let digest = SimilarCodeSourceDigest::new([9; 32]);
         let mut entries = FxHashMap::default();
-        entries.insert(digest, vector(0.5));
+        entries.insert(digest, entry(0.5, false));
         let mut bytes = encode_cache(&entries);
         bytes[20] ^= 1;
         assert!(decode_cache(&bytes).is_none());
@@ -267,16 +320,77 @@ mod tests {
         let first = SimilarCodeSourceDigest::new([1; 32]);
         let second = SimilarCodeSourceDigest::new([2; 32]);
         let mut cache = VectorCache::load(temp.path(), false);
-        cache.insert(first, vector(0.25));
+        assert!(cache.insert(first, vector(0.25), true));
         assert!(cache.save().unwrap());
 
         let mut cache = VectorCache::load(temp.path(), false);
-        cache.insert(second, vector(0.5));
+        assert!(cache.insert(second, vector(0.5), false));
         assert!(cache.save().unwrap());
 
         let cache = VectorCache::load(temp.path(), false);
-        assert_eq!(cache.get(&first), Some(vector(0.25).as_slice()));
-        assert_eq!(cache.get(&second), Some(vector(0.5).as_slice()));
+        assert_eq!(cache.get(&first), Some(&entry(0.25, true)));
+        assert_eq!(cache.get(&second), Some(&entry(0.5, false)));
+    }
+
+    #[test]
+    fn old_and_malformed_cache_records_are_rejected() {
+        let digest = SimilarCodeSourceDigest::new([3; 32]);
+        let mut entries = FxHashMap::default();
+        entries.insert(digest, entry(0.75, true));
+
+        let mut old = encode_cache(&entries);
+        old[..8].copy_from_slice(b"FSCVEC01");
+        assert!(decode_cache(&old).is_none());
+
+        let mut malformed = encode_cache(&entries);
+        malformed[HEADER_BYTES + 32] = 2;
+        assert!(decode_cache(&malformed).is_none());
+    }
+
+    #[test]
+    fn corrupt_cache_is_atomically_rewritten_without_new_vectors() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = cache_path(temp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"invalid cache").unwrap();
+
+        let mut cache = VectorCache::load(temp.path(), false);
+        assert_eq!(cache.load_state, CacheLoadState::Corrupt);
+        assert!(cache.save().unwrap());
+
+        let cache = VectorCache::load(temp.path(), false);
+        assert_eq!(cache.load_state, CacheLoadState::Hit);
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn oversized_present_cache_is_corrupt_and_rewritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = cache_path(temp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len((MAX_CACHE_BYTES as u64) + 1).unwrap();
+
+        let mut cache = VectorCache::load(temp.path(), false);
+        assert_eq!(cache.load_state, CacheLoadState::Corrupt);
+        assert!(cache.save().unwrap());
+
+        let cache = VectorCache::load(temp.path(), false);
+        assert_eq!(cache.load_state, CacheLoadState::Hit);
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn disabled_and_unchanged_entries_are_not_counted_as_writes() {
+        let digest = SimilarCodeSourceDigest::new([4; 32]);
+        let temp = tempfile::tempdir().unwrap();
+        let mut disabled = VectorCache::load(temp.path(), true);
+        assert!(!disabled.insert(digest, vector(0.25), false));
+
+        let mut cache = VectorCache::load(temp.path(), false);
+        assert!(cache.insert(digest, vector(0.25), false));
+        assert!(!cache.insert(digest, vector(0.25), false));
+        assert!(cache.insert(digest, vector(0.25), true));
     }
 
     #[test]

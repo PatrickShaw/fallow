@@ -1,5 +1,6 @@
 //! CLI adapter for opt-in local similar-code discovery.
 
+use std::fmt::Write as _;
 use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -12,8 +13,9 @@ use fallow_api::{
 use fallow_config::OutputFormat;
 use fallow_output::{
     SimilarCodeCacheClearOutput, SimilarCodeCacheClearSchemaVersion, SimilarCodeCompletionStatus,
-    SimilarCodeInspectOutput, SimilarCodeOutput, SimilarCodeReviewOutput, SimilarCodeStatusOutput,
-    SimilarCodeStatusSchemaVersion, serialize_similar_code_cache_clear_json_output,
+    SimilarCodeDomainOutcome, SimilarCodeInspectOutput, SimilarCodeOutput, SimilarCodeReviewOutput,
+    SimilarCodeReviewedCandidate, SimilarCodeStatusOutput, SimilarCodeStatusSchemaVersion,
+    SimilarCodeVerdictMatch, serialize_similar_code_cache_clear_json_output,
     serialize_similar_code_inspect_json_output, serialize_similar_code_json_output,
     serialize_similar_code_review_json_output, serialize_similar_code_status_json_output,
 };
@@ -81,6 +83,7 @@ pub struct SimilarCodeCliInput<'a> {
     pub(crate) workspace: Option<&'a [String]>,
     pub(crate) changed_workspaces: Option<&'a str>,
     pub(crate) explain: bool,
+    pub(crate) quiet: bool,
     pub(crate) output: OutputFormat,
     pub(crate) json_style: JsonStyle,
     pub(crate) threshold: Option<f64>,
@@ -141,15 +144,28 @@ pub fn run(input: SimilarCodeCliInput<'_>) -> ExitCode {
                 input.json_style,
             ),
         },
-        None => match run_similar_code(&similar_code_options) {
-            Ok(output) => emit_discovery(output, input.output, input.json_style),
-            Err(error) => failure(
-                &error.message,
-                error.exit_code,
-                input.output,
-                input.json_style,
-            ),
-        },
+        None => {
+            if !input.quiet {
+                if input.no_cache {
+                    eprintln!(
+                        "fallow: similar-code inference runs locally and offline. This uncached run may take minutes."
+                    );
+                } else {
+                    eprintln!(
+                        "fallow: similar-code inference runs locally and offline. The first run may take minutes; subsequent runs reuse the local vector cache."
+                    );
+                }
+            }
+            match run_similar_code(&similar_code_options) {
+                Ok(output) => emit_discovery(output, input.output, input.json_style),
+                Err(error) => failure(
+                    &error.message,
+                    error.exit_code,
+                    input.output,
+                    input.json_style,
+                ),
+            }
+        }
     }
 }
 
@@ -511,16 +527,126 @@ fn emit_review(
             ),
         };
     }
-    crate::report::sink::outln!("Similar-code review");
-    for candidate in output.candidates {
-        crate::report::sink::outln!(
-            "{}  {:?}  {:?}",
-            candidate.candidate.candidate_id,
-            candidate.verdict_match,
-            candidate.outcome
-        );
+    for line in render_human_review(&output).lines() {
+        crate::report::sink::outln!("{line}");
     }
     ExitCode::SUCCESS
+}
+
+fn render_human_review(output: &SimilarCodeReviewOutput) -> String {
+    let mut rendered = String::from("Similar-code review\n");
+    if output.candidates.is_empty() {
+        rendered.push_str("\nNo candidates to review.\n");
+    }
+    for reviewed in &output.candidates {
+        render_reviewed_candidate(&mut rendered, reviewed);
+    }
+
+    let total = output.candidates.len();
+    let matched = output
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.verdict.is_some())
+        .count();
+    rendered.push_str(&review_summary(total, matched, output.completion.status));
+    rendered
+}
+
+fn review_summary(total: usize, matched: usize, completion: SimilarCodeCompletionStatus) -> String {
+    let unmatched = total.saturating_sub(matched);
+    let candidate_noun = if total == 1 {
+        "candidate"
+    } else {
+        "candidates"
+    };
+    let verdict_noun = if matched == 1 { "verdict" } else { "verdicts" };
+    let unmatched_noun = if unmatched == 1 {
+        "candidate"
+    } else {
+        "candidates"
+    };
+    let mut summary = String::new();
+    let _ = writeln!(
+        summary,
+        "\nReviewed: {total} {candidate_noun}, {matched} matched {verdict_noun}, {unmatched} unmatched {unmatched_noun}"
+    );
+    let completion = match completion {
+        SimilarCodeCompletionStatus::Complete => "complete",
+        SimilarCodeCompletionStatus::Partial => "partial",
+    };
+    let _ = writeln!(summary, "Source completion: {completion}");
+    summary
+}
+
+fn render_reviewed_candidate(rendered: &mut String, reviewed: &SimilarCodeReviewedCandidate) {
+    let candidate = &reviewed.candidate;
+    let verdict = reviewed.verdict.as_ref();
+    let candidate_worthy = verdict.and_then(|value| value.candidate_worthy);
+    let behaviorally_equivalent = verdict.and_then(|value| value.behaviorally_equivalent);
+    let refactor_safe = verdict.and_then(|value| value.refactor_safe);
+    let rationale = verdict.map_or("no safely matched verdict", |value| {
+        value.rationale.as_str()
+    });
+
+    let _ = writeln!(
+        rendered,
+        "\n{}:{} {}",
+        candidate.left.path, candidate.left.start_line, candidate.left.name
+    );
+    let _ = writeln!(
+        rendered,
+        "  <-> {}:{} {}",
+        candidate.right.path, candidate.right.start_line, candidate.right.name
+    );
+    let _ = writeln!(
+        rendered,
+        "  Match: {}",
+        verdict_match_label(reviewed.verdict_match)
+    );
+    let _ = writeln!(
+        rendered,
+        "  Candidate worthy: {}",
+        judgment_label(candidate_worthy)
+    );
+    let _ = writeln!(
+        rendered,
+        "  Behaviorally equivalent: {}",
+        judgment_label(behaviorally_equivalent)
+    );
+    let _ = writeln!(
+        rendered,
+        "  Refactor safe: {}",
+        judgment_label(refactor_safe)
+    );
+    let _ = writeln!(rendered, "  Outcome: {}", outcome_label(reviewed.outcome));
+    let _ = writeln!(rendered, "  Rationale: {rationale}");
+}
+
+const fn judgment_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    }
+}
+
+const fn verdict_match_label(value: SimilarCodeVerdictMatch) -> &'static str {
+    match value {
+        SimilarCodeVerdictMatch::CandidateId => "candidate-id",
+        SimilarCodeVerdictMatch::ReviewKey => "review-key",
+        SimilarCodeVerdictMatch::Unverified => "unverified",
+        SimilarCodeVerdictMatch::AmbiguousReviewKey => "ambiguous-review-key",
+    }
+}
+
+const fn outcome_label(value: SimilarCodeDomainOutcome) -> &'static str {
+    match value {
+        SimilarCodeDomainOutcome::SameResponsibility => "same-responsibility",
+        SimilarCodeDomainOutcome::RelatedButDistinct => "related-but-distinct",
+        SimilarCodeDomainOutcome::IntentionalDuplication => "intentional-duplication",
+        SimilarCodeDomainOutcome::Unrelated => "unrelated",
+        SimilarCodeDomainOutcome::NeedsHumanReview => "needs-human-review",
+    }
 }
 
 fn emit_json(value: &serde_json::Value, style: JsonStyle) -> ExitCode {
@@ -544,13 +670,116 @@ fn failure(message: &str, code: u8, output: OutputFormat, style: JsonStyle) -> E
 
 #[cfg(test)]
 mod tests {
-    use super::inspect_command;
+    use fallow_output::{
+        SimilarCodeDomainOutcome, SimilarCodeEnrichmentAvailability, SimilarCodeEnrichmentState,
+        SimilarCodeLocation, SimilarCodeReviewedCandidate, SimilarCodeSimilarityBand,
+        SimilarCodeVerdict, SimilarCodeVerdictMatch, SimilarCodeVerificationStatus,
+    };
+
+    use super::{inspect_command, render_reviewed_candidate, review_summary};
+
+    fn reviewed_candidate(
+        verdict: Option<SimilarCodeVerdict>,
+        verdict_match: SimilarCodeVerdictMatch,
+        outcome: SimilarCodeDomainOutcome,
+    ) -> SimilarCodeReviewedCandidate {
+        let location = |path: &str, line: u32, name: &str| SimilarCodeLocation {
+            path: path.to_owned(),
+            name: name.to_owned(),
+            start_line: line,
+            start_column: 1,
+            end_line: line + 2,
+            end_column: 2,
+            source_sha256: "a".repeat(64),
+        };
+        SimilarCodeReviewedCandidate {
+            candidate: fallow_output::SimilarCodeCandidate {
+                candidate_id: "similar-code:candidate:v1:test".to_owned(),
+                review_key: "similar-code:review:v1:test".to_owned(),
+                left: location("src/left.ts", 12, "normalizeLeft"),
+                right: location("src/right.ts", 34, "normalizeRight"),
+                similarity: 0.91,
+                similarity_band: SimilarCodeSimilarityBand::High,
+                verification_status: SimilarCodeVerificationStatus::Unverified,
+                enrichment: SimilarCodeEnrichmentAvailability {
+                    graph_relationship: SimilarCodeEnrichmentState::NotRequested,
+                    entry_point_reachability: SimilarCodeEnrichmentState::NotRequested,
+                    callers: SimilarCodeEnrichmentState::NotRequested,
+                    callees: SimilarCodeEnrichmentState::NotRequested,
+                    ownership: SimilarCodeEnrichmentState::NotRequested,
+                    churn: SimilarCodeEnrichmentState::NotRequested,
+                    tests: SimilarCodeEnrichmentState::NotRequested,
+                    deterministic_clone_coverage: SimilarCodeEnrichmentState::NotRequested,
+                    runtime: SimilarCodeEnrichmentState::NotRequested,
+                },
+                actions: Vec::new(),
+            },
+            verdict,
+            verdict_match,
+            outcome,
+        }
+    }
 
     #[test]
     fn inspect_command_preserves_effective_discovery_parameters() {
         assert_eq!(
             inspect_command(0.6, 7, "similar-code:candidate:v1:abc"),
             "fallow similar-code --threshold 0.6 --min-lines 7 inspect similar-code:candidate:v1:abc"
+        );
+    }
+
+    #[test]
+    fn human_review_block_shows_locations_match_axes_outcome_and_rationale() {
+        let verdict = SimilarCodeVerdict {
+            candidate_id: "similar-code:candidate:v1:test".to_owned(),
+            review_key: "similar-code:review:v1:test".to_owned(),
+            candidate_worthy: Some(true),
+            behaviorally_equivalent: Some(false),
+            refactor_safe: Some(false),
+            outcome: SimilarCodeDomainOutcome::RelatedButDistinct,
+            rationale: "Same intent, different edge-case behavior.".to_owned(),
+        };
+        let reviewed = reviewed_candidate(
+            Some(verdict),
+            SimilarCodeVerdictMatch::CandidateId,
+            SimilarCodeDomainOutcome::RelatedButDistinct,
+        );
+        let mut output = String::new();
+        render_reviewed_candidate(&mut output, &reviewed);
+
+        assert_eq!(
+            output,
+            "\nsrc/left.ts:12 normalizeLeft\n  <-> src/right.ts:34 normalizeRight\n  Match: candidate-id\n  Candidate worthy: yes\n  Behaviorally equivalent: no\n  Refactor safe: no\n  Outcome: related-but-distinct\n  Rationale: Same intent, different edge-case behavior.\n"
+        );
+    }
+
+    #[test]
+    fn human_review_block_renders_unmatched_judgments_as_unknown() {
+        let reviewed = reviewed_candidate(
+            None,
+            SimilarCodeVerdictMatch::AmbiguousReviewKey,
+            SimilarCodeDomainOutcome::NeedsHumanReview,
+        );
+        let mut output = String::new();
+        render_reviewed_candidate(&mut output, &reviewed);
+
+        assert!(output.contains("Match: ambiguous-review-key"));
+        assert!(output.contains("Candidate worthy: unknown"));
+        assert!(output.contains("Behaviorally equivalent: unknown"));
+        assert!(output.contains("Refactor safe: unknown"));
+        assert!(output.contains("Outcome: needs-human-review"));
+        assert!(output.contains("Rationale: no safely matched verdict"));
+    }
+
+    #[test]
+    fn review_summary_pluralizes_and_reports_source_completion() {
+        assert_eq!(
+            review_summary(1, 1, fallow_output::SimilarCodeCompletionStatus::Complete),
+            "\nReviewed: 1 candidate, 1 matched verdict, 0 unmatched candidates\nSource completion: complete\n"
+        );
+        assert_eq!(
+            review_summary(2, 1, fallow_output::SimilarCodeCompletionStatus::Partial),
+            "\nReviewed: 2 candidates, 1 matched verdict, 1 unmatched candidate\nSource completion: partial\n"
         );
     }
 }

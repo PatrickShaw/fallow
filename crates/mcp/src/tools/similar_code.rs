@@ -2,8 +2,18 @@ use crate::params::{FindSimilarCodeParams, InspectSimilarCodeParams};
 
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, ContentBlock};
+use std::time::Duration;
 
-use super::{push_global, push_remote_extends, push_str_flag, run_tool, validation_error_body};
+use super::{
+    push_global, push_remote_extends, push_str_flag, run_tool_with_timeout,
+    timeout_duration_with_default, validation_error_body,
+};
+
+const SIMILAR_CODE_TIMEOUT_SECS: u64 = 15 * 60;
+
+fn similar_code_timeout() -> Duration {
+    timeout_duration_with_default(SIMILAR_CODE_TIMEOUT_SECS)
+}
 
 /// Run local semantic candidate discovery without exposing setup mutation.
 pub async fn run_find_similar_code(
@@ -11,7 +21,9 @@ pub async fn run_find_similar_code(
     params: FindSimilarCodeParams,
 ) -> Result<CallToolResult, McpError> {
     match build_find_similar_code_args(&params) {
-        Ok(args) => run_tool(binary, "find_similar_code", &args).await,
+        Ok(args) => {
+            run_tool_with_timeout(binary, "find_similar_code", &args, similar_code_timeout()).await
+        }
         Err(message) => Ok(CallToolResult::error(vec![ContentBlock::text(message)])),
     }
 }
@@ -22,7 +34,15 @@ pub async fn run_inspect_similar_code(
     params: InspectSimilarCodeParams,
 ) -> Result<CallToolResult, McpError> {
     match build_inspect_similar_code_args(&params) {
-        Ok(args) => run_tool(binary, "inspect_similar_code", &args).await,
+        Ok(args) => {
+            run_tool_with_timeout(
+                binary,
+                "inspect_similar_code",
+                &args,
+                similar_code_timeout(),
+            )
+            .await
+        }
         Err(message) => Ok(CallToolResult::error(vec![ContentBlock::text(message)])),
     }
 }

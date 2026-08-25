@@ -163,6 +163,7 @@ mod tests {
 
     fn invokes_cli_dispatch(source: &str) -> bool {
         source.contains("run_tool(binary")
+            || source.contains("run_tool_with_timeout(binary")
             || source.contains("run_fallow(binary")
             || source.contains("run_fallow_sync(")
             || source.contains("Command::new(binary)")

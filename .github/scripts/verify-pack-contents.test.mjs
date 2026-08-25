@@ -7,6 +7,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -93,13 +94,13 @@ test("treats a declared directory as present when its contents are packed", () =
 
 // Build a tarball with an explicit package name so the signed-binary invariant
 // (which keys on `@fallow-cli/<platform>` names) can be exercised.
-function makeNamedTarball({ name, files, present }) {
+function makeNamedTarball({ name, files, present, fallowDigests }) {
   const work = mkdtempSync(join(tmpdir(), "verify-pack-"));
   const pkgDir = join(work, "package");
   mkdirSync(pkgDir, { recursive: true });
   writeFileSync(
     join(pkgDir, "package.json"),
-    JSON.stringify({ name, version: "9.9.9", files }, null, 2),
+    JSON.stringify({ name, version: "9.9.9", files, fallowDigests }, null, 2),
   );
   for (const rel of present) {
     writeFileSync(join(pkgDir, rel), `stub:${rel}`);
@@ -108,6 +109,82 @@ function makeNamedTarball({ name, files, present }) {
   execFileSync("tar", ["-czf", tgz, "-C", work, "package"]);
   return { tgz, cleanup: () => rmSync(work, { recursive: true, force: true }) };
 }
+
+const SIMILAR_CODE_BINARY = "fallow-similar-code";
+const SIMILAR_CODE_FILES = [SIMILAR_CODE_BINARY, `${SIMILAR_CODE_BINARY}.sig`];
+const SIMILAR_CODE_BYTES = `stub:${SIMILAR_CODE_BINARY}`;
+const SIMILAR_CODE_DIGEST = `sha256:${createHash("sha256")
+  .update(SIMILAR_CODE_BYTES)
+  .digest("hex")}`;
+
+test("passes a similar-code platform package with its exact embedded binary digest", () => {
+  const { tgz, cleanup } = makeNamedTarball({
+    name: "@fallow-cli/fallow-similar-code-linux-x64-gnu",
+    files: SIMILAR_CODE_FILES,
+    present: SIMILAR_CODE_FILES,
+    fallowDigests: { [SIMILAR_CODE_BINARY]: SIMILAR_CODE_DIGEST },
+  });
+  try {
+    const result = verifyTarball(tgz);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.digestErrors, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("fails a similar-code platform package without an embedded binary digest", () => {
+  const { tgz, cleanup } = makeNamedTarball({
+    name: "@fallow-cli/fallow-similar-code-linux-x64-gnu",
+    files: SIMILAR_CODE_FILES,
+    present: SIMILAR_CODE_FILES,
+  });
+  try {
+    const result = verifyTarball(tgz);
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.digestErrors, [
+      "package.json must contain exactly one fallowDigests entry for fallow-similar-code",
+    ]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("fails a similar-code platform package with a malformed embedded binary digest", () => {
+  const { tgz, cleanup } = makeNamedTarball({
+    name: "@fallow-cli/fallow-similar-code-linux-x64-gnu",
+    files: SIMILAR_CODE_FILES,
+    present: SIMILAR_CODE_FILES,
+    fallowDigests: { [SIMILAR_CODE_BINARY]: "sha256:ABC" },
+  });
+  try {
+    const result = verifyTarball(tgz);
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.digestErrors, [
+      "fallowDigests.fallow-similar-code must match sha256:<64 lowercase hex>",
+    ]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("fails a similar-code platform package whose embedded digest mismatches the binary", () => {
+  const { tgz, cleanup } = makeNamedTarball({
+    name: "@fallow-cli/fallow-similar-code-linux-x64-gnu",
+    files: SIMILAR_CODE_FILES,
+    present: SIMILAR_CODE_FILES,
+    fallowDigests: { [SIMILAR_CODE_BINARY]: `sha256:${"0".repeat(64)}` },
+  });
+  try {
+    const result = verifyTarball(tgz);
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.digestErrors, [
+      "fallowDigests.fallow-similar-code does not match the packaged binary",
+    ]);
+  } finally {
+    cleanup();
+  }
+});
 
 const SIGNED_PLATFORM_FILES = [
   "fallow",

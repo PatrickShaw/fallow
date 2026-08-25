@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use fallow_engine::source::similar_code::SimilarCodeSourceDigest;
+use rustc_hash::FxHashMap;
 
 mod cache;
 mod protocol;
@@ -56,6 +57,19 @@ pub(crate) struct EmbeddingResult {
     pub(crate) provider_problem: Option<String>,
     pub(crate) inference_ms: f64,
     pub(crate) truncated_functions: usize,
+}
+
+struct EmbeddingMiss {
+    representative_index: usize,
+    occurrence_indices: Vec<usize>,
+}
+
+struct EmbeddingPlan {
+    vectors: Vec<Option<Vec<f32>>>,
+    misses: Vec<EmbeddingMiss>,
+    cache_hits: usize,
+    cache_misses: usize,
+    truncated_functions: usize,
 }
 
 /// Return the installed local provider status.
@@ -163,61 +177,56 @@ pub(crate) fn embed_selected(
     let mut cache = cache::VectorCache::load(cache_dir, no_cache);
     let cache_invalid_entries = usize::from(cache.load_state == cache::CacheLoadState::Corrupt);
     let cache_disabled = cache.load_state == cache::CacheLoadState::Disabled;
-    let mut vectors = Vec::with_capacity(inputs.len());
-    let mut misses = Vec::new();
-    let mut cache_hits = 0usize;
-    for (index, input) in inputs.iter().enumerate() {
-        if let Some(values) = cache.get(&input.source_sha256) {
-            vectors.push(Some(values.to_vec()));
-            cache_hits += 1;
-        } else {
-            vectors.push(None);
-            misses.push(index);
-        }
-    }
-
-    let cache_misses = misses.len();
+    let mut plan = prepare_embedding_plan(&cache, inputs);
     let mut cache_writes = 0usize;
     let mut inference_ms = 0.0f64;
     let mut provider_problem = None;
-    let mut truncated_functions = 0usize;
-    if !misses.is_empty() {
+    if !plan.misses.is_empty() {
         let started = Instant::now();
         let mut session =
             transport::ProviderSession::spawn(&provider.path).map_err(ProviderError::Failed)?;
-        for batch in misses.chunks(EMBED_BATCH_SIZE) {
+        let mut batch_start = 0usize;
+        while batch_start < plan.misses.len() {
             if started.elapsed() >= EMBED_RUN_TIMEOUT {
                 provider_problem =
                     Some("similar-code embedding stopped at the 15-minute run limit".to_owned());
                 break;
             }
-            let request = batch
-                .iter()
-                .map(|index| {
-                    let key = u32::try_from(*index).map_err(|_| {
+            let batch_end = batch_start
+                .saturating_add(EMBED_BATCH_SIZE)
+                .min(plan.misses.len());
+            let request = (batch_start..batch_end)
+                .map(|group_index| {
+                    let miss = &plan.misses[group_index];
+                    let key = u32::try_from(group_index).map_err(|_| {
                         ProviderError::Failed(
-                            "similar-code input index exceeded protocol capacity".to_owned(),
+                            "similar-code digest group exceeded protocol capacity".to_owned(),
                         )
                     })?;
-                    Ok((key, inputs[*index].source))
+                    Ok((key, inputs[miss.representative_index].source))
                 })
                 .collect::<Result<Vec<_>, ProviderError>>()?;
             match session.embed(&request) {
                 Ok(response) => {
                     inference_ms += response.timing.inference_ms;
-                    truncated_functions += response.completion.truncated_functions;
                     if response.status != protocol::EmbedCompletionStatus::Complete {
                         provider_problem = Some(transport::embed_problem(&response));
                     }
                     for vector in response.vectors {
-                        let index = usize::try_from(vector.key).map_err(|_| {
+                        let group_index = usize::try_from(vector.key).map_err(|_| {
                             ProviderError::Failed(
-                                "similar-code provider returned an invalid vector key".to_owned(),
+                                "similar-code provider returned an invalid digest-group key"
+                                    .to_owned(),
                             )
                         })?;
-                        cache.insert(inputs[index].source_sha256, vector.values.clone());
-                        vectors[index] = Some(vector.values);
-                        cache_writes += 1;
+                        cache_writes += usize::from(apply_embedding_vector(
+                            &mut cache,
+                            inputs,
+                            &mut plan,
+                            group_index,
+                            &vector.values,
+                            vector.truncated,
+                        )?);
                     }
                 }
                 Err(error) => {
@@ -225,21 +234,88 @@ pub(crate) fn embed_selected(
                     break;
                 }
             }
+            batch_start = batch_end;
         }
     }
     cache.save().map_err(ProviderError::Failed)?;
 
     Ok(EmbeddingResult {
-        vectors,
-        cache_hits,
-        cache_misses,
+        vectors: plan.vectors,
+        cache_hits: plan.cache_hits,
+        cache_misses: plan.cache_misses,
         cache_writes,
         cache_invalid_entries,
         cache_disabled,
         provider_problem,
         inference_ms,
-        truncated_functions,
+        truncated_functions: plan.truncated_functions,
     })
+}
+
+fn prepare_embedding_plan(
+    cache: &cache::VectorCache,
+    inputs: &[EmbeddingInput<'_>],
+) -> EmbeddingPlan {
+    let mut vectors = vec![None; inputs.len()];
+    let mut misses = Vec::<EmbeddingMiss>::new();
+    let mut miss_groups: FxHashMap<SimilarCodeSourceDigest, usize> = FxHashMap::default();
+    let mut cache_hits = 0usize;
+    let mut cache_misses = 0usize;
+    let mut truncated_functions = 0usize;
+    for (index, input) in inputs.iter().enumerate() {
+        if let Some(entry) = cache.get(&input.source_sha256) {
+            vectors[index] = Some(entry.values.clone());
+            cache_hits = cache_hits.saturating_add(1);
+            truncated_functions =
+                truncated_functions.saturating_add(usize::from(entry.token_truncated));
+            continue;
+        }
+
+        cache_misses = cache_misses.saturating_add(1);
+        if let Some(group_index) = miss_groups.get(&input.source_sha256).copied() {
+            misses[group_index].occurrence_indices.push(index);
+        } else {
+            let group_index = misses.len();
+            miss_groups.insert(input.source_sha256, group_index);
+            misses.push(EmbeddingMiss {
+                representative_index: index,
+                occurrence_indices: vec![index],
+            });
+        }
+    }
+    EmbeddingPlan {
+        vectors,
+        misses,
+        cache_hits,
+        cache_misses,
+        truncated_functions,
+    }
+}
+
+fn apply_embedding_vector(
+    cache: &mut cache::VectorCache,
+    inputs: &[EmbeddingInput<'_>],
+    plan: &mut EmbeddingPlan,
+    group_index: usize,
+    values: &[f32],
+    token_truncated: bool,
+) -> Result<bool, ProviderError> {
+    let miss = plan.misses.get(group_index).ok_or_else(|| {
+        ProviderError::Failed(
+            "similar-code provider returned an unknown digest-group key".to_owned(),
+        )
+    })?;
+    let digest = inputs[miss.representative_index].source_sha256;
+    let cache_changed = cache.insert(digest, values.to_owned(), token_truncated);
+    if token_truncated {
+        plan.truncated_functions = plan
+            .truncated_functions
+            .saturating_add(miss.occurrence_indices.len());
+    }
+    for occurrence_index in &miss.occurrence_indices {
+        plan.vectors[*occurrence_index] = Some(values.to_owned());
+    }
+    Ok(cache_changed)
 }
 
 /// Remove the model-specific vector cache. Model artifacts remain installed.
@@ -308,4 +384,57 @@ fn validate_status(status: &SimilarCodeProviderStatus) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test fixture construction must fail immediately"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_digest_is_inferred_once_and_warm_truncation_is_occurrence_aware() {
+        let temp = tempfile::tempdir().unwrap();
+        let digest = SimilarCodeSourceDigest::new([8; 32]);
+        let inputs = [
+            EmbeddingInput {
+                source_sha256: digest,
+                source: "function same() { return 1; }",
+            },
+            EmbeddingInput {
+                source_sha256: digest,
+                source: "function same() { return 1; }",
+            },
+        ];
+
+        let mut cache = cache::VectorCache::load(temp.path(), false);
+        let mut cold = prepare_embedding_plan(&cache, &inputs);
+        assert_eq!(cold.cache_misses, 2);
+        assert_eq!(cold.misses.len(), 1);
+        assert_eq!(cold.misses[0].occurrence_indices, vec![0, 1]);
+        assert!(
+            apply_embedding_vector(
+                &mut cache,
+                &inputs,
+                &mut cold,
+                0,
+                &[0.25; protocol::MODEL_DIMENSIONS],
+                true,
+            )
+            .unwrap()
+        );
+        assert_eq!(cold.truncated_functions, 2);
+        assert!(cold.vectors.iter().all(Option::is_some));
+        assert!(cache.save().unwrap());
+
+        let cache = cache::VectorCache::load(temp.path(), false);
+        let warm = prepare_embedding_plan(&cache, &inputs);
+        assert_eq!(warm.cache_hits, 2);
+        assert_eq!(warm.cache_misses, 0);
+        assert_eq!(warm.truncated_functions, 2);
+        assert!(warm.misses.is_empty());
+        assert!(warm.vectors.iter().all(Option::is_some));
+    }
 }

@@ -194,15 +194,21 @@ pub fn validation_error_body(message: impl Into<String>) -> String {
     .to_string()
 }
 
-/// Read the subprocess timeout from `FALLOW_TIMEOUT_SECS` or fall back to the default.
+fn timeout_duration_from(value: Option<&str>, default_secs: u64) -> Duration {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or_else(|| Duration::from_secs(default_secs), Duration::from_secs)
+}
+
+/// Read the subprocess timeout from `FALLOW_TIMEOUT_SECS` or use the supplied
+/// tool-specific default.
+fn timeout_duration_with_default(default_secs: u64) -> Duration {
+    let configured = std::env::var("FALLOW_TIMEOUT_SECS").ok();
+    timeout_duration_from(configured.as_deref(), default_secs)
+}
+
 fn timeout_duration() -> Duration {
-    std::env::var("FALLOW_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map_or(
-            Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-            Duration::from_secs,
-        )
+    timeout_duration_with_default(DEFAULT_TIMEOUT_SECS)
 }
 
 /// Execute the fallow CLI binary with the given arguments and return the result.
@@ -232,14 +238,17 @@ pub async fn run_tool(
     tool: &'static str,
     args: &[String],
 ) -> Result<CallToolResult, McpError> {
-    spawn_fallow(
-        binary,
-        args,
-        timeout_duration(),
-        DEFAULT_MAX_OUTPUT_BYTES,
-        Some(tool),
-    )
-    .await
+    run_tool_with_timeout(binary, tool, args, timeout_duration()).await
+}
+
+/// Execute one named MCP tool with a tool-specific bounded timeout.
+pub async fn run_tool_with_timeout(
+    binary: &str,
+    tool: &'static str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<CallToolResult, McpError> {
+    spawn_fallow(binary, args, timeout, DEFAULT_MAX_OUTPUT_BYTES, Some(tool)).await
 }
 
 #[cfg(test)]
@@ -804,5 +813,25 @@ mod completeness_tests {
         let result = non_success_result(1, &output, "", false);
 
         assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn tool_timeout_defaults_remain_distinct_and_share_the_env_override_parser() {
+        assert_eq!(
+            timeout_duration_from(None, DEFAULT_TIMEOUT_SECS),
+            Duration::from_mins(2)
+        );
+        assert_eq!(
+            timeout_duration_from(None, 15 * 60),
+            Duration::from_mins(15)
+        );
+        assert_eq!(
+            timeout_duration_from(Some("42"), 15 * 60),
+            Duration::from_secs(42)
+        );
+        assert_eq!(
+            timeout_duration_from(Some("invalid"), 15 * 60),
+            Duration::from_mins(15)
+        );
     }
 }

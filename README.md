@@ -307,7 +307,7 @@ GitLab:
 
 ```yaml
 include:
-  - remote: 'https://raw.githubusercontent.com/fallow-rs/fallow/v3.17.0/ci/gitlab-ci.yml'
+  - remote: 'https://raw.githubusercontent.com/fallow-rs/fallow/v3.18.0/ci/gitlab-ci.yml'
 
 fallow:
   extends: .fallow

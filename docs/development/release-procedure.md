@@ -1,9 +1,9 @@
----
-name: release
-description: Prepare and publish a Fallow release with version, changelog, generated contracts, companion repositories, registry publication, and post-release verification.
----
+# Release procedure
 
-# Release
+Maintainer-only procedure for publishing a Fallow release: version, changelog,
+generated contracts, companion repositories, registry publication, and
+post-release verification. The policy tests under `scripts/` assert the
+invariants in this file.
 
 ## Preflight
 

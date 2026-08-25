@@ -20,7 +20,7 @@ the change reaches them.
 | Change visualization | [Repository map](repo-map.md), `crates/engine/src/viz.rs`, `crates/cli/src/viz.rs`, `viz-frontend/src/`, `viz-frontend/package.json`, [review routing](review-routing.md) | Unrelated editor integrations |
 | Change GitHub Action or GitLab CI | [Review routing](review-routing.md), action or CI tests, matching integration review skill | Editor integrations |
 | Change docs, skills, or agent routing | [Knowledge architecture](knowledge-architecture.md), [AI tooling](ai-tooling.md), [quality gates](quality-gates.md) | Analyzer internals |
-| Prepare a release | Release skill, [quality gates](quality-gates.md), [release security](release-security.md), [backwards compatibility](../backwards-compatibility.md), changelog and companion-source contracts | Unchanged analyzer internals |
+| Prepare a release | [Release procedure](release-procedure.md), [quality gates](quality-gates.md), [release security](release-security.md), [backwards compatibility](../backwards-compatibility.md), changelog and companion-source contracts | Unchanged analyzer internals |
 | Prepare a commit or push | [Quality gates](quality-gates.md), active workflow skill | Unrelated reference catalogues |
 | Review a cross-surface change | [Review routing](review-routing.md), [quality gates](quality-gates.md), affected durable references | Unaffected specialist lenses |
 

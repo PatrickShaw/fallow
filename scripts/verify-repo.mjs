@@ -66,6 +66,11 @@ const FULL_ONLY_COMMANDS = [
     args: ["test", "--workspace", "--lib", "--bins", "--tests", "--examples"],
   },
   {
+    label: "Semantic clone conformance",
+    command: "npm",
+    args: ["run", "check:semantic-clone-conformance"],
+  },
+  {
     label: "Benchmark compilation",
     command: "cargo",
     args: ["check", "--workspace", "--benches"],

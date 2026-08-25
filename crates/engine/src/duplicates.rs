@@ -8,6 +8,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::results::DuplicationAnalysis;
 
+/// Experimental, provider-neutral similar-code candidate evaluation.
+///
+/// This module is exposed only so repository benchmarks can exercise the real
+/// implementation. It is not a supported public output contract.
+#[doc(hidden)]
+#[path = "similar_code.rs"]
+pub mod similar_code;
+
 #[path = "duplication_detector/mod.rs"]
 mod detector;
 

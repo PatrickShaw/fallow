@@ -62,3 +62,7 @@ harness = false
 [[bench]]
 name = "dupes_pipeline"
 harness = false
+
+[[bench]]
+name = "similar_code"
+harness = false

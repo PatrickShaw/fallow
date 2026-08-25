@@ -279,9 +279,10 @@ test("VS Code public release verification stays exact and credential-free", () =
   assert.match(verifier, /VSIX_VARIANTS\.map\(\(\{ target \}\) => target\)/u);
   assert.match(verifier, /marketplace\.visualstudio\.com\/.*extensionquery/u);
   assert.match(verifier, /open-vsx\.org\/api/u);
-  assert.match(verifier, /target === "universal" \? version/u);
+  assert.match(verifier, /\$\{target\}\/\$\{version\}/u);
   assert.match(verifier, /payload.*fileCount.*sha256/su);
-  assert.match(verifier, /DEFAULT_ATTEMPTS = 24/u);
+  assert.match(verifier, /DEFAULT_METADATA_ATTEMPTS = 120/u);
+  assert.match(verifier, /DEFAULT_PAYLOAD_ATTEMPTS = 24/u);
   assert.doesNotMatch(verifier, /VSCE_PAT|OVSX_PAT|secrets\./u);
   assert.match(verifierTests, /missing[\s\S]*duplicate[\s\S]*stale/u);
   assert.match(verifierTests, /universal fallback/u);

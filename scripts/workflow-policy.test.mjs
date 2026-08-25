@@ -509,6 +509,7 @@ test("release publication waits for the aggregate verification gate", () => {
     /needs: \[vscode-prep, vscode-publish-marketplace, vscode-publish-open-vsx\]/,
   );
   assert.match(vscodePublicVerify, /persist-credentials: false/);
+  assert.match(vscodePublicVerify, /timeout-minutes: 45/);
   assert.match(vscodePublicVerify, /node scripts\/vscode-public-verify\.mjs --artifact-dir/);
   assert.doesNotMatch(vscodePublicVerify, /secrets\.|_PAT|npm install|pnpm install/u);
   assert.match(

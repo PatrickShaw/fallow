@@ -14,6 +14,7 @@ import {
   fetchJson,
   marketplaceDownloads,
   openVsxDownload,
+  openVsxMetadataUrl,
   parseChecksums,
   retry,
   validateInventory,
@@ -149,6 +150,17 @@ test("Open VSX exact endpoint metadata rejects universal fallback", () => {
   );
 });
 
+test("Open VSX metadata URLs always select an exact target", () => {
+  assert.equal(
+    openVsxMetadataUrl(VERSION, "universal"),
+    `https://open-vsx.org/api/fallow-rs/fallow-vscode/universal/${VERSION}`,
+  );
+  assert.equal(
+    openVsxMetadataUrl(VERSION, "linux-x64"),
+    `https://open-vsx.org/api/fallow-rs/fallow-vscode/linux-x64/${VERSION}`,
+  );
+});
+
 test("registry metadata rejects rate limits and non-JSON responses", async () => {
   const originalFetch = globalThis.fetch;
   try {
@@ -204,6 +216,8 @@ test("semantic payload verification rejects a registry package with changed cont
   }));
 
 test("registry propagation retry succeeds within its bound and rejects exhaustion", async () => {
+  assert.equal(await retry("default fixture", async () => "ready"), "ready");
+
   let attempts = 0;
   const result = await retry(
     "fixture registry",

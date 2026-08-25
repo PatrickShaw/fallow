@@ -35,7 +35,8 @@ const MARKETPLACE_QUERY_URL =
   "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1";
 const OPEN_VSX_API_ROOT = "https://open-vsx.org/api";
 const MARKETPLACE_PACKAGE_ASSET = "Microsoft.VisualStudio.Services.VSIXPackage";
-const DEFAULT_ATTEMPTS = 24;
+const DEFAULT_METADATA_ATTEMPTS = 120;
+const DEFAULT_PAYLOAD_ATTEMPTS = 24;
 const DEFAULT_RETRY_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 120_000;
 
@@ -220,9 +221,13 @@ export const openVsxDownload = (metadata, version, target) => {
   return assertHttpsUrl(metadata.files.download, `Open VSX ${target} download`);
 };
 
+/** Build an exact Open VSX target endpoint, including the universal target. */
+export const openVsxMetadataUrl = (version, target) =>
+  `${OPEN_VSX_API_ROOT}/${PUBLISHER}/${EXTENSION_NAME}/${target}/${version}`;
+
 /** Retry registry propagation checks with a fixed upper bound. */
 export const retry = async (label, operation, options = {}) => {
-  const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
+  const attempts = options.attempts ?? DEFAULT_PAYLOAD_ATTEMPTS;
   const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
   assert.ok(Number.isSafeInteger(attempts) && attempts > 0, "attempts must be positive");
   assert.ok(Number.isSafeInteger(retryMs) && retryMs >= 0, "retryMs must be non-negative");
@@ -280,8 +285,7 @@ const queryMarketplace = async (version) => {
 const queryOpenVsx = async (version) => {
   const downloads = new Map();
   for (const target of EXPECTED_TARGETS) {
-    const suffix = target === "universal" ? version : `${target}/${version}`;
-    const url = `${OPEN_VSX_API_ROOT}/${PUBLISHER}/${EXTENSION_NAME}/${suffix}`;
+    const url = openVsxMetadataUrl(version, target);
     const metadata = await fetchJson(url);
     downloads.set(target, openVsxDownload(metadata, version, target));
   }
@@ -412,7 +416,8 @@ const verifyDownload = async (registry, url, entry, temporaryRoot, retryOptions)
 const parseArguments = (arguments_) => {
   const options = {
     artifactDir: null,
-    attempts: DEFAULT_ATTEMPTS,
+    metadataAttempts: DEFAULT_METADATA_ATTEMPTS,
+    payloadAttempts: DEFAULT_PAYLOAD_ATTEMPTS,
     retryMs: DEFAULT_RETRY_MS,
   };
   for (let index = 0; index < arguments_.length; index += 1) {
@@ -421,7 +426,8 @@ const parseArguments = (arguments_) => {
       options.artifactDir = resolve(value);
       index += 1;
     } else if (arguments_[index] === "--attempts" && value) {
-      options.attempts = Number(value);
+      options.metadataAttempts = Number(value);
+      options.payloadAttempts = Number(value);
       index += 1;
     } else if (arguments_[index] === "--retry-ms" && value) {
       options.retryMs = Number(value);
@@ -437,12 +443,19 @@ const parseArguments = (arguments_) => {
 const main = async () => {
   const options = parseArguments(process.argv.slice(2));
   const inventory = validateArtifactDirectory(options.artifactDir);
-  const retryOptions = { attempts: options.attempts, retryMs: options.retryMs };
+  const metadataRetryOptions = {
+    attempts: options.metadataAttempts,
+    retryMs: options.retryMs,
+  };
+  const payloadRetryOptions = {
+    attempts: options.payloadAttempts,
+    retryMs: options.retryMs,
+  };
   const version = inventory.extensionVersion;
 
   const [marketplace, openVsx] = await Promise.all([
-    retry("VS Code Marketplace metadata", () => queryMarketplace(version), retryOptions),
-    retry("Open VSX metadata", () => queryOpenVsx(version), retryOptions),
+    retry("VS Code Marketplace metadata", () => queryMarketplace(version), metadataRetryOptions),
+    retry("Open VSX metadata", () => queryOpenVsx(version), metadataRetryOptions),
   ]);
 
   const temporaryRoot = mkdtempSync(join(tmpdir(), "fallow-vscode-public-"));
@@ -454,9 +467,15 @@ const main = async () => {
           marketplace.get(entry.target),
           entry,
           temporaryRoot,
-          retryOptions,
+          payloadRetryOptions,
         ),
-        verifyDownload("open-vsx", openVsx.get(entry.target), entry, temporaryRoot, retryOptions),
+        verifyDownload(
+          "open-vsx",
+          openVsx.get(entry.target),
+          entry,
+          temporaryRoot,
+          payloadRetryOptions,
+        ),
       ]),
     );
   } finally {

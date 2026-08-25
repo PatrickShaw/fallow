@@ -1428,7 +1428,7 @@ jobs:
     name: Verify public VS Code registry targets
     needs: [vscode-prep, vscode-publish-marketplace, vscode-publish-open-vsx]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:

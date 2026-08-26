@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.19.0] - 2026-08-26
+
 ### Added
 
 - **`fallow similar-code` adds opt-in semantic function discovery through a
@@ -82,6 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Fallow is listed in the official MCP Registry.** The repository ships the
+  registry's `server.json` next to an `mcpName` in the npm package, both
+  pinned to the released version by a policy test, so MCP clients that browse
+  the registry find `fallow-mcp` with its stdio launcher.
 - **`fallow impact statusline` now says when the Impact store was written by a
   newer Fallow.** An older binary reading a newer store printed the generic
   `data unavailable` line, which read as lost history. It now prints
@@ -6925,7 +6931,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.18.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.19.0...HEAD
+[3.19.0]: https://github.com/fallow-rs/fallow/compare/v3.18.0...v3.19.0
 [3.18.0]: https://github.com/fallow-rs/fallow/compare/v3.17.0...v3.18.0
 [3.17.0]: https://github.com/fallow-rs/fallow/compare/v3.16.0...v3.17.0
 [3.16.0]: https://github.com/fallow-rs/fallow/compare/v3.15.0...v3.16.0

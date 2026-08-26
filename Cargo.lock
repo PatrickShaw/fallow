@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-api"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "dunce",
  "fallow-config",
@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-benchmarks"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "codspeed-criterion-compat",
  "fallow-api",
@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-cli"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "base64 0.23.1",
  "bitcode",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-config"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "dunce",
  "fallow-types",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-core"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "codspeed-criterion-compat",
  "dhat",
@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-engine"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "bitcode",
  "codspeed-criterion-compat",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-extract"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "bitcode",
  "cssparser",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-graph"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "dunce",
  "fallow-config",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-license"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-lsp"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "dunce",
  "fallow-api",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-mcp"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "fallow-api",
  "fallow-process",
@@ -1303,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-multicall"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "fallow-cli",
  "fallow-lsp",
@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-node"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "fallow-api",
  "fallow-types",
@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-output"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "fallow-config",
  "fallow-types",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-process"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "libc",
  "rustc-hash 2.1.3",
@@ -1349,7 +1349,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-security"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "fallow-config",
  "fallow-types",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-types"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "bitcode",
  "oxc_span",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "fallow-v8-coverage"
-version = "3.18.0"
+version = "3.19.0"
 dependencies = [
  "proptest",
  "serde",

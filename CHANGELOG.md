@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `data from newer fallow · upgrade this fallow`, so the fix is visible in the
   status bar and a statusline wrapper can retry with a current binary. Corrupt
   or unreadable stores keep the `data unavailable` line.
+- **Better multi-threaded support** [#2437](https://github.com/fallow-rs/fallow/pull/2437). Now using `Dashmap` instead
+  of `FxHashMap` in TSConfig cache to reduce lock contention when heavy use of
+  tsconfig.json setups (E.g. Project references) is in use. Should provide
+  significant multi-thread performance improvements for high thread environments
+  with high tsconfig count codebases.
 
 ### Fixed
 

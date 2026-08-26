@@ -127,6 +127,9 @@ pub fn css_in_js_token_defs(source: &str, path: &Path) -> Vec<CssInJsTokenDef> {
     }
     let semantic_return = SemanticBuilder::new().build(&ret.program);
     collector.build_const_object_map(&ret.program, semantic_return.semantic.scoping());
+    collector.collecting_mutations = true;
+    collector.visit_program(&ret.program);
+    collector.collecting_mutations = false;
     collector.visit_program(&ret.program);
     collector.defs
 }
@@ -341,12 +344,16 @@ pub fn css_in_js_consumer_scan(
             root_reference_spans: FxHashSet::default(),
             static_values: FxHashMap::default(),
             static_alias_neighbors: FxHashMap::default(),
+            collecting_mutations: false,
             hits: Vec::new(),
         };
         collector.build_import_map(&ret.program);
         collector.build_query_indexes();
         collector.build_static_value_map(&ret.program);
         collector.build_root_reference_spans(&ret.program);
+        collector.collecting_mutations = true;
+        collector.visit_program(&ret.program);
+        collector.collecting_mutations = false;
         collector.visit_program(&ret.program);
         out.extend(collector.hits);
     }
@@ -375,6 +382,7 @@ struct BatchedBindingCollector<'a, 'q, 'v> {
     root_reference_spans: FxHashSet<Span>,
     static_values: FxHashMap<&'a str, (u32, &'a Expression<'a>)>,
     static_alias_neighbors: FxHashMap<&'a str, FxHashSet<&'a str>>,
+    collecting_mutations: bool,
     hits: Vec<(usize, TokenConsumerHit)>,
 }
 
@@ -669,13 +677,13 @@ impl<'a> BatchedBindingCollector<'a, '_, '_> {
         else {
             return;
         };
-        let Expression::Identifier(contract) = unwrap_transparent_expression(contract_expression)
-        else {
+        let Some(contract) = self.resolve_theme_contract_alias(
+            contract_expression,
+            call.span.start,
+            &mut FxHashSet::default(),
+        ) else {
             return;
         };
-        if !self.root_reference_spans.contains(&contract.span) {
-            return;
-        }
         let Some(overrides) = call.arguments.get(1).and_then(Argument::as_expression) else {
             return;
         };
@@ -689,7 +697,7 @@ impl<'a> BatchedBindingCollector<'a, '_, '_> {
         ) {
             return;
         }
-        let Some(queries) = self.theme_queries.get(contract.name.as_str()) else {
+        let Some(queries) = self.theme_queries.get(contract) else {
             return;
         };
         let line = self.lines.line_at(call.span().start);
@@ -702,6 +710,31 @@ impl<'a> BatchedBindingCollector<'a, '_, '_> {
             );
         }
     }
+
+    fn resolve_theme_contract_alias(
+        &self,
+        expression: &'a Expression<'a>,
+        before: u32,
+        visiting: &mut FxHashSet<&'a str>,
+    ) -> Option<&'a str> {
+        let Expression::Identifier(identifier) = unwrap_transparent_expression(expression) else {
+            return None;
+        };
+        if !self.root_reference_spans.contains(&identifier.span) {
+            return None;
+        }
+        let name = identifier.name.as_str();
+        if self.theme_queries.contains_key(name) {
+            return Some(name);
+        }
+        let &(declaration_start, value) = self.static_values.get(name)?;
+        if declaration_start >= before || !visiting.insert(name) {
+            return None;
+        }
+        let resolved = self.resolve_theme_contract_alias(value, declaration_start, visiting);
+        visiting.remove(name);
+        resolved
+    }
 }
 
 impl<'a> Visit<'a> for BatchedBindingCollector<'a, '_, '_> {
@@ -710,7 +743,9 @@ impl<'a> Visit<'a> for BatchedBindingCollector<'a, '_, '_> {
         if let Some((_, _, segments)) = chain.as_mut() {
             segments.push(member.property.name.to_string());
         }
-        self.record_member(chain, member.span().start);
+        if !self.collecting_mutations {
+            self.record_member(chain, member.span().start);
+        }
         walk::walk_static_member_expression(self, member);
     }
 
@@ -723,13 +758,16 @@ impl<'a> Visit<'a> for BatchedBindingCollector<'a, '_, '_> {
         } else {
             chain = None;
         }
-        self.record_member(chain, member.span().start);
+        if !self.collecting_mutations {
+            self.record_member(chain, member.span().start);
+        }
         walk::walk_computed_member_expression(self, member);
     }
 
     fn visit_variable_declarator(&mut self, declaration: &VariableDeclarator<'a>) {
-        if let (BindingPattern::BindingIdentifier(_), Some(Expression::CallExpression(call))) =
-            (&declaration.id, declaration.init.as_ref())
+        if !self.collecting_mutations
+            && let (BindingPattern::BindingIdentifier(_), Some(Expression::CallExpression(call))) =
+                (&declaration.id, declaration.init.as_ref())
         {
             self.record_theme_call(call);
         }
@@ -737,33 +775,41 @@ impl<'a> Visit<'a> for BatchedBindingCollector<'a, '_, '_> {
     }
 
     fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
-        for binding in assignment_target_root_bindings(&assignment.left) {
-            self.invalidate_static_value(Some(binding));
-        }
-        if let Some(receiver) = assignment_target_receiver_expression(&assignment.left) {
-            let binding = self.mutation_root_binding(
-                receiver,
-                assignment.span.start,
-                &mut FxHashSet::default(),
-            );
-            self.invalidate_static_value(binding);
+        if self.collecting_mutations {
+            for binding in assignment_target_root_bindings(&assignment.left) {
+                self.invalidate_static_value(Some(binding));
+            }
+            if let Some(receiver) = assignment_target_receiver_expression(&assignment.left) {
+                let binding = self.mutation_root_binding(
+                    receiver,
+                    assignment.span.start,
+                    &mut FxHashSet::default(),
+                );
+                self.invalidate_static_value(binding);
+            }
         }
         walk::walk_assignment_expression(self, assignment);
     }
 
     fn visit_update_expression(&mut self, update: &UpdateExpression<'a>) {
-        self.invalidate_static_value(simple_assignment_target_root_binding(&update.argument));
+        if self.collecting_mutations {
+            self.invalidate_static_value(simple_assignment_target_root_binding(&update.argument));
+        }
         walk::walk_update_expression(self, update);
     }
 
     fn visit_unary_expression(&mut self, expression: &UnaryExpression<'a>) {
-        if expression.operator.is_delete() {
+        if self.collecting_mutations && expression.operator.is_delete() {
             self.invalidate_static_value(expression_root_binding(&expression.argument));
         }
         walk::walk_unary_expression(self, expression);
     }
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if !self.collecting_mutations {
+            walk::walk_call_expression(self, call);
+            return;
+        }
         let mut visiting = FxHashSet::default();
         let is_stylex_helper = call.arguments.len() == 1
             && is_root_stylex_static_call(
@@ -1572,14 +1618,7 @@ fn is_static_stylex_computed_key<'a>(
             if binary.operator.is_numeric_or_string_binary_operator() =>
         {
             is_static_stylex_theme_override(
-                &binary.left,
-                before,
-                static_values,
-                imports,
-                root_reference_spans,
-                visiting,
-            ) && is_static_stylex_theme_override(
-                &binary.right,
+                expression,
                 before,
                 static_values,
                 imports,
@@ -1896,8 +1935,14 @@ fn is_static_stylex_pure_call<'a>(
             visiting,
         );
     }
-    if !is_root_scalar_pure_call(&call.callee, static_values, root_reference_spans)
-        || !is_static_stylex_scalar_call_shape(call)
+    if !is_root_scalar_pure_call(
+        &call.callee,
+        before,
+        static_values,
+        imports,
+        root_reference_spans,
+        visiting,
+    ) || !is_static_stylex_scalar_call_shape(call, before, static_values, root_reference_spans)
     {
         return false;
     }
@@ -1918,7 +1963,13 @@ fn is_static_stylex_pure_call<'a>(
     }
     call.arguments.iter().all(|argument| {
         argument.as_expression().is_some_and(|argument| {
-            is_static_stylex_theme_override(
+            is_definitely_static_primitive(
+                argument,
+                before,
+                static_values,
+                root_reference_spans,
+                visiting,
+            ) && is_static_stylex_theme_override(
                 argument,
                 before,
                 static_values,
@@ -2243,10 +2294,13 @@ fn is_root_object_from_entries_call(
         && !static_values.contains_key("Object")
 }
 
-fn is_root_scalar_pure_call(
-    callee: &Expression<'_>,
-    static_values: &FxHashMap<&str, (u32, &Expression<'_>)>,
+fn is_root_scalar_pure_call<'a>(
+    callee: &'a Expression<'a>,
+    before: u32,
+    static_values: &FxHashMap<&'a str, (u32, &'a Expression<'a>)>,
+    imports: &FxHashMap<&'a str, (Lib, &'a str)>,
     root_reference_spans: &FxHashSet<Span>,
+    visiting: &mut FxHashSet<&'a str>,
 ) -> bool {
     match unwrap_transparent_expression(callee) {
         Expression::Identifier(identifier) => {
@@ -2262,12 +2316,100 @@ fn is_root_scalar_pure_call(
                         && !static_values.contains_key("Math")
                         && is_static_math_method(method)
                 }
-                Expression::StringLiteral(_) => is_static_string_method(method),
-                Expression::NumericLiteral(_) => is_static_number_method(method),
-                _ => false,
+                object => match static_stylex_scalar_kind(
+                    object,
+                    before,
+                    static_values,
+                    imports,
+                    root_reference_spans,
+                    visiting,
+                ) {
+                    Some(StyleXScalarKind::String) => is_static_string_method(method),
+                    Some(StyleXScalarKind::Number) => is_static_number_method(method),
+                    Some(StyleXScalarKind::Other) | None => false,
+                },
             }
         }
         _ => false,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StyleXScalarKind {
+    String,
+    Number,
+    Other,
+}
+
+fn static_stylex_scalar_kind<'a>(
+    expression: &'a Expression<'a>,
+    before: u32,
+    static_values: &FxHashMap<&'a str, (u32, &'a Expression<'a>)>,
+    imports: &FxHashMap<&'a str, (Lib, &'a str)>,
+    root_reference_spans: &FxHashSet<Span>,
+    visiting: &mut FxHashSet<&'a str>,
+) -> Option<StyleXScalarKind> {
+    match unwrap_transparent_expression(expression) {
+        Expression::StringLiteral(_) => Some(StyleXScalarKind::String),
+        Expression::NumericLiteral(_) => Some(StyleXScalarKind::Number),
+        Expression::Identifier(identifier) => {
+            if !root_reference_spans.contains(&identifier.span) {
+                return None;
+            }
+            let name = identifier.name.as_str();
+            let &(declaration_start, value) = static_values.get(name)?;
+            if declaration_start >= before || !visiting.insert(name) {
+                return None;
+            }
+            let kind = static_stylex_scalar_kind(
+                value,
+                declaration_start,
+                static_values,
+                imports,
+                root_reference_spans,
+                visiting,
+            );
+            visiting.remove(name);
+            kind
+        }
+        Expression::CallExpression(call)
+            if is_static_stylex_pure_call(
+                call,
+                before,
+                static_values,
+                imports,
+                root_reference_spans,
+                visiting,
+            ) =>
+        {
+            static_stylex_scalar_call_result(&call.callee)
+        }
+        _ => None,
+    }
+}
+
+fn static_stylex_scalar_call_result(callee: &Expression<'_>) -> Option<StyleXScalarKind> {
+    match unwrap_transparent_expression(callee) {
+        Expression::Identifier(identifier) => match identifier.name.as_str() {
+            "String" => Some(StyleXScalarKind::String),
+            "Number" => Some(StyleXScalarKind::Number),
+            _ => None,
+        },
+        Expression::StaticMemberExpression(member) => match member.property.name.as_str() {
+            "at" | "charAt" | "concat" | "padEnd" | "padStart" | "replace" | "replaceAll"
+            | "slice" | "substring" | "toExponential" | "toFixed" | "toLowerCase"
+            | "toPrecision" | "toString" | "toUpperCase" | "trim" | "trimEnd" | "trimStart" => {
+                Some(StyleXScalarKind::String)
+            }
+            "valueOf" => match unwrap_transparent_expression(&member.object) {
+                Expression::StringLiteral(_) => Some(StyleXScalarKind::String),
+                Expression::NumericLiteral(_) => Some(StyleXScalarKind::Number),
+                _ => Some(StyleXScalarKind::Other),
+            },
+            method if is_static_math_method(method) => Some(StyleXScalarKind::Number),
+            _ => Some(StyleXScalarKind::Other),
+        },
+        _ => None,
     }
 }
 
@@ -2282,7 +2424,6 @@ fn is_static_string_method(method: &str) -> bool {
             | "includes"
             | "indexOf"
             | "lastIndexOf"
-            | "localeCompare"
             | "padEnd"
             | "padStart"
             | "replace"
@@ -2390,15 +2531,151 @@ fn is_static_number_method(method: &str) -> bool {
     )
 }
 
-fn is_static_stylex_scalar_call_shape(call: &CallExpression<'_>) -> bool {
+fn is_static_stylex_scalar_call_shape<'a>(
+    call: &'a CallExpression<'a>,
+    before: u32,
+    static_values: &FxHashMap<&'a str, (u32, &'a Expression<'a>)>,
+    root_reference_spans: &FxHashSet<Span>,
+) -> bool {
     let Expression::StaticMemberExpression(member) = unwrap_transparent_expression(&call.callee)
     else {
         return true;
     };
-    !matches!(
-        unwrap_transparent_expression(&member.object),
-        Expression::NumericLiteral(_)
-    ) || call.arguments.is_empty()
+    match member.property.name.as_str() {
+        "padStart" | "padEnd" => {
+            static_padding_arguments_are_safe(call, before, static_values, root_reference_spans)
+        }
+        "at" | "charAt" | "charCodeAt" | "codePointAt" | "endsWith" | "includes" | "indexOf"
+        | "lastIndexOf" | "slice" | "startsWith" | "substring" => call
+            .arguments
+            .iter()
+            .filter_map(Argument::as_expression)
+            .all(|argument| {
+                !is_static_stylex_bigint_value(
+                    argument,
+                    before,
+                    static_values,
+                    root_reference_spans,
+                    &mut FxHashSet::default(),
+                )
+            }),
+        "toFixed" | "toExponential" => static_numeric_method_argument(
+            call,
+            0.0,
+            100.0,
+            before,
+            static_values,
+            root_reference_spans,
+        ),
+        "toPrecision" => static_numeric_method_argument(
+            call,
+            1.0,
+            100.0,
+            before,
+            static_values,
+            root_reference_spans,
+        ),
+        "toString"
+            if static_stylex_scalar_call_result(&call.callee)
+                .is_some_and(|kind| matches!(kind, StyleXScalarKind::String)) =>
+        {
+            static_numeric_method_argument(
+                call,
+                2.0,
+                36.0,
+                before,
+                static_values,
+                root_reference_spans,
+            )
+        }
+        "valueOf" => call.arguments.is_empty(),
+        _ => true,
+    }
+}
+
+fn static_numeric_method_argument<'a>(
+    call: &'a CallExpression<'a>,
+    min: f64,
+    max: f64,
+    before: u32,
+    static_values: &FxHashMap<&'a str, (u32, &'a Expression<'a>)>,
+    root_reference_spans: &FxHashSet<Span>,
+) -> bool {
+    let Some(argument) = call.arguments.first() else {
+        return true;
+    };
+    if call.arguments.len() != 1 {
+        return false;
+    }
+    let Some(argument) = argument.as_expression() else {
+        return false;
+    };
+    static_stylex_numeric_value(
+        argument,
+        before,
+        static_values,
+        root_reference_spans,
+        &mut FxHashSet::default(),
+    )
+    .is_some_and(|value| value.fract() == 0.0 && (min..=max).contains(&value))
+}
+
+fn static_padding_arguments_are_safe<'a>(
+    call: &'a CallExpression<'a>,
+    before: u32,
+    static_values: &FxHashMap<&'a str, (u32, &'a Expression<'a>)>,
+    root_reference_spans: &FxHashSet<Span>,
+) -> bool {
+    const MAX_STATIC_PADDING: f64 = 1_000_000.0;
+    let Some(target) = call.arguments.first() else {
+        return true;
+    };
+    if call.arguments.len() > 2 {
+        return false;
+    }
+    let Some(target) = target.as_expression() else {
+        return false;
+    };
+    static_stylex_numeric_value(
+        target,
+        before,
+        static_values,
+        root_reference_spans,
+        &mut FxHashSet::default(),
+    )
+    .is_some_and(|value| value.is_finite() && (0.0..=MAX_STATIC_PADDING).contains(&value))
+}
+
+fn static_stylex_numeric_value<'a>(
+    expression: &'a Expression<'a>,
+    before: u32,
+    static_values: &FxHashMap<&'a str, (u32, &'a Expression<'a>)>,
+    root_reference_spans: &FxHashSet<Span>,
+    visiting: &mut FxHashSet<&'a str>,
+) -> Option<f64> {
+    match unwrap_transparent_expression(expression) {
+        Expression::NumericLiteral(value) => Some(value.value),
+        Expression::Identifier(identifier) => {
+            if !root_reference_spans.contains(&identifier.span) {
+                return None;
+            }
+            let name = identifier.name.as_str();
+            let &(declaration_start, value) = static_values.get(name)?;
+            if declaration_start >= before || !visiting.insert(name) {
+                return None;
+            }
+            let number = static_stylex_numeric_value(
+                value,
+                declaration_start,
+                static_values,
+                root_reference_spans,
+                visiting,
+            );
+            visiting.remove(name);
+            number
+        }
+        _ => None,
+    }
 }
 
 fn is_static_stylex_local_arrow_call<'a>(
@@ -2477,14 +2754,11 @@ struct StyleXArrowStaticContext<'maps, 'ast> {
 fn stylex_arrow_expression_body<'a>(
     arrow: &'a ArrowFunctionExpression<'a>,
 ) -> Option<&'a Expression<'a>> {
-    if arrow.expression {
-        return match arrow.body.statements.first() {
-            Some(Statement::ExpressionStatement(statement)) => Some(&statement.expression),
-            _ => None,
-        };
+    if !arrow.expression {
+        return None;
     }
     match arrow.body.statements.first() {
-        Some(Statement::ReturnStatement(statement)) => statement.argument.as_ref(),
+        Some(Statement::ExpressionStatement(statement)) => Some(&statement.expression),
         _ => None,
     }
 }
@@ -2893,6 +3167,7 @@ struct TokenDefCollector<'a> {
     /// Top-level constant condition names used by computed StyleX condition keys.
     const_strings: FxHashMap<ReferenceId, (u32, &'a str)>,
     nested_depth: u32,
+    collecting_mutations: bool,
     defs: Vec<CssInJsTokenDef>,
 }
 
@@ -2905,6 +3180,7 @@ impl<'a> TokenDefCollector<'a> {
             const_object_references: FxHashMap::default(),
             const_strings: FxHashMap::default(),
             nested_depth: 0,
+            collecting_mutations: false,
             defs: Vec::new(),
         }
     }
@@ -3477,7 +3753,7 @@ fn collect_panda_config_token_leaves(
 
 impl<'a> Visit<'a> for TokenDefCollector<'a> {
     fn visit_variable_declarator(&mut self, decl: &VariableDeclarator<'a>) {
-        if self.nested_depth == 0 {
+        if !self.collecting_mutations && self.nested_depth == 0 {
             self.process_declarator(decl);
         }
         walk::walk_variable_declarator(self, decl);
@@ -3502,26 +3778,30 @@ impl<'a> Visit<'a> for TokenDefCollector<'a> {
     }
 
     fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
-        for binding in assignment_target_root_bindings(&assignment.left) {
-            self.invalidate_const_object(Some(binding));
+        if self.collecting_mutations {
+            for binding in assignment_target_root_bindings(&assignment.left) {
+                self.invalidate_const_object(Some(binding));
+            }
         }
         walk::walk_assignment_expression(self, assignment);
     }
 
     fn visit_update_expression(&mut self, update: &UpdateExpression<'a>) {
-        self.invalidate_const_object(simple_assignment_target_root_binding(&update.argument));
+        if self.collecting_mutations {
+            self.invalidate_const_object(simple_assignment_target_root_binding(&update.argument));
+        }
         walk::walk_update_expression(self, update);
     }
 
     fn visit_unary_expression(&mut self, expression: &UnaryExpression<'a>) {
-        if expression.operator.is_delete() {
+        if self.collecting_mutations && expression.operator.is_delete() {
             self.invalidate_const_object(expression_root_binding(&expression.argument));
         }
         walk::walk_unary_expression(self, expression);
     }
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-        if self.callee_role(&call.callee).is_none() {
+        if self.collecting_mutations && self.callee_role(&call.callee).is_none() {
             if let Some(receiver) = call_receiver_root(&call.callee) {
                 self.invalidate_const_object(Some(receiver));
             }
@@ -3542,7 +3822,9 @@ impl<'a> Visit<'a> for TokenDefCollector<'a> {
         &mut self,
         decl: &oxc_ast::ast::ExportDefaultDeclaration<'a>,
     ) {
-        if let Some(Expression::CallExpression(call)) = decl.declaration.as_expression() {
+        if !self.collecting_mutations
+            && let Some(Expression::CallExpression(call)) = decl.declaration.as_expression()
+        {
             self.process_panda_config_call(call);
         }
         walk::walk_export_default_declaration(self, decl);
@@ -3813,6 +4095,22 @@ export const vars = defineVars(values);
 ",
         );
         assert!(d.is_empty(), "mutated token objects must abstain: {d:?}");
+    }
+
+    #[test]
+    fn stylex_define_vars_abstains_when_local_object_is_mutated_after_definition() {
+        let d = defs(
+            r"
+import { defineVars } from '@stylexjs/stylex';
+const values = { foreground: '#111' };
+export const vars = defineVars(values);
+values.foreground = getColor();
+",
+        );
+        assert!(
+            d.is_empty(),
+            "later mutation must invalidate the definition: {d:?}"
+        );
     }
 
     #[test]
@@ -4494,6 +4792,30 @@ const theme = createTheme(tokens, {
     }
 
     #[test]
+    fn stylex_theme_call_resolves_static_contract_aliases_and_scalar_receivers() {
+        let leaf_paths = leaves(&["surface.bg"]);
+        let queries = [ConsumerQuery::StyleXThemeGroup {
+            contract_alias: "tokens",
+            leaf_paths: &leaf_paths,
+        }];
+        let source = r"
+import { createTheme } from 'stylex';
+const alias = tokens;
+const secondAlias = alias;
+const color = 'red';
+const digits = 2;
+const theme = createTheme(secondAlias, {
+  color: color.toUpperCase().toLowerCase(),
+  radius: (1).toFixed(digits),
+});
+color.toUpperCase();
+const second = createTheme(alias, { color });
+";
+        let hits = css_in_js_consumer_scan(source, Path::new("theme.ts"), &queries);
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
     fn stylex_pure_call_arguments_remain_static_across_theme_calls() {
         let leaf_paths = leaves(&["surface.bg"]);
         let queries = [ConsumerQuery::StyleXThemeGroup {
@@ -4538,6 +4860,22 @@ const second = createTheme(tokens, { radius: RADIUS * 2 });
             "import { createTheme } from 'stylex'; const base = { color: 'red' }; const get = () => base; mutate(get()); const theme = createTheme(tokens, base);",
             "import { createTheme } from 'stylex'; const base = { nested: { color: 'red' } }; const member = value => value.nested; member(base).color = getColor(); const theme = createTheme(tokens, base);",
             "import { createTheme } from 'stylex'; const base = { nested: { color: 'red' } }; const member = value => value.nested; mutate(member(base)); const theme = createTheme(tokens, base);",
+            "import { createTheme } from 'stylex'; const base = { color: 'red' }; const theme = createTheme(tokens, base); base.color = getColor();",
+            "import { createTheme } from 'stylex'; const choose = value => { return value; }; const theme = createTheme(tokens, { color: choose('red') });",
+            "import { createTheme } from 'stylex'; const choose = value => { return value; mutate(); }; const theme = createTheme(tokens, { color: choose('red') });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { color: 'a'.localeCompare('b', 'not_a_locale') });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { color: 'x'.padStart(1 / 0, 'a') });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { color: 'abc'.charAt(1n) });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { color: 'abc'.includes('a', 1n) });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { color: String(getFlag() ? 'a' : 'b') });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { color: String((mutate(), 'red')) });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { color: String(+1n) });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { color: 'x'.concat(1n + 1n) });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { color: String('x' in 1) });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { color: Math.max(+1n, 2) });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { [1n + 1]: 'red' });",
+            "import { createTheme } from 'stylex'; const theme = createTheme(tokens, { [1n / 0n]: 'red' });",
+            "import { createTheme } from 'stylex'; const alias = tokens; alias = other; const theme = createTheme(alias, { color: 'red' });",
         ] {
             assert!(
                 css_in_js_consumer_scan(source, Path::new("theme.ts"), &queries).is_empty(),

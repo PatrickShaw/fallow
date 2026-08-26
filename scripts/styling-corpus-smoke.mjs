@@ -347,14 +347,14 @@ const parseJson = (stdout) => {
   }
 };
 
-const collectStylingFindings = (value) => {
-  const findings = [];
+const collectObjectArrayEntries = (value, arrayKey) => {
+  const entries = [];
   const visit = (node, key = "") => {
     if (!node || typeof node !== "object") return;
     if (Array.isArray(node)) {
-      if (key === "styling_findings") {
+      if (key === arrayKey) {
         for (const item of node) {
-          if (item && typeof item === "object") findings.push(item);
+          if (item && typeof item === "object") entries.push(item);
         }
       }
       for (const item of node) visit(item);
@@ -363,28 +363,12 @@ const collectStylingFindings = (value) => {
     for (const [childKey, child] of Object.entries(node)) visit(child, childKey);
   };
   visit(value);
-  return findings;
+  return entries;
 };
 
-const collectTokenConsumers = (value) => {
-  const consumers = [];
-  const visit = (node, key = "") => {
-    if (!node || typeof node !== "object") return;
-    if (Array.isArray(node)) {
-      if (key === "token_consumers") {
-        for (const item of node) {
-          if (item && typeof item === "object") consumers.push(item);
-        }
-        return;
-      }
-      for (const item of node) visit(item);
-      return;
-    }
-    for (const [childKey, child] of Object.entries(node)) visit(child, childKey);
-  };
-  visit(value);
-  return consumers;
-};
+const collectStylingFindings = (value) => collectObjectArrayEntries(value, "styling_findings");
+
+const collectTokenConsumers = (value) => collectObjectArrayEntries(value, "token_consumers");
 
 const summarizeStyleXThemeCoverage = (value) => {
   const consumers = collectTokenConsumers(value).filter(

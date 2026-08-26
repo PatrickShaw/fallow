@@ -32,7 +32,6 @@ Codebase intelligence for TypeScript and JavaScript. The static layer analyzes c
 - Projects that are not JavaScript or TypeScript
 
 ## Prerequisites
-
 Fallow must be installed. If not available, install it:
 
 ```bash
@@ -42,7 +41,6 @@ cargo install fallow-cli   # build from source
 ```
 
 ## Agent Rules
-
 1. **Always use `--format json --quiet`** for machine-readable output and parse stdout as JSON. Compact JSON is the default; never depend on whitespace or add `--pretty` in agent pipelines. Keep stderr separate so diagnostics remain visible; never merge it into the JSON stream with `2>&1`.
 2. **Preserve and interpret the exit status.** Codes 0 and 1 are successful analysis outcomes: 0 is clean and 1 means findings. Treat every other code according to `fallow schema.exit_codes`. Do not force a successful status, because that hides validation, license, setup, network, and security-gate outcomes.
 3. **Use `--explain`** to include a `_meta` object in JSON output with metric definitions, ranges, and interpretation hints. In human format, `--explain` prints a `Description:` line under each section header.
@@ -82,7 +80,6 @@ Route by intent before reaching for the big analysis commands. Same matrix as `f
 <!-- generated:task-matrix:end -->
 
 ## Commands
-
 <!-- generated:commands:start -->
 | Command | Purpose | Key Flags |
 |---|---|---|
@@ -134,7 +131,6 @@ Run `fallow <command> --help` for the full flag list per command (see also refer
 <!-- generated:commands:end -->
 
 ## Issue Types
-
 <!-- generated:issue-types:start -->
 | Type | Filter flag | Fixable | Suppress comment | Description |
 |---|---|---|---|---|

@@ -190,6 +190,7 @@ fn telemetry_output_destination_for_command(
 fn telemetry_analysis_mode_for_command(command: Option<&Command>) -> telemetry::AnalysisMode {
     match command {
         Some(Command::Security { .. }) => telemetry::AnalysisMode::Security,
+        Some(Command::SimilarCode { .. }) => telemetry::AnalysisMode::SimilarCode,
         Some(Command::Fix { .. }) => telemetry::AnalysisMode::Fix,
         Some(Command::Health {
             runtime_coverage: Some(_),
@@ -244,6 +245,15 @@ pub fn telemetry_workflow_for_command(
         Some(Command::Report { .. }) => telemetry::Workflow::GithubAction,
         Some(Command::Impact { .. }) => telemetry::Workflow::Impact,
         Some(Command::Security { .. }) => telemetry::Workflow::Security,
+        Some(Command::SimilarCode {
+            subcommand:
+                None
+                | Some(
+                    crate::similar_code_cli::SimilarCodeSubcommand::Inspect { .. }
+                    | crate::similar_code_cli::SimilarCodeSubcommand::Review { .. },
+                ),
+            ..
+        }) => telemetry::Workflow::SimilarCode,
         Some(Command::Fix { .. }) => telemetry::Workflow::Fix,
         Some(Command::Explain { .. }) => telemetry::Workflow::Explain,
         Some(
@@ -258,8 +268,10 @@ pub fn telemetry_workflow_for_command(
         ) => telemetry::Workflow::ProjectInventory,
         Some(Command::License { .. }) => telemetry::Workflow::License,
         Some(
-            Command::Init { .. }
+            Command::SimilarCode { .. }
+            | Command::Init { .. }
             | Command::Hooks { .. }
+            | Command::Agent { .. }
             | Command::ConfigSchema
             | Command::PluginSchema
             | Command::PluginCheck

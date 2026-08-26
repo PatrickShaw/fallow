@@ -71,6 +71,7 @@ pub(crate) mod resolve {
 mod results;
 mod security;
 pub mod session;
+pub mod similar_code;
 pub mod source;
 mod suppress;
 pub mod thread_pool;

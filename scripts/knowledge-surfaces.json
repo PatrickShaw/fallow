@@ -86,6 +86,10 @@
         "section": "development"
       },
       {
+        "path": "docs/development/release-procedure.md",
+        "section": "development"
+      },
+      {
         "path": "docs/development/release-security.md",
         "section": "development"
       },
@@ -164,6 +168,10 @@
       {
         "path": "docs/security-agent-verification.md",
         "section": "verification"
+      },
+      {
+        "path": "docs/similar-code-analysis.md",
+        "section": "architecture"
       },
       {
         "path": "docs/styling-corpus-smoke.md",

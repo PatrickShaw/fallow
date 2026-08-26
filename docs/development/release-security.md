@@ -1,7 +1,7 @@
 # Release security
 
-Use this reference when editing `.github/workflows/release.yml` or the release
-workflow skill. The maintainer dispatches the workflow against the signed
+Use this reference when editing `.github/workflows/release.yml` or
+`release-procedure.md`. The maintainer dispatches the workflow against the signed
 release commit while the version tag is still absent. The workflow never
 creates, moves, or publishes Git tags or GitHub Releases.
 
@@ -12,7 +12,7 @@ creates, moves, or publishes Git tags or GitHub Releases.
 | `release-context` | Bind the dispatch to `main`, the release version, and an absent tag | Read only |
 | `build` | Build and sign release artifacts | Artifact signing only |
 | `validate` | Reusable release validation | Read only |
-| `release-verified` | Join build and validation | None |
+| `release-verified` | Join build, validation, and `similar-code-conformance` | None |
 | `release-assets` | Flatten and store the complete GitHub asset bundle, including all VSIX targets | Read only |
 | `release-ready` | Join publication jobs and prove the tag is still absent | Read only |
 | `publish-crates` | Publish prevalidated crates in dependency order | crates.io OIDC |
@@ -60,6 +60,9 @@ globally with `--ignore-scripts`.
   release publish-list test.
 - Keep artifact inventory and package-name constants aligned with the build
   matrix.
+- Make `release-verified` wait for `similar-code-conformance`, which validates
+  the exact Linux x64 sidecar artifact against the committed F32 Candle
+  baseline before any publication job can start.
 - Require repository release immutability before publication. Verify it in the
   maintainer pre-flight, not in the workflow: reading
   `repos/{owner}/{repo}/immutable-releases` needs the Administration read

@@ -2,11 +2,13 @@
 
 Fallow is a Rust-native codebase analyzer for JavaScript and TypeScript.
 
-Read `@AGENTS.md` first. It is the universal repository contract for Claude,
-Codex, and contributors. Use `@docs/README.md` as the central documentation
-index, then use
-`@docs/development/task-context-map.md` to load only the references required by
-the current task.
+@AGENTS.md
+@docs/README.md
+
+Both files above are imported: the universal repository contract for Claude,
+Codex, and contributors, and the central documentation index. Read
+`docs/development/task-context-map.md` next to load only the references the
+current task needs.
 
 ## Knowledge layers
 

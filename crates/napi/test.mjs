@@ -1,9 +1,10 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 import {
   computeComplexity,
@@ -13,10 +14,31 @@ import {
   detectDeadCode,
   detectDuplication,
   detectFeatureFlags,
+  detectSimilarCode,
 } from "./index.js";
 
 const require = createRequire(import.meta.url);
 const { typeAwareCommand } = require("./type-aware-command.js");
+
+assert.equal(typeof detectSimilarCode, "function");
+
+const napiRoot = dirname(fileURLToPath(import.meta.url));
+const napiCliRoot = dirname(require.resolve("@napi-rs/cli/package.json"));
+const typescriptRoot = dirname(
+  require.resolve("typescript/package.json", { paths: [napiCliRoot] }),
+);
+execFileSync(
+  process.execPath,
+  [
+    join(typescriptRoot, "bin", "tsc"),
+    "--project",
+    join(napiRoot, "tests", "types", "tsconfig.json"),
+  ],
+  {
+    stdio: "pipe",
+  },
+);
+console.log("  [PASS] similar-code declarations compile");
 
 function makeFixture() {
   const root = mkdtempSync(join(tmpdir(), "fallow-node-"));
@@ -262,6 +284,72 @@ function runLoaderCompanionFixture(companionVersion) {
   return child;
 }
 
+function runSimilarCodeVerificationFailureFixture() {
+  const work = mkdtempSync(join(tmpdir(), "fallow-node-similar-code-loader-"));
+  const companionRoot = join(work, "node_modules", "fallow-similar-code");
+  const scriptsRoot = join(companionRoot, "scripts");
+  const packageVersion = JSON.parse(
+    readFileSync(join(process.cwd(), "package.json"), "utf8"),
+  ).version;
+  mkdirSync(scriptsRoot, { recursive: true });
+  writeFileSync(
+    join(work, "package.json"),
+    JSON.stringify({ name: "@fallow-cli/fallow-node", version: packageVersion }),
+  );
+  writeFileSync(
+    join(work, "index.js"),
+    "module.exports = { detectSimilarCode: () => ({ unexpected: true }) };\n",
+  );
+  writeFileSync(join(work, "loader.js"), readFileSync(join(process.cwd(), "loader.js"), "utf8"));
+  writeFileSync(
+    join(work, "type-aware-command.js"),
+    readFileSync(join(process.cwd(), "type-aware-command.js"), "utf8"),
+  );
+  writeFileSync(
+    join(companionRoot, "package.json"),
+    JSON.stringify({ name: "fallow-similar-code", version: packageVersion }),
+  );
+  writeFileSync(
+    join(scriptsRoot, "run-binary.js"),
+    `module.exports = {
+      resolvePlatformPackage: () => "@fallow-cli/fallow-similar-code-test",
+      resolveBinaryArtifact: (packageName) => ({
+        packageName,
+        packageVersion: ${JSON.stringify(packageVersion)},
+        manifestPath: "/native/package.json",
+        binaryName: "fallow-similar-code",
+        binaryPath: "/native/fallow-similar-code"
+      })
+    };\n`,
+  );
+  writeFileSync(
+    join(scriptsRoot, "verify-binary.js"),
+    `module.exports = {
+      verifyBinary: () => ({ ok: false, code: "digest-missing", message: "missing digest" })
+    };\n`,
+  );
+  const script = `
+    try {
+      require("./loader.js").detectSimilarCode({});
+      process.exitCode = 2;
+    } catch (error) {
+      process.stdout.write(JSON.stringify({
+        name: error.name,
+        code: error.code,
+        exitCode: error.exitCode,
+        causeCode: error.cause && error.cause.code
+      }));
+    }
+  `;
+  const child = spawnSync(process.execPath, ["-e", script], {
+    cwd: work,
+    encoding: "utf8",
+    env: process.env,
+  });
+  rmSync(work, { recursive: true, force: true });
+  return child;
+}
+
 console.log("Testing @fallow-cli/fallow-node...\n");
 
 const root = makeFixture();
@@ -421,6 +509,18 @@ writeFileSync(
   assert.equal(launched.status, 0, launched.stderr);
   assert.equal(launched.stdout, "launched");
   console.log("  [PASS] type-aware companion loader");
+}
+
+{
+  const failedVerification = runSimilarCodeVerificationFailureFixture();
+  assert.equal(failedVerification.status, 0, failedVerification.stderr);
+  assert.deepEqual(JSON.parse(failedVerification.stdout), {
+    name: "FallowNodeError",
+    code: "FALLOW_SIMILAR_CODE_PROVIDER_NOT_READY",
+    exitCode: 3,
+    causeCode: "digest-missing",
+  });
+  console.log("  [PASS] similar-code companion verification errors");
 }
 
 {

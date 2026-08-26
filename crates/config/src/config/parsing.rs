@@ -1089,7 +1089,7 @@ impl FallowConfig {
     /// and deep-merged before this config's values are applied.
     ///
     /// User-supplied glob patterns (`entry`, `ignorePatterns`,
-    /// `dynamicallyLoaded`, `duplicates.ignore`, `health.ignore`,
+    /// `dynamicallyLoaded`, `duplicates.ignore`, `similarCode.ignore`, `health.ignore`,
     /// `health.thresholdOverrides[].files`, `boundaries.zones[].patterns`, `overrides[].files`,
     /// `ignoreExports[].file`, `ignoreCatalogReferences[].consumer`) are
     /// validated against absolute paths, `..` traversal segments, and invalid
@@ -1186,7 +1186,7 @@ impl FallowConfig {
     /// time.
     ///
     /// Covered filesystem glob fields: `entry`, `ignorePatterns`, `ignoreFindings`,
-    /// `dynamicallyLoaded`, `duplicates.ignore`, `health.ignore`,
+    /// `dynamicallyLoaded`, `duplicates.ignore`, `similarCode.ignore`, `health.ignore`,
     /// `health.thresholdOverrides[].files`, `overrides[].files`, `ignoreExports[].file`,
     /// `ignoreCatalogReferences[].consumer`, `boundaries.zones[].patterns`,
     /// `boundaries.coverage.allowUnmatched`,
@@ -1250,6 +1250,7 @@ impl FallowConfig {
             errors,
         );
         validate_user_globs(&self.duplicates.ignore, "duplicates.ignore", errors);
+        validate_user_globs(&self.similar_code.ignore, "similarCode.ignore", errors);
         validate_user_globs(&self.health.ignore, "health.ignore", errors);
         for override_entry in &self.health.threshold_overrides {
             validate_user_globs(

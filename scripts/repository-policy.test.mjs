@@ -151,6 +151,110 @@ test("Fallow skills preserve exit status and avoid volatile plugin counts", () =
   }
 });
 
+test("Fallow skills preserve similar-code agent safety rules", () => {
+  const skillEntrypoints = [".agents/skills/fallow/SKILL.md", "npm/fallow/skills/fallow/SKILL.md"];
+
+  for (const path of skillEntrypoints) {
+    const skill = readFileSync(path, "utf8");
+    for (const required of [
+      "discovery only",
+      "Agents must not authorize setup",
+      "Inspect a candidate before judging it",
+      "candidate_worthy",
+      "behaviorally_equivalent",
+      "refactor_safe",
+      "--candidates similar-code.json",
+      "typed `snapshot`",
+      "fails closed on stale source",
+      "abstain when evidence is incomplete",
+    ]) {
+      assert.match(skill, new RegExp(required, "u"), `${path} is missing: ${required}`);
+    }
+  }
+
+  const releasedSkill = readFileSync("npm/fallow/skills/fallow/SKILL.md", "utf8");
+  for (const required of [
+    "compare semantically similar functions",
+    "find_similar_code",
+    "inspect_similar_code",
+    "paths:",
+    "fallow similar-code review",
+    'completion.status: "complete"',
+    "needs-human-review",
+  ]) {
+    assert.match(
+      releasedSkill,
+      new RegExp(required, "u"),
+      `released skill is missing: ${required}`,
+    );
+  }
+
+  const mcpGuides = [
+    ".agents/skills/fallow/SKILL.md",
+    ".agents/rules/mcp-server.md",
+    "npm/fallow/skills/fallow/SKILL.md",
+  ];
+  for (const path of mcpGuides) {
+    const line = readFileSync(path, "utf8")
+      .split("\n")
+      .find(
+        (candidate) =>
+          candidate.includes("find_similar_code") &&
+          (candidate.includes("Scope") ||
+            candidate.includes("Supports") ||
+            candidate.includes("paths:")),
+      );
+    assert.ok(line, `${path} must document find_similar_code`);
+    assert.match(line, /(?:`paths`|paths:)/u, `${path} must use the live MCP paths parameter`);
+    assert.doesNotMatch(
+      line,
+      /find_similar_code[^.\n]*(?:`files`|files:)/u,
+      `${path} must not advertise the unknown MCP files parameter`,
+    );
+  }
+});
+
+test("released Node reference follows the published declarations", () => {
+  const declarations = readFileSync("crates/napi/types/index.d.ts", "utf8");
+  const reference = readFileSync("npm/fallow/skills/fallow/references/node-bindings.md", "utf8");
+  const missing = exportedNodeFunctions(declarations).filter(
+    (functionName) => !reference.includes(`\`${functionName}\``),
+  );
+
+  assert.deepEqual(missing, [], `released Node reference is missing: ${missing.join(", ")}`);
+  assert.match(reference, /precisely typed `SimilarCodeReport`/u);
+});
+
+test("NAPI similar-code declarations and compile fixture stay precise", () => {
+  const declarations = readFileSync("crates/napi/types/index.d.ts", "utf8");
+  const fixture = readFileSync("crates/napi/tests/types/similar-code.compile.ts", "utf8");
+  const similarCodeSection = declarations.slice(
+    declarations.indexOf("export type SimilarCodeProvider"),
+    declarations.indexOf("export interface HealthFinding"),
+  );
+
+  assert.doesNotMatch(similarCodeSection, /Record<string, unknown>/u);
+  assert.match(similarCodeSection, /embedding_semantics_version: number/u);
+  assert.match(similarCodeSection, /completion: SimilarCodeCompletion/u);
+  assert.match(fixture, /generation\.embedding_semantics_version/u);
+});
+
+test("similar-code sidecar docs follow the canonical protocol versions", () => {
+  const manifest = readJson("crates/api/similar-code-protocol.json");
+  const readme = readFileSync("tools/similar-code-sidecar/README.md", "utf8");
+
+  assert.match(readme, new RegExp(`Wire protocol v${manifest.wire_protocol_version}\\b`, "u"));
+  assert.match(
+    readme,
+    new RegExp(`embedding\\s+semantics v${manifest.embedding_semantics_version}\\b`, "u"),
+  );
+  assert.match(readme, new RegExp(`"protocol_version": ${manifest.wire_protocol_version}\\b`, "u"));
+  assert.match(
+    readme,
+    new RegExp(`"embedding_semantics_version": ${manifest.embedding_semantics_version}\\b`, "u"),
+  );
+});
+
 test("NAPI declarations have one canonical public source", () => {
   const packageJson = readJson("crates/napi/package.json");
   const entry = readFileSync("crates/napi/index.d.ts", "utf8");
@@ -272,7 +376,7 @@ test("VS Code public release verification stays exact and credential-free", () =
   const verifier = readFileSync("scripts/vscode-public-verify.mjs", "utf8");
   const verifierTests = readFileSync("scripts/vscode-public-verify.test.mjs", "utf8");
   const releaseSecurity = readFileSync("docs/development/release-security.md", "utf8");
-  const releaseSkill = readFileSync(".agents/skills/release/SKILL.md", "utf8");
+  const releaseProcedure = readFileSync("docs/development/release-procedure.md", "utf8");
   assert.equal(vscodePackage.devDependencies["@vscode/vsce"], "3.9.2");
   assert.equal(vscodePackage.devDependencies.ovsx, "1.1.1");
   assert.match(verifier, /from "\.\.\/editors\/vscode\/scripts\/vsix-targets\.mjs"/u);
@@ -288,7 +392,9 @@ test("VS Code public release verification stays exact and credential-free", () =
   assert.match(verifierTests, /universal fallback/u);
   assert.match(verifierTests, /changed content/u);
   assert.match(releaseSecurity, /vscode-public-verify/u);
-  assert.match(releaseSkill, /Verify public VS Code registry targets/u);
+  assert.match(releaseProcedure, /Verify public VS Code registry\s+targets/u);
+  assert.match(releaseSecurity, /release-verified.*similar-code-conformance/u);
+  assert.match(releaseProcedure, /similar-code-conformance.*release-verified/su);
 });
 
 test("type-aware public surfaces expose only the stable protocol", () => {

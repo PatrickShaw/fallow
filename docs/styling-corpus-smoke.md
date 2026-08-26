@@ -26,6 +26,19 @@ styled-components, Emotion, shadcn/CVA, CSS Modules, Sass, Less, Vue, Svelte,
 Astro, and template-heavy projects. Use `--list` to inspect the current
 entries.
 
+The StyleX run has a stricter theme contract. It must finish without a clone or
+analysis error, find stable and nested variable definitions, find direct member
+and theme-call consumers in the official examples, and expose no conditional
+`default` branches as phantom tokens. These checks always fail the smoke run
+when StyleX is selected.
+
+The report's official nested theme-call value is corroboration from the known
+`nestedTokens` contract and `warmTheme` call in the Next.js example. It does not
+prove complete group coverage because each token row contains only a bounded
+consumer sample. The engine regression tests are the authoritative check that
+every token in a resolved group receives the `js-call` consumer for partial,
+complete, and empty themes.
+
 Sass and Less coverage is parser-level and conservative: fallow inspects the
 authored stylesheet shape it can see, but it does not fully expand mixin loops,
 conditionals, or build-time importer state. Treat Sass/Less findings as styling

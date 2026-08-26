@@ -99,6 +99,28 @@ pub struct DuplicationOptions {
 
 #[napi(object)]
 #[derive(Default)]
+pub struct SimilarCodeOptions {
+    pub root: Option<String>,
+    pub config_path: Option<String>,
+    pub allow_remote_extends: Option<bool>,
+    pub no_cache: Option<bool>,
+    pub threads: Option<u32>,
+    pub diff_file: Option<String>,
+    pub changed_since: Option<String>,
+    pub workspace: Option<Vec<String>>,
+    pub changed_workspaces: Option<String>,
+    pub threshold: Option<f64>,
+    pub min_lines: Option<u32>,
+    pub top: Option<u32>,
+    pub files: Option<Vec<String>>,
+    /// Exact binary path injected only by the official JS loader after
+    /// package-version and Ed25519 verification.
+    #[napi(js_name = "adapterProviderPath")]
+    pub adapter_provider_path: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Default)]
 pub struct FeatureFlagsOptions {
     pub root: Option<String>,
     pub config_path: Option<String>,
@@ -424,6 +446,60 @@ impl TryFrom<DuplicationOptions> for api::DuplicationOptions {
     }
 }
 
+impl TryFrom<SimilarCodeOptions> for api::SimilarCodeOptions {
+    type Error = napi::Error;
+
+    fn try_from(value: SimilarCodeOptions) -> Result<Self, Self::Error> {
+        if value
+            .threshold
+            .is_some_and(|threshold| !threshold.is_finite() || !(0.0..=1.0).contains(&threshold))
+        {
+            return Err(napi::Error::new(
+                Status::InvalidArg,
+                "`threshold` must be a finite number from 0 through 1".to_owned(),
+            ));
+        }
+        if value.min_lines == Some(0) {
+            return Err(napi::Error::new(
+                Status::InvalidArg,
+                "`minLines` must be greater than zero".to_owned(),
+            ));
+        }
+        if value.top == Some(0) {
+            return Err(napi::Error::new(
+                Status::InvalidArg,
+                "`top` must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(Self {
+            analysis: map_common_options(CommonOptionsInput {
+                root: value.root,
+                config_path: value.config_path,
+                allow_remote_extends: value.allow_remote_extends,
+                no_cache: value.no_cache,
+                threads: value.threads,
+                diff_file: value.diff_file,
+                production: None,
+                changed_since: value.changed_since,
+                workspace: value.workspace,
+                changed_workspaces: value.changed_workspaces,
+                explain: Some(true),
+                type_aware: None,
+            })?,
+            threshold: value.threshold,
+            min_lines: value.min_lines.map(|value| value as usize),
+            top: value.top.map(|value| value as usize),
+            files: value
+                .files
+                .unwrap_or_default()
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
+            adapter_provider_path: value.adapter_provider_path.map(std::path::PathBuf::from),
+        })
+    }
+}
+
 impl TryFrom<FeatureFlagsOptions> for api::FeatureFlagsOptions {
     type Error = napi::Error;
 
@@ -540,6 +616,7 @@ pub enum ProgrammaticOutput {
     Duplication(Box<api::DuplicationProgrammaticOutput>),
     FeatureFlags(Box<api::FeatureFlagsProgrammaticOutput>),
     Health(Box<api::HealthProgrammaticOutput>),
+    SimilarCode(Box<api::SimilarCodeOutput>),
 }
 
 impl ProgrammaticOutput {
@@ -555,6 +632,15 @@ impl ProgrammaticOutput {
             Self::Duplication(output) => api::serialize_duplication_programmatic_json(*output),
             Self::FeatureFlags(output) => api::serialize_feature_flags_programmatic_json(*output),
             Self::Health(output) => api::serialize_health_programmatic_json(*output),
+            Self::SimilarCode(output) => {
+                api::serialize_similar_code_json_output(*output, api::RootEnvelopeMode::Tagged)
+                    .map_err(|error| {
+                        api::ProgrammaticError::new(
+                            format!("failed to serialize similar-code output: {error}"),
+                            2,
+                        )
+                    })
+            }
         }
     }
 }
@@ -683,6 +769,18 @@ pub fn detect_duplication(
         api::run_duplication(&options)
             .map(Box::new)
             .map(ProgrammaticOutput::Duplication)
+    })))
+}
+
+#[napi(js_name = "detectSimilarCode")]
+pub fn detect_similar_code(
+    options: Option<SimilarCodeOptions>,
+) -> napi::Result<AsyncTask<ProgrammaticTask>> {
+    let options = api::SimilarCodeOptions::try_from(options.unwrap_or_default())?;
+    Ok(AsyncTask::new(ProgrammaticTask::new(move || {
+        api::run_similar_code(&options)
+            .map(Box::new)
+            .map(ProgrammaticOutput::SimilarCode)
     })))
 }
 
@@ -1356,7 +1454,7 @@ mod tests {
             .collect()
     }
 
-    /// Drift guard: the addon's `#[napi(js_name = ...)]` exports must match the
+    /// Drift guard: the addon's `#[napi(js_name = ...)]` function exports must match the
     /// `napi_export` column of the cross-surface capability parity table
     /// (`fallow_types::mcp_manifest::CAPABILITY_PARITY`). A new export that is
     /// not recorded in the table, or a stale table entry, fails here. Mirrors
@@ -1367,17 +1465,21 @@ mod tests {
 
         let source = include_str!("lib.rs");
         let mut scanned: BTreeSet<String> = BTreeSet::new();
-        for line in source.lines() {
+        let mut lines = source.lines();
+        while let Some(line) = lines.next() {
             let trimmed = line.trim_start();
             if let Some(rest) = trimmed.strip_prefix("#[napi(js_name = \"") {
                 let name = rest.split('"').next().expect("js_name literal is closed");
-                scanned.insert(name.to_string());
+                let declaration = lines.next().unwrap_or_default().trim_start();
+                if declaration.starts_with("pub fn ") {
+                    scanned.insert(name.to_string());
+                }
             }
         }
         assert_eq!(
             scanned.len(),
-            7,
-            "expected seven #[napi(js_name = ...)] exports, scanned {scanned:?}"
+            8,
+            "expected eight #[napi(js_name = ...)] function exports, scanned {scanned:?}"
         );
 
         let table: BTreeSet<String> = fallow_types::mcp_manifest::CAPABILITY_PARITY

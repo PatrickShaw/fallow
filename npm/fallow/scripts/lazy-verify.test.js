@@ -31,8 +31,8 @@ function packageNameForPlatform(platform) {
 }
 
 function binaryNames(platform) {
-  // Platform packages ship a single multicall `fallow` binary.
-  return [platform === "win32" ? "fallow.exe" : "fallow"];
+  const ext = platform === "win32" ? ".exe" : "";
+  return [`fallow${ext}`, `fallow-similar-code${ext}`];
 }
 
 function computeDigestsForDir(dir, platform) {
@@ -123,7 +123,7 @@ test("ensureVerified verifies on cache miss and writes the sentinel", (t) => {
   assert.equal(sentinel.schemaVersion, SENTINEL_SCHEMA_VERSION);
   assert.equal(sentinel.packageVersion, "2.81.0");
   assert.equal(sentinel.packageName, "@fallow-cli/test-platform");
-  assert.equal(Object.keys(sentinel.binaries).length, 1);
+  assert.equal(Object.keys(sentinel.binaries).length, 2);
 });
 
 test("ensureVerified verifies and caches a win32 executable on any host", (t) => {
@@ -139,7 +139,7 @@ test("ensureVerified verifies and caches a win32 executable on any host", (t) =>
   assert.equal(verified.ok, true);
   assert.equal(verified.cached, false);
   const sentinel = JSON.parse(fs.readFileSync(verified.sentinelPath, "utf8"));
-  assert.deepEqual(Object.keys(sentinel.binaries), ["fallow.exe"]);
+  assert.deepEqual(Object.keys(sentinel.binaries), ["fallow.exe", "fallow-similar-code.exe"]);
 
   const cached = ensureVerified({
     ...input,
@@ -194,7 +194,11 @@ test("ensureVerified invalidates sentinel on mtime drift", (t) => {
   );
   assert.equal(result.ok, true);
   assert.equal(result.cached, false);
-  assert.equal(verifyCallCount, 1, "verify should rerun for the single binary");
+  assert.equal(
+    verifyCallCount,
+    binaryNames(DEFAULT_PLATFORM).length,
+    "verify should rerun for every shipped binary",
+  );
 });
 
 test("ensureVerified invalidates sentinel on packageVersion drift", (t) => {

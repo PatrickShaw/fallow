@@ -66,6 +66,7 @@ mod root_envelopes;
 mod sarif;
 mod saved_health;
 mod security;
+mod similar_code;
 mod suppressions;
 mod trace_envelopes;
 mod type_aware_envelopes;
@@ -323,6 +324,29 @@ pub use security::{
     build_security_summary, serialize_security_blind_spots_json_output,
     serialize_security_json_output, serialize_security_summary_json_output,
     serialize_security_survivors_json_output, validate_saved_security_envelope,
+};
+pub use similar_code::{
+    SIMILAR_CODE_CACHE_CLEAR_SCHEMA_VERSION, SIMILAR_CODE_INSPECT_SCHEMA_VERSION,
+    SIMILAR_CODE_REVIEW_SCHEMA_VERSION, SIMILAR_CODE_SCHEMA_VERSION,
+    SIMILAR_CODE_STATUS_SCHEMA_VERSION, SimilarCodeAction, SimilarCodeActionType,
+    SimilarCodeCacheClearOutput, SimilarCodeCacheClearSchemaVersion, SimilarCodeCacheStatus,
+    SimilarCodeCacheSummary, SimilarCodeCandidate, SimilarCodeCandidateSnapshot,
+    SimilarCodeCompletion, SimilarCodeCompletionStatus, SimilarCodeDiagnostic,
+    SimilarCodeDiagnosticDomain, SimilarCodeDomainOutcome, SimilarCodeEnrichmentAvailability,
+    SimilarCodeEnrichmentState, SimilarCodeGeneration, SimilarCodeGenerationParameters,
+    SimilarCodeInspectOutput, SimilarCodeInspectPacket, SimilarCodeInspectSchemaVersion,
+    SimilarCodeLimits, SimilarCodeLocation, SimilarCodeModelProvenance, SimilarCodeNamedReference,
+    SimilarCodeOutput, SimilarCodePhase, SimilarCodePhaseCompletion, SimilarCodePhaseStatus,
+    SimilarCodeProvider, SimilarCodeProviderProvenance, SimilarCodeReviewOutput,
+    SimilarCodeReviewProvenance, SimilarCodeReviewSchemaVersion, SimilarCodeReviewedCandidate,
+    SimilarCodeSchemaVersion, SimilarCodeScopeProvenance, SimilarCodeSideEffectHint,
+    SimilarCodeSideEvidence, SimilarCodeSimilarityBand, SimilarCodeSkip, SimilarCodeSkipReason,
+    SimilarCodeStatusOutput, SimilarCodeStatusSchemaVersion, SimilarCodeVerdict,
+    SimilarCodeVerdictInput, SimilarCodeVerdictMatch, SimilarCodeVerdictSchemaVersion,
+    SimilarCodeVerdictValidationError, SimilarCodeVerificationStatus,
+    serialize_similar_code_cache_clear_json_output, serialize_similar_code_inspect_json_output,
+    serialize_similar_code_json_output, serialize_similar_code_review_json_output,
+    serialize_similar_code_status_json_output,
 };
 pub use suppressions::{
     SuppressionInventoryEntry, SuppressionInventoryFile, SuppressionInventoryLevel,

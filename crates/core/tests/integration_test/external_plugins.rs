@@ -23,6 +23,7 @@ fn external_plugin_config(root: &std::path::Path) -> fallow_config::ResolvedConf
         ignore_decorators: vec![],
         unused_component_props: fallow_config::UnusedComponentPropsConfig::default(),
         duplicates: fallow_config::DuplicatesConfig::default(),
+        similar_code: fallow_config::SimilarCodeConfig::default(),
         health: fallow_config::HealthConfig::default(),
         rules: RulesConfig::default(),
         boundaries: fallow_config::BoundaryConfig::default(),

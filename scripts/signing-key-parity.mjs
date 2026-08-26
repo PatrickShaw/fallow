@@ -69,6 +69,7 @@ export const decodeReleasePublicKey = (value) => {
 export const assertSigningKeyParity = ({
   vscodeSource,
   npmVerifierSource,
+  companionVerifierSource,
   securityPolicy,
   releasePublicKey,
 }) => {
@@ -78,9 +79,19 @@ export const assertSigningKeyParity = ({
     "VS Code extension",
   );
   const npmKey = parseEmbeddedPublicKey(npmVerifierSource, "EMBEDDED_PUBLIC_KEY", "npm verifier");
+  const companionKey = parseEmbeddedPublicKey(
+    companionVerifierSource,
+    "PUBLIC_KEY",
+    "similar-code companion verifier",
+  );
   const documented = parseDocumentedPublicKey(securityPolicy);
 
   assert.deepEqual(npmKey, vscodeKey, "npm verifier: embedded public key differs from VS Code");
+  assert.deepEqual(
+    companionKey,
+    vscodeKey,
+    "similar-code companion verifier: embedded public key differs from VS Code",
+  );
   assert.deepEqual(
     documented.fingerprint,
     vscodeKey,
@@ -110,6 +121,10 @@ export const checkRepositorySigningKeyParity = ({
   assertSigningKeyParity({
     vscodeSource: readFileSync(resolve(root, "editors/vscode/src/download.ts"), "utf8"),
     npmVerifierSource: readFileSync(resolve(root, "npm/fallow/scripts/verify-binary.js"), "utf8"),
+    companionVerifierSource: readFileSync(
+      resolve(root, "npm/fallow-similar-code/scripts/verify-binary.js"),
+      "utf8",
+    ),
     securityPolicy: readFileSync(resolve(root, "SECURITY.md"), "utf8"),
     releasePublicKey,
   });

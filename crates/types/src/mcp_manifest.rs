@@ -62,6 +62,24 @@ pub struct McpToolInfo {
     pub read_only: bool,
 }
 
+impl McpToolInfo {
+    /// The `fallow schema` `mcp_tools` row for this tool, also served verbatim
+    /// inside the `fallow://tools` MCP resource so both projections agree.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "kind": self.kind,
+            "description": self.description,
+            "cli_command": self.cli_command,
+            "key_params": self.key_params,
+            "license": self.license.as_str(),
+            "license_note": self.license_note,
+            "read_only": self.read_only,
+        })
+    }
+}
+
 /// Free/paid nuance attached to runtime-coverage capabilities. Shared with
 /// the `fallow schema` issue-type rows so the wording cannot drift.
 pub const RUNTIME_COVERAGE_LICENSE_NOTE: &str = "A single local runtime-coverage capture is free; continuous or multi-capture runtime monitoring requires an active license (fallow license activate).";
@@ -111,6 +129,28 @@ pub const MCP_TOOLS: &[McpToolInfo] = &[
         description: "Unverified local security candidates (tainted sinks) for downstream agent verification",
         cli_command: Some("fallow security --format json --quiet"),
         key_params: &["gate", "surface", "changed_since", "paths"],
+        license: McpToolLicense::Free,
+        license_note: None,
+        read_only: true,
+    },
+    McpToolInfo {
+        name: "find_similar_code",
+        kind: "analysis",
+        description: "Find unverified semantically similar function candidates with the exact pinned local model",
+        cli_command: Some("fallow similar-code --format json --quiet"),
+        key_params: &["threshold", "min_lines", "top", "changed_since", "paths"],
+        license: McpToolLicense::Free,
+        license_note: None,
+        read_only: true,
+    },
+    McpToolInfo {
+        name: "inspect_similar_code",
+        kind: "trace",
+        description: "Inspect one exact candidate snapshot without rerunning retrieval or global ranking",
+        cli_command: Some(
+            "fallow similar-code inspect <candidate-id> --candidates <report.json> --format json --quiet",
+        ),
+        key_params: &["candidate_id", "snapshot"],
         license: McpToolLicense::Free,
         license_note: None,
         read_only: true,
@@ -231,7 +271,7 @@ pub const MCP_TOOLS: &[McpToolInfo] = &[
     McpToolInfo {
         name: "get_token_blast_radius",
         kind: "analysis",
-        description: "Design-token blast radius for Tailwind v4 @theme tokens AND CSS-in-JS defineVars/createTheme-family token definitions: per token, a consumer_count (static lower bound) and a capped located consumers[] sample tagged theme-var/css-var/utility/apply (Tailwind) or js-member (CSS-in-JS cross-module member access); descriptive context for sizing a token change, never a deletion gate",
+        description: "Design-token blast radius for Tailwind v4 @theme tokens AND CSS-in-JS defineVars/createTheme-family token definitions: per token, a consumer_count (static lower bound) and a capped located consumers[] sample tagged theme-var/css-var/utility/apply (Tailwind), js-member (CSS-in-JS member access), or js-call (StyleX theme-group and Panda token calls); descriptive context for sizing a token change, never a deletion gate",
         cli_command: Some("fallow health --css --format json --quiet"),
         key_params: &[],
         license: McpToolLicense::Free,
@@ -456,6 +496,130 @@ pub const MCP_TOOLS: &[McpToolInfo] = &[
     },
 ];
 
+/// Static metadata for one MCP resource (or resource template).
+///
+/// Resources are the read-only, cacheable reference channel of the MCP
+/// server: compile-time reference material (tool manifest, issue-type
+/// registry, task matrix, JSON Schemas, explain documents) that an agent can
+/// list and read with no subprocess and no analysis run, cacheable by URI
+/// (clients such as Claude Code still read them through their own resource
+/// tool). The catalogue is constant, so the server declares neither
+/// `subscribe` nor `listChanged`.
+#[derive(Debug, Clone, Copy)]
+pub struct McpResourceInfo {
+    /// Wire URI (`fallow://...`), or an RFC 6570 URI template when
+    /// `template` is true.
+    pub uri: &'static str,
+    /// Programmatic resource name.
+    pub name: &'static str,
+    /// Human-readable title hosts show in resource pickers.
+    pub title: &'static str,
+    /// One-line agent-facing description.
+    pub description: &'static str,
+    /// MIME type of the read payload.
+    pub mime_type: &'static str,
+    /// Whether `uri` is a template listed under `resources/templates/list`
+    /// instead of a concrete resource under `resources/list`.
+    pub template: bool,
+}
+
+impl McpResourceInfo {
+    /// The `fallow schema` `mcp_resources` row for this resource.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "uri": self.uri,
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+            "mime_type": self.mime_type,
+            "template": self.template,
+        })
+    }
+}
+
+/// Shared caveat on `key_params` for the `mcp_tools` schema block and the
+/// `fallow://tools` resource, so the two never drift.
+pub const MCP_TOOLS_KEY_PARAMS_NOTE: &str = "key_params is a curated subset; the live MCP input schemas (tools/list) are authoritative for the full parameter list. cli_command is the nearest CLI fallback, not a full MCP input-schema projection";
+
+/// URI scheme every fallow resource lives under. The authority (`tools`,
+/// `explain`, ...) carries the resource family, matching what shipping MCP
+/// servers do; `fallow:///tools` (empty authority) is NOT the same URI.
+pub const MCP_RESOURCE_SCHEME: &str = "fallow://";
+
+/// RFC 6570 template of the per-issue-type explain resource.
+pub const MCP_EXPLAIN_RESOURCE_TEMPLATE: &str = "fallow://explain/{issue_type}";
+
+/// All resources exposed by the fallow MCP server, in catalogue order.
+/// Concrete resources first, templates last; `resources/list` and
+/// `resources/templates/list` preserve this order.
+pub const MCP_RESOURCES: &[McpResourceInfo] = &[
+    McpResourceInfo {
+        uri: "fallow://tools",
+        name: "tools",
+        title: "Tool manifest",
+        description: "MCP tool manifest: name, kind, one-line description, nearest CLI fallback, key params, license, and read-only flag for every tool",
+        mime_type: "application/json",
+        template: false,
+    },
+    McpResourceInfo {
+        uri: "fallow://issue-types",
+        name: "issue-types",
+        title: "Issue type registry",
+        description: "Every issue type with its command, category, config key, zero-config default severity, opt-in flag, fixable flag, docs URL, and explain resource URI",
+        mime_type: "application/json",
+        template: false,
+    },
+    McpResourceInfo {
+        uri: "fallow://explain",
+        name: "explain",
+        title: "Explain index",
+        description: "Index of every explainable issue type with its one-line summary and the fallow://explain/{issue_type} URI to read",
+        mime_type: "application/json",
+        template: false,
+    },
+    McpResourceInfo {
+        uri: "fallow://task-matrix",
+        name: "task-matrix",
+        title: "Agent task matrix",
+        description: "Agent task-to-command matrix: which read-only fallow command to run before deleting, refactoring, committing, or scoping work",
+        mime_type: "application/json",
+        template: false,
+    },
+    McpResourceInfo {
+        uri: "fallow://schema/config",
+        name: "schema-config",
+        title: "Config JSON Schema",
+        description: "JSON Schema of the fallow config file (same document as fallow config-schema)",
+        mime_type: "application/json",
+        template: false,
+    },
+    McpResourceInfo {
+        uri: "fallow://schema/plugin",
+        name: "schema-plugin",
+        title: "Plugin JSON Schema",
+        description: "JSON Schema of a user-authored external plugin (same document as fallow plugin-schema)",
+        mime_type: "application/json",
+        template: false,
+    },
+    McpResourceInfo {
+        uri: "fallow://schema/rule-pack",
+        name: "schema-rule-pack",
+        title: "Rule pack JSON Schema",
+        description: "JSON Schema of a declarative rule pack (same document as fallow rule-pack-schema)",
+        mime_type: "application/json",
+        template: false,
+    },
+    McpResourceInfo {
+        uri: MCP_EXPLAIN_RESOURCE_TEMPLATE,
+        name: "explain-issue-type",
+        title: "Explain one issue type",
+        description: "Explain document for one issue type (same payload as fallow explain <issue-type> --format json): name, summary, rationale, example, fix guidance, docs URL. issue_type accepts the bare id (unused-export), the namespaced id (fallow/unused-export), or the CLI filter spelling; see fallow://explain for the index",
+        mime_type: "application/json",
+        template: true,
+    },
+];
+
 /// One row of the cross-surface capability parity table: how a single fallow
 /// capability is (or is deliberately not) exposed on the three agent execution
 /// surfaces.
@@ -497,9 +661,9 @@ pub struct CapabilityParityRow {
 /// (api runner / napi export / MCP tool) exposes each fallow capability, and why
 /// a surface is deliberately absent.
 ///
-/// Only three capabilities are first-class on ALL three surfaces (dead-code,
-/// duplication, feature-flags: the aligned primitives). The napi addon ships a
-/// deliberately narrow set of seven whole-project analysis primitives and has NO
+/// Four capabilities are first-class on all three surfaces (dead-code,
+/// duplication, similar-code, and feature-flags). The napi addon ships a
+/// deliberately narrow set of eight whole-project analysis primitives and has NO
 /// fix, trace, impact, audit, or introspection surface; the MCP server is the
 /// broad agent surface and folds several api/napi primitives (circular deps,
 /// boundary violations, complexity, health-runner) into `analyze` / `check_health`
@@ -518,6 +682,13 @@ pub const CAPABILITY_PARITY: &[CapabilityParityRow] = &[
         api_runner: Some("run_duplication"),
         napi_export: Some("detectDuplication"),
         mcp_tool: Some("find_dupes"),
+        omission_note: None,
+    },
+    CapabilityParityRow {
+        capability: "semantic similar-code discovery",
+        api_runner: Some("run_similar_code"),
+        napi_export: Some("detectSimilarCode"),
+        mcp_tool: Some("find_similar_code"),
         omission_note: None,
     },
     CapabilityParityRow {
@@ -564,7 +735,7 @@ pub const CAPABILITY_PARITY: &[CapabilityParityRow] = &[
             "Runner-injected health entry point that napi's computeHealth binds. The MCP surface for health is `check_health`, which uses the run_health convenience wrapper; same capability, different entry point.",
         ),
     },
-    // -- MCP tool + api runner, no napi export (addon ships only the seven
+    // -- MCP tool + api runner, no napi export (addon ships only the eight
     //    whole-project primitives). --
     CapabilityParityRow {
         capability: "health / hotspots",
@@ -702,6 +873,15 @@ pub const CAPABILITY_PARITY: &[CapabilityParityRow] = &[
         mcp_tool: Some("security_candidates"),
         omission_note: Some(
             "Security candidate surfacing. MCP shells out to `fallow security`; no fallow_api run_* runner and no napi export.",
+        ),
+    },
+    CapabilityParityRow {
+        capability: "semantic similar-code inspection",
+        api_runner: None,
+        napi_export: None,
+        mcp_tool: Some("inspect_similar_code"),
+        omission_note: Some(
+            "Source-grounded verification of one exact similar-code candidate snapshot. MCP shells out to `fallow similar-code inspect`; discovery is the aligned run_similar_code / detectSimilarCode / find_similar_code capability, while this bounded evidence packet has no standalone run_* API runner or napi export.",
         ),
     },
     CapabilityParityRow {
@@ -861,6 +1041,63 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), total, "duplicate tool name in MCP_TOOLS");
+    }
+
+    #[test]
+    fn resource_uris_and_names_are_unique_and_under_the_fallow_scheme() {
+        let mut uris: Vec<&str> = MCP_RESOURCES.iter().map(|r| r.uri).collect();
+        let mut names: Vec<&str> = MCP_RESOURCES.iter().map(|r| r.name).collect();
+        let total = uris.len();
+        uris.sort_unstable();
+        uris.dedup();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(uris.len(), total, "duplicate resource uri in MCP_RESOURCES");
+        assert_eq!(
+            names.len(),
+            total,
+            "duplicate resource name in MCP_RESOURCES"
+        );
+        for resource in MCP_RESOURCES {
+            assert!(
+                resource.uri.starts_with(MCP_RESOURCE_SCHEME),
+                "resource {} must live under {MCP_RESOURCE_SCHEME}",
+                resource.uri
+            );
+            assert!(
+                !resource.uri.starts_with("fallow:///"),
+                "resource {} must carry its family as the URI authority, not an empty authority",
+                resource.uri
+            );
+            assert_eq!(
+                resource.uri.contains('{'),
+                resource.template,
+                "resource {} template flag must match the presence of a URI template variable",
+                resource.uri
+            );
+            assert!(
+                !resource.description.is_empty() && !resource.description.contains('\n'),
+                "resource {} needs a one-line description",
+                resource.uri
+            );
+            assert_eq!(resource.mime_type, "application/json");
+        }
+    }
+
+    #[test]
+    fn resource_catalogue_lists_concrete_resources_before_templates() {
+        let first_template = MCP_RESOURCES
+            .iter()
+            .position(|r| r.template)
+            .expect("at least one template");
+        assert!(
+            MCP_RESOURCES[first_template..].iter().all(|r| r.template),
+            "templates must trail the concrete resources so list order stays deterministic"
+        );
+        assert_eq!(
+            MCP_RESOURCES[first_template].uri,
+            MCP_EXPLAIN_RESOURCE_TEMPLATE
+        );
     }
 
     #[test]
@@ -1039,6 +1276,7 @@ mod tests {
             [
                 "dead-code analysis",
                 "code duplication",
+                "semantic similar-code discovery",
                 "feature-flag detection"
             ],
             "the set of capabilities exposed on all three surfaces changed; update the parity \

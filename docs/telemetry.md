@@ -122,7 +122,7 @@ Field purposes:
 | `run_scope` | Classify the run as `full_project`, `changed_only`, `workspace_scoped`, `file_scoped`, or `unknown` without uploading file, workspace, branch, or ref names. |
 | `config_shape` | Classify configuration as `default`, `custom_config`, `custom_rules`, `plugins_enabled`, or `unknown` without uploading config paths, rule names, plugin names, or values. |
 | `output_destination` | Classify the report sink as `stdout`, `file`, `ci_comment`, or `unknown` without uploading destination paths, URLs, or integration identifiers. |
-| `analysis_mode` | Classify analysis as `static`, `runtime_coverage`, `production_coverage`, `security`, `fix`, or `unknown` without uploading raw command lines or coverage artifact paths. |
+| `analysis_mode` | Classify analysis as `static`, `runtime_coverage`, `production_coverage`, `security`, `similar_code`, `fix`, or `unknown` without uploading raw command lines, model inputs, or artifact paths. |
 | `file_count_bucket` | Segment slow runs by coarse analyzed-file scale (`0-99`, `100-499`, `500-1999`, `2000+`, or `unknown`) without uploading exact counts. Combined and audit workflows keep the largest bucket reported by their sub-analyses. |
 | `function_count_bucket` | Segment slow runs by coarse analyzed-function scale (`0-999`, `1000-9999`, `10000+`, or `unknown`) without uploading exact counts. The field is omitted when no cheap function count is available. |
 | `avg_fan_out_bucket` | Segment slow runs by coarse average fan-out (`0`, `<1`, `1-2`, `3+`, or `unknown`) when a workflow already retained a module graph. The bucket is derived from existing module and edge counts only, with no dependency traversal, graph diameter, depth, or coupling analysis added for telemetry. |

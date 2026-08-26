@@ -23,6 +23,8 @@ for contributors and maintainers of the open-source codebase.
   parity.
 - [Review routing](development/review-routing.md): review lenses by changed
   path.
+- [Release procedure](development/release-procedure.md): maintainer publication
+  steps and the invariants the policy tests assert
 - [Release security](development/release-security.md): credential boundaries
   and publication workflow ownership.
 
@@ -39,6 +41,8 @@ for contributors and maintainers of the open-source codebase.
   output contracts.
 - [Type-aware analysis](type-aware-analysis.md): semantic sidecar
   boundaries, evidence policy, packaging, and corpus validation.
+- [Similar-code analysis](similar-code-analysis.md): local semantic discovery,
+  inspect and verdict flow, privacy boundary, packaging, and version 1 scope.
 
 ## Internal implementation references
 

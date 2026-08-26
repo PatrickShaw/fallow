@@ -36,6 +36,7 @@ pub mod sfc;
 pub mod sfc_css;
 mod sfc_props;
 mod sfc_template;
+pub mod similar_code;
 mod source_map;
 pub mod suppress;
 /// Tailwind CSS arbitrary-value detection.
@@ -96,6 +97,7 @@ pub use sfc::{
 pub use sfc_css::{
     scoped_unused_classes, sfc_preprocessor_virtual_stylesheet, sfc_virtual_stylesheet,
 };
+pub use similar_code::extract_similar_code_functions;
 pub use source_map::ExtractionResult;
 pub use tailwind::{TailwindArbitraryUse, scan_tailwind_arbitrary_values};
 

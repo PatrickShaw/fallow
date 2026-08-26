@@ -477,6 +477,7 @@ mod tests {
             ignore_decorators: vec![],
             unused_component_props_ignore: None,
             duplicates: fallow_config::DuplicatesConfig::default(),
+            similar_code: fallow_config::SimilarCodeConfig::default(),
             health: fallow_config::HealthConfig::default(),
             type_aware: fallow_config::TypeAwareConfig::default(),
             rules: fallow_config::RulesConfig::default(),

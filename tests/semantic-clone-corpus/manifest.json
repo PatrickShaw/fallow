@@ -1,0 +1,218 @@
+{
+  "$schema": "fallow-semantic-clone-conformance/v1",
+  "source": {
+    "repository": "https://github.com/rafal-qa/embedding-benchmark",
+    "revision": "0290537e84752f8bd1dac11fe6417064d82e46f9",
+    "license": "MIT",
+    "license_file": "LICENSE.embedding-benchmark",
+    "public_fixture": true
+  },
+  "deterministic_baseline": {
+    "schema_version": 9,
+    "mode": "semantic",
+    "near": true,
+    "min_tokens": 10,
+    "min_lines": 3,
+    "minimum_pair_coverage": 0.6
+  },
+  "vector_fixture": {
+    "provider": "fallow-deterministic-fixture",
+    "model_revision": "contract-v1",
+    "dimensions": 256,
+    "generation_parameters": {
+      "kind": "synthetic-basis-vectors",
+      "source_derived": false
+    },
+    "quality_evidence": false
+  },
+  "candidate_evidence": [
+    {
+      "file": "evidence/jina-v2-code-q8.json",
+      "sha256": "d0cadf95396c01ed10f24f5c81b05470e4d16d52a6b71d07241ee0acbcb06418"
+    }
+  ],
+  "cases": [
+    {
+      "id": "different-algorithm-ts-02",
+      "category": "different-algorithm",
+      "files": [
+        {
+          "fixture": "cases/different-algorithm/a.ts",
+          "upstream": "cases/high/different-algorithm/02_a.ts",
+          "sha256": "14feff040b0b59ecd3c71d96f1bd09d16688dd2e454628545dd71095d81eb15c",
+          "license": "MIT"
+        },
+        {
+          "fixture": "cases/different-algorithm/b.ts",
+          "upstream": "cases/high/different-algorithm/02_b.ts",
+          "sha256": "c1ca57028485261d50e6e760e5a6687e8ab8fded029cfa7f8adefed5d2e2d26f",
+          "license": "MIT"
+        }
+      ],
+      "truth": {
+        "candidate_worthy": true,
+        "behaviorally_equivalent": true,
+        "refactor_safe": false,
+        "manually_verified": true,
+        "rationale": "Both functions detect duplicate numbers, but use different algorithms with different performance characteristics."
+      },
+      "expected_deterministic_finding": false
+    },
+    {
+      "id": "refactored-structure-ts-02",
+      "category": "refactored-structure",
+      "files": [
+        {
+          "fixture": "cases/refactored-structure/a.ts",
+          "upstream": "cases/high/refactored-structure/02_a.ts",
+          "sha256": "cfd55ec8b9571b146b858ee1f76539f000f88f9c2c980b89dbe59aed2ab7e7d5",
+          "license": "MIT"
+        },
+        {
+          "fixture": "cases/refactored-structure/b.ts",
+          "upstream": "cases/high/refactored-structure/02_b.ts",
+          "sha256": "cf8ef930088a3b30324c96ad49ee1e0600a91f07c3119083ffa96b87f4860155",
+          "license": "MIT"
+        }
+      ],
+      "truth": {
+        "candidate_worthy": true,
+        "behaviorally_equivalent": true,
+        "refactor_safe": true,
+        "manually_verified": true,
+        "rationale": "The required-field loop is extracted and a single-use prefix variable is inlined without changing behavior."
+      },
+      "expected_deterministic_finding": false
+    },
+    {
+      "id": "renamed-identifiers-ts-02",
+      "category": "renamed-identifiers",
+      "files": [
+        {
+          "fixture": "cases/renamed-identifiers/a.ts",
+          "upstream": "cases/high/renamed-identifiers/02_a.ts",
+          "sha256": "da31740ce30ca74f196a75725ff06a3a003042d23af22b46fdf435b2301e7a1d",
+          "license": "MIT"
+        },
+        {
+          "fixture": "cases/renamed-identifiers/b.ts",
+          "upstream": "cases/high/renamed-identifiers/02_b.ts",
+          "sha256": "2a41e8b4215887625c3d368f86d3eaf7cf48c49c92703a897712f55f03ec7ff2",
+          "license": "MIT"
+        }
+      ],
+      "truth": {
+        "candidate_worthy": true,
+        "behaviorally_equivalent": true,
+        "refactor_safe": true,
+        "manually_verified": true,
+        "rationale": "The throttle implementation is structurally identical apart from selected identifier names."
+      },
+      "expected_deterministic_finding": true
+    },
+    {
+      "id": "same-identifiers-ts-02",
+      "category": "same-identifiers",
+      "files": [
+        {
+          "fixture": "cases/same-identifiers/a.ts",
+          "upstream": "cases/low/same-identifiers/02_a.ts",
+          "sha256": "327cd74eefcd26734a4ae68c9acd1a8308fea4bd0a7d5cd18a475a59fb2b469a",
+          "license": "MIT"
+        },
+        {
+          "fixture": "cases/same-identifiers/b.ts",
+          "upstream": "cases/low/same-identifiers/02_b.ts",
+          "sha256": "f10186fae44944e1b602cc46a78196eed558c7c8121f3d7c19e5e7bcc596c8b0",
+          "license": "MIT"
+        }
+      ],
+      "truth": {
+        "candidate_worthy": false,
+        "behaviorally_equivalent": false,
+        "refactor_safe": false,
+        "manually_verified": true,
+        "rationale": "Shared booking vocabulary masks unrelated interval scheduling and character-category behavior."
+      },
+      "expected_deterministic_finding": false
+    },
+    {
+      "id": "same-boilerplate-ts-05",
+      "category": "same-boilerplate",
+      "files": [
+        {
+          "fixture": "cases/same-boilerplate/a.ts",
+          "upstream": "cases/low/same-boilerplate/05_a.ts",
+          "sha256": "4361c4848a21dd7ecb7813024c5b49e6410224330d8d80e41a44e19c6fd37ade",
+          "license": "MIT"
+        },
+        {
+          "fixture": "cases/same-boilerplate/b.ts",
+          "upstream": "cases/low/same-boilerplate/05_b.ts",
+          "sha256": "cdaee7479d2d6828ef77ddc87d1d2856d7257523586918f72888dd32c0acc373",
+          "license": "MIT"
+        }
+      ],
+      "truth": {
+        "candidate_worthy": false,
+        "behaviorally_equivalent": false,
+        "refactor_safe": false,
+        "manually_verified": true,
+        "rationale": "Redux slice scaffolding is shared, but cart mutation and filter pagination are unrelated domain logic."
+      },
+      "expected_deterministic_finding": false
+    },
+    {
+      "id": "shared-fragments-ts-02",
+      "category": "small-shared-fragments-large",
+      "files": [
+        {
+          "fixture": "cases/shared-fragments/a.ts",
+          "upstream": "cases/low/small-shared-fragments-large/02_a.ts",
+          "sha256": "f78931bb3135a8bd1c089d963ccfadcd4f7b1771caf6ff503a3492cb21a53ab6",
+          "license": "MIT"
+        },
+        {
+          "fixture": "cases/shared-fragments/b.ts",
+          "upstream": "cases/low/small-shared-fragments-large/02_b.ts",
+          "sha256": "6dca581b78a1e5eb955a93448220f7ec0c3fce6539fa0ee8994d16256f370429",
+          "license": "MIT"
+        }
+      ],
+      "truth": {
+        "candidate_worthy": false,
+        "behaviorally_equivalent": false,
+        "refactor_safe": false,
+        "manually_verified": true,
+        "rationale": "A permissions policy and financial candle aggregation share small fragments but not pair-level purpose or behavior."
+      },
+      "expected_deterministic_finding": false
+    },
+    {
+      "id": "unrelated-ts-02",
+      "category": "unrelated",
+      "files": [
+        {
+          "fixture": "cases/unrelated/a.ts",
+          "upstream": "cases/low/unrelated/02_a.ts",
+          "sha256": "fc4133ee620cf9ccf69234454dcdf7b08012d4d1e68853140ec9898c90eeb463",
+          "license": "MIT"
+        },
+        {
+          "fixture": "cases/unrelated/b.ts",
+          "upstream": "cases/low/unrelated/02_b.ts",
+          "sha256": "9979b0ca418a14ca554b5c27cc8a83b587b890691fa2b323ed7afa0f44265828",
+          "license": "MIT"
+        }
+      ],
+      "truth": {
+        "candidate_worthy": false,
+        "behaviorally_equivalent": false,
+        "refactor_safe": false,
+        "manually_verified": true,
+        "rationale": "Pagination link construction and temperature-scale conversion have unrelated purpose and behavior."
+      },
+      "expected_deterministic_finding": false
+    }
+  ]
+}

@@ -71,6 +71,10 @@ impl CodeModeTool {
             "combined" => Ok(Self::Combined),
             "check_changed" => Ok(Self::CheckChanged),
             "security_candidates" => Ok(Self::SecurityCandidates),
+            "find_similar_code" | "inspect_similar_code" => Err(
+                "similar-code is not exposed through Code Mode's 30-second window; use the standalone MCP find_similar_code or inspect_similar_code tool, which has a dedicated 15-minute timeout"
+                    .to_string(),
+            ),
             "find_dupes" => Ok(Self::FindDupes),
             "project_info" => Ok(Self::ProjectInfo),
             "trace_export" => Ok(Self::TraceExport),

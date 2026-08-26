@@ -1712,6 +1712,7 @@ mod tests {
                 ignore_decorators: vec![],
                 unused_component_props: fallow_config::UnusedComponentPropsConfig::default(),
                 duplicates: DuplicatesConfig::default(),
+                similar_code: fallow_config::SimilarCodeConfig::default(),
                 health: HealthConfig::default(),
                 rules: RulesConfig::default(),
                 boundaries: fallow_config::BoundaryConfig::default(),

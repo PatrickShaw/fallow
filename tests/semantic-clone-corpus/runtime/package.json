@@ -1,0 +1,8 @@
+{
+  "name": "fallow-semantic-clone-model-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0"
+  }
+}

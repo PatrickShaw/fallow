@@ -75,10 +75,16 @@ pub mod results;
 pub mod semantic;
 /// Custom serde serializers for cross-platform path output.
 pub mod serde_path;
+/// Transient source-extraction contracts for provider-backed similar-code analysis.
+pub mod similar_code;
 /// Shared source-file freshness metadata used by cache invalidation.
 pub mod source_fingerprint;
 /// Inline suppression comment types and issue kind definitions.
 pub mod suppress;
+/// Agent task-to-command matrix rows shared by `fallow schema`, the
+/// `init --agents` template, the agent hook block, root `--help`, and the
+/// `fallow://task-matrix` MCP resource. Data only; the CLI owns rendering.
+pub mod task_matrix;
 /// Trace output contracts shared by core, engine, CLI, API, and MCP.
 pub mod trace;
 /// Symbol-level trace-chain output contracts.

@@ -13,7 +13,21 @@ fn server_info_is_correct() {
     assert_eq!(info.server_info.name, "fallow-mcp");
     assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
     assert!(info.capabilities.tools.is_some());
-    assert!(info.instructions.is_some());
+    let resources = info
+        .capabilities
+        .resources
+        .as_ref()
+        .expect("resources capability must be advertised");
+    assert!(
+        resources.subscribe.is_none() && resources.list_changed.is_none(),
+        "the resource catalogue is compile-time constant; subscribe and listChanged must stay undeclared"
+    );
+    assert!(
+        info.instructions
+            .as_deref()
+            .is_some_and(|text| text.contains("fallow://task-matrix")),
+        "instructions must point agents at the resource surface"
+    );
 }
 
 #[test]
@@ -25,6 +39,8 @@ fn all_tools_registered() {
     assert!(names.contains(&"analyze".to_string()));
     assert!(names.contains(&"check_changed".to_string()));
     assert!(names.contains(&"security_candidates".to_string()));
+    assert!(names.contains(&"find_similar_code".to_string()));
+    assert!(names.contains(&"inspect_similar_code".to_string()));
     assert!(names.contains(&"inspect_target".to_string()));
     assert!(names.contains(&"guard".to_string()));
     assert!(names.contains(&"find_dupes".to_string()));
@@ -54,7 +70,7 @@ fn all_tools_registered() {
     assert!(names.contains(&"impact_all".to_string()));
     assert!(names.contains(&"decision_surface".to_string()));
     assert!(names.contains(&"recommend".to_string()));
-    assert_eq!(tools.len(), 33);
+    assert_eq!(tools.len(), 35);
 }
 
 #[test]
@@ -66,6 +82,8 @@ fn read_only_tools_have_annotations() {
         "analyze",
         "check_changed",
         "security_candidates",
+        "find_similar_code",
+        "inspect_similar_code",
         "inspect_target",
         "guard",
         "find_dupes",
@@ -323,7 +341,40 @@ fn code_execute_schema_contains_expected_properties() {
 }
 
 #[test]
-fn code_execute_description_distinguishes_combined_from_subprocess_tools() {
+fn inspect_similar_code_schema_requires_the_exact_candidate_snapshot() {
+    let server = FallowMcp::new();
+    let tools = server.tool_router.list_all();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "inspect_similar_code")
+        .unwrap();
+    let schema: serde_json::Value = serde_json::to_value(&tool.input_schema).unwrap();
+
+    assert_required_fields(&schema, &["candidate_id", "snapshot"]);
+    let serialized = serde_json::to_string(&schema).unwrap();
+    for field in [
+        "generation",
+        "candidate",
+        "completion",
+        "diagnostics",
+        "source_sha256",
+    ] {
+        assert!(
+            serialized.contains(field),
+            "snapshot schema is missing {field}"
+        );
+    }
+    let properties = schema["properties"].as_object().unwrap();
+    for removed in ["changed_since", "paths", "threshold", "min_lines", "top"] {
+        assert!(
+            !properties.contains_key(removed),
+            "inspect schema still exposes reranking field {removed}"
+        );
+    }
+}
+
+#[test]
+fn code_execute_description_routes_similar_code_to_standalone_tools() {
     let server = FallowMcp::new();
     let tools = server.tool_router.list_all();
     let tool = tools.iter().find(|t| t.name == "code_execute").unwrap();
@@ -336,6 +387,14 @@ fn code_execute_description_distinguishes_combined_from_subprocess_tools() {
     assert!(
         description.contains("analyze, findDupes, checkHealth, and audit stay subprocess-backed"),
         "the description must list only the four subprocess-backed calls: {description}"
+    );
+    assert!(
+        description.contains("standalone find_similar_code and inspect_similar_code MCP tools"),
+        "the description must route similar-code to the standalone tools: {description}"
+    );
+    assert!(
+        !description.contains("findSimilarCode") && !description.contains("inspectSimilarCode"),
+        "Code Mode must not advertise similar-code aliases: {description}"
     );
     assert!(
         !description.contains("analyze, combined, findDupes"),

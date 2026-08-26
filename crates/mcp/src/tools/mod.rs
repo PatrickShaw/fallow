@@ -21,6 +21,7 @@ mod project_info;
 mod recommend;
 mod security;
 mod semantic;
+mod similar_code;
 mod suppressions;
 mod trace;
 
@@ -59,6 +60,9 @@ pub use recommend::run_recommend;
 pub use security::{build_security_candidates_args, run_security_candidates};
 pub use semantic::{run_symbol_impact, run_symbol_trace};
 #[cfg(test)]
+pub use similar_code::{build_find_similar_code_args, build_inspect_similar_code_args};
+pub use similar_code::{run_find_similar_code, run_inspect_similar_code};
+#[cfg(test)]
 pub use suppressions::build_list_suppressions_args;
 pub use suppressions::run_list_suppressions;
 pub use trace::{
@@ -74,7 +78,7 @@ use std::time::Duration;
 pub use fallow_types::issue_meta::MCP_ISSUE_TYPE_FLAGS as ISSUE_TYPE_FLAGS;
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, ContentBlock};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use fallow_process::{ProcessTree, cleanup_tokio_child, configure_tokio_command};
@@ -189,15 +193,21 @@ pub fn validation_error_body(message: impl Into<String>) -> String {
     .to_string()
 }
 
-/// Read the subprocess timeout from `FALLOW_TIMEOUT_SECS` or fall back to the default.
+fn timeout_duration_from(value: Option<&str>, default_secs: u64) -> Duration {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or_else(|| Duration::from_secs(default_secs), Duration::from_secs)
+}
+
+/// Read the subprocess timeout from `FALLOW_TIMEOUT_SECS` or use the supplied
+/// tool-specific default.
+fn timeout_duration_with_default(default_secs: u64) -> Duration {
+    let configured = std::env::var("FALLOW_TIMEOUT_SECS").ok();
+    timeout_duration_from(configured.as_deref(), default_secs)
+}
+
 fn timeout_duration() -> Duration {
-    std::env::var("FALLOW_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map_or(
-            Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-            Duration::from_secs,
-        )
+    timeout_duration_with_default(DEFAULT_TIMEOUT_SECS)
 }
 
 /// Execute the fallow CLI binary with the given arguments and return the result.
@@ -210,6 +220,7 @@ pub async fn run_fallow(binary: &str, args: &[String]) -> Result<CallToolResult,
     spawn_fallow(
         binary,
         args,
+        None,
         timeout_duration(),
         DEFAULT_MAX_OUTPUT_BYTES,
         None,
@@ -227,10 +238,40 @@ pub async fn run_tool(
     tool: &'static str,
     args: &[String],
 ) -> Result<CallToolResult, McpError> {
+    run_tool_with_timeout(binary, tool, args, timeout_duration()).await
+}
+
+/// Execute one named MCP tool with a tool-specific bounded timeout.
+pub async fn run_tool_with_timeout(
+    binary: &str,
+    tool: &'static str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<CallToolResult, McpError> {
     spawn_fallow(
         binary,
         args,
-        timeout_duration(),
+        None,
+        timeout,
+        DEFAULT_MAX_OUTPUT_BYTES,
+        Some(tool),
+    )
+    .await
+}
+
+/// Execute one named MCP tool with bounded stdin and a tool-specific timeout.
+pub async fn run_tool_with_stdin_timeout(
+    binary: &str,
+    tool: &'static str,
+    args: &[String],
+    stdin: Vec<u8>,
+    timeout: Duration,
+) -> Result<CallToolResult, McpError> {
+    spawn_fallow(
+        binary,
+        args,
+        Some(stdin),
+        timeout,
         DEFAULT_MAX_OUTPUT_BYTES,
         Some(tool),
     )
@@ -243,7 +284,7 @@ pub async fn run_fallow_with_timeout(
     args: &[String],
     timeout: Duration,
 ) -> Result<CallToolResult, McpError> {
-    spawn_fallow(binary, args, timeout, DEFAULT_MAX_OUTPUT_BYTES, None).await
+    spawn_fallow(binary, args, None, timeout, DEFAULT_MAX_OUTPUT_BYTES, None).await
 }
 
 #[cfg(all(test, unix))]
@@ -252,12 +293,21 @@ pub async fn run_fallow_with_output_limit(
     args: &[String],
     max_output_bytes: usize,
 ) -> Result<CallToolResult, McpError> {
-    spawn_fallow(binary, args, timeout_duration(), max_output_bytes, None).await
+    spawn_fallow(
+        binary,
+        args,
+        None,
+        timeout_duration(),
+        max_output_bytes,
+        None,
+    )
+    .await
 }
 
 async fn spawn_fallow(
     binary: &str,
     args: &[String],
+    stdin_input: Option<Vec<u8>>,
     timeout: Duration,
     max_output_bytes: usize,
     tool: Option<&'static str>,
@@ -266,7 +316,11 @@ async fn spawn_fallow(
     let mut command = Command::new(binary);
     command
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if stdin_input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(tool) = tool {
@@ -309,11 +363,28 @@ async fn spawn_fallow(
             &cleanup.errors,
         ));
     };
+    let stdin_task = if let Some(input) = stdin_input {
+        let Some(mut stdin) = child.stdin.take() else {
+            let cleanup = cleanup_tokio_child(Some(&process_tree), &mut child).await;
+            return Err(subprocess_error_with_cleanup(
+                binary,
+                io::Error::other("stdin pipe unavailable"),
+                &cleanup.errors,
+            ));
+        };
+        Some(tokio::spawn(async move {
+            stdin.write_all(&input).await?;
+            stdin.shutdown().await
+        }))
+    } else {
+        None
+    };
     let stdout_task = tokio::spawn(drain_pipe(stdout, max_output_bytes));
     let stderr_task = tokio::spawn(drain_pipe(stderr, max_output_bytes));
     let process = RunningFallowProcess {
         child,
         process_tree,
+        stdin_task,
         stdout_task,
         stderr_task,
         exit_one_is_error: type_aware_complete_required,
@@ -324,6 +395,7 @@ async fn spawn_fallow(
 struct RunningFallowProcess {
     child: tokio::process::Child,
     process_tree: ProcessTree,
+    stdin_task: Option<tokio::task::JoinHandle<io::Result<()>>>,
     stdout_task: tokio::task::JoinHandle<io::Result<CapturedPipe>>,
     stderr_task: tokio::task::JoinHandle<io::Result<CapturedPipe>>,
     exit_one_is_error: bool,
@@ -338,6 +410,7 @@ async fn complete_fallow_process(
     let RunningFallowProcess {
         mut child,
         process_tree,
+        mut stdin_task,
         mut stdout_task,
         mut stderr_task,
         exit_one_is_error,
@@ -351,7 +424,7 @@ async fn complete_fallow_process(
             Ok(Ok(())) => {
                 let cleanup = cleanup_tokio_child(Some(&process_tree), &mut child).await;
                 let Some(status) = cleanup.status else {
-                    abort_drain_tasks(&stdout_task, &stderr_task);
+                    abort_process_tasks(stdin_task.as_ref(), &stdout_task, &stderr_task);
                     return Err(subprocess_error_with_cleanup(
                         binary,
                         io::Error::other("completed subprocess status unavailable"),
@@ -362,7 +435,7 @@ async fn complete_fallow_process(
             }
             Ok(Err(error)) => {
                 let cleanup = cleanup_tokio_child(Some(&process_tree), &mut child).await;
-                abort_drain_tasks(&stdout_task, &stderr_task);
+                abort_process_tasks(stdin_task.as_ref(), &stdout_task, &stderr_task);
                 return Err(subprocess_error_with_cleanup(
                     binary,
                     error,
@@ -371,7 +444,7 @@ async fn complete_fallow_process(
             }
             Err(_) => {
                 let cleanup = cleanup_tokio_child(Some(&process_tree), &mut child).await;
-                abort_drain_tasks(&stdout_task, &stderr_task);
+                abort_process_tasks(stdin_task.as_ref(), &stdout_task, &stderr_task);
                 return Ok(timeout_result(timeout, &cleanup.errors));
             }
         };
@@ -384,7 +457,7 @@ async fn complete_fallow_process(
         }
         Ok(Err(error)) => {
             let cleanup = cleanup_tokio_child(Some(&process_tree), &mut child).await;
-            abort_drain_tasks(&stdout_task, &stderr_task);
+            abort_process_tasks(stdin_task.as_ref(), &stdout_task, &stderr_task);
             return Err(subprocess_error_with_cleanup(
                 binary,
                 error,
@@ -393,12 +466,15 @@ async fn complete_fallow_process(
         }
         Err(_) => {
             let cleanup = cleanup_tokio_child(Some(&process_tree), &mut child).await;
-            abort_drain_tasks(&stdout_task, &stderr_task);
+            abort_process_tasks(stdin_task.as_ref(), &stdout_task, &stderr_task);
             return Ok(timeout_result(timeout, &cleanup.errors));
         }
     };
 
     let drain_output = async {
+        if let Some(stdin_task) = stdin_task.as_mut() {
+            stdin_task.await.map_err(io::Error::other)??;
+        }
         let stdout = (&mut stdout_task).await.map_err(io::Error::other)??;
         let stderr = (&mut stderr_task).await.map_err(io::Error::other)??;
         Ok::<_, io::Error>((stdout, stderr))
@@ -406,7 +482,7 @@ async fn complete_fallow_process(
     let (stdout, stderr) = match tokio::time::timeout_at(deadline, drain_output).await {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
-            abort_drain_tasks(&stdout_task, &stderr_task);
+            abort_process_tasks(stdin_task.as_ref(), &stdout_task, &stderr_task);
             return Err(subprocess_error_with_cleanup(
                 binary,
                 error,
@@ -414,7 +490,7 @@ async fn complete_fallow_process(
             ));
         }
         Err(_) => {
-            abort_drain_tasks(&stdout_task, &stderr_task);
+            abort_process_tasks(stdin_task.as_ref(), &stdout_task, &stderr_task);
             return Ok(timeout_result(timeout, &cleanup_errors));
         }
     };
@@ -507,10 +583,14 @@ async fn drain_pipe(
     Ok(CapturedPipe { bytes, exceeded })
 }
 
-fn abort_drain_tasks(
+fn abort_process_tasks(
+    stdin_task: Option<&tokio::task::JoinHandle<io::Result<()>>>,
     stdout_task: &tokio::task::JoinHandle<io::Result<CapturedPipe>>,
     stderr_task: &tokio::task::JoinHandle<io::Result<CapturedPipe>>,
 ) {
+    if let Some(stdin_task) = stdin_task {
+        stdin_task.abort();
+    }
     stdout_task.abort();
     stderr_task.abort();
 }
@@ -799,5 +879,25 @@ mod completeness_tests {
         let result = non_success_result(1, &output, "", false);
 
         assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn tool_timeout_defaults_remain_distinct_and_share_the_env_override_parser() {
+        assert_eq!(
+            timeout_duration_from(None, DEFAULT_TIMEOUT_SECS),
+            Duration::from_mins(2)
+        );
+        assert_eq!(
+            timeout_duration_from(None, 15 * 60),
+            Duration::from_mins(15)
+        );
+        assert_eq!(
+            timeout_duration_from(Some("42"), 15 * 60),
+            Duration::from_secs(42)
+        );
+        assert_eq!(
+            timeout_duration_from(Some("invalid"), 15 * 60),
+            Duration::from_mins(15)
+        );
     }
 }

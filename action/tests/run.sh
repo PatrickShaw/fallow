@@ -390,7 +390,7 @@ else
   cp "$DIR/../../npm/fallow/scripts/verify-binary.js" "$VERIFY_TMP/node_modules/fallow/scripts/"
   cp "$DIR/../../npm/fallow/scripts/platform-package.js" "$VERIFY_TMP/node_modules/fallow/scripts/"
 
-  # Generate a keypair, write three binaries, sign them. Also write a
+  # Generate a keypair, write both verified binaries, and sign them. Also write a
   # minimal package.json so require.resolve('@fallow-cli/<platform>/package.json')
   # succeeds.
   node -e "
@@ -403,7 +403,7 @@ const rawPub = der.subarray(der.length - 32);
 const dir = '$VERIFY_TMP/node_modules/$PLATFORM_PKG';
 fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: '$PLATFORM_PKG', version: '0.0.0' }));
 const ext = process.platform === 'win32' ? '.exe' : '';
-for (const base of ['fallow']) {
+for (const base of ['fallow', 'fallow-similar-code']) {
   const bin = path.join(dir, base + ext);
   const data = Buffer.from('mock ' + base);
   fs.writeFileSync(bin, data);

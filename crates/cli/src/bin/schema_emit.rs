@@ -64,6 +64,9 @@ use fallow_output::{
     SecuritySurvivorsSummary, SecurityUnresolvedCalleeDiagnostics,
     SecurityUnresolvedCalleeReasonCount, SecurityUnresolvedCalleeSample,
     SecurityUnresolvedCalleeTopFile, SecurityVerifierVerdict, SecurityVerifierVerdictStatus,
+    SimilarCodeCacheClearOutput, SimilarCodeCacheClearSchemaVersion, SimilarCodeInspectOutput,
+    SimilarCodeOutput, SimilarCodeReviewOutput, SimilarCodeStatusOutput,
+    SimilarCodeStatusSchemaVersion, SimilarCodeVerdictInput,
     StandardReviewBriefOutput as ReviewBriefOutput, StandardWalkthroughGuide as WalkthroughGuide,
     SuppressionInventoryEntry, SuppressionInventoryFile, SuppressionInventoryLevel,
     SuppressionInventoryOrigin, SuppressionInventoryOutput, SuppressionInventorySchemaVersion,
@@ -517,6 +520,50 @@ const DERIVED_DEFINITION_NAMES: &[&str] = &[
     "SuppressionInventoryEntry",
     "SuppressionInventoryLevel",
     "SuppressionInventoryOrigin",
+    "SimilarCodeOutput",
+    "SimilarCodeInspectOutput",
+    "SimilarCodeReviewOutput",
+    "SimilarCodeStatusOutput",
+    "SimilarCodeCacheClearOutput",
+    "SimilarCodeVerdictInput",
+    "SimilarCodeSchemaVersion",
+    "SimilarCodeInspectSchemaVersion",
+    "SimilarCodeReviewSchemaVersion",
+    "SimilarCodeVerdictSchemaVersion",
+    "SimilarCodeGeneration",
+    "SimilarCodeProviderProvenance",
+    "SimilarCodeProvider",
+    "SimilarCodeModelProvenance",
+    "SimilarCodeGenerationParameters",
+    "SimilarCodeCandidate",
+    "SimilarCodeLocation",
+    "SimilarCodeSimilarityBand",
+    "SimilarCodeVerificationStatus",
+    "SimilarCodeEnrichmentAvailability",
+    "SimilarCodeEnrichmentState",
+    "SimilarCodeAction",
+    "SimilarCodeActionType",
+    "SimilarCodeCompletion",
+    "SimilarCodeCompletionStatus",
+    "SimilarCodePhaseCompletion",
+    "SimilarCodePhase",
+    "SimilarCodePhaseStatus",
+    "SimilarCodeLimits",
+    "SimilarCodeSkip",
+    "SimilarCodeSkipReason",
+    "SimilarCodeCacheSummary",
+    "SimilarCodeCacheStatus",
+    "SimilarCodeDiagnostic",
+    "SimilarCodeDiagnosticDomain",
+    "SimilarCodeInspectPacket",
+    "SimilarCodeSideEvidence",
+    "SimilarCodeSideEffectHint",
+    "SimilarCodeNamedReference",
+    "SimilarCodeVerdict",
+    "SimilarCodeDomainOutcome",
+    "SimilarCodeVerdictMatch",
+    "SimilarCodeReviewedCandidate",
+    "SimilarCodeReviewProvenance",
 ];
 
 pub(crate) fn derived_definition_names() -> &'static [&'static str] {
@@ -571,6 +618,7 @@ fn derived_definitions() -> Map<String, Value> {
     register_impact_definitions(&mut generator);
     register_security_definitions(&mut generator);
     register_suppression_inventory_definitions(&mut generator);
+    register_similar_code_definitions(&mut generator);
     let _ = generator.subschema_for::<FallowOutput>();
     register_list_boundaries_definitions(&mut generator);
     register_health_action_definitions(&mut generator);
@@ -841,6 +889,18 @@ fn register_suppression_inventory_definitions(generator: &mut schemars::SchemaGe
     let _ = generator.subschema_for::<SuppressionKindCount>();
     let _ = generator.subschema_for::<SuppressionInventorySummary>();
     let _ = generator.subschema_for::<SuppressionInventoryOutput>();
+}
+
+/// Register the independent similar-code candidate, inspect, and review contracts.
+fn register_similar_code_definitions(generator: &mut schemars::SchemaGenerator) {
+    let _ = generator.subschema_for::<SimilarCodeOutput>();
+    let _ = generator.subschema_for::<SimilarCodeInspectOutput>();
+    let _ = generator.subschema_for::<SimilarCodeReviewOutput>();
+    let _ = generator.subschema_for::<SimilarCodeVerdictInput>();
+    let _ = generator.subschema_for::<SimilarCodeStatusOutput>();
+    let _ = generator.subschema_for::<SimilarCodeStatusSchemaVersion>();
+    let _ = generator.subschema_for::<SimilarCodeCacheClearOutput>();
+    let _ = generator.subschema_for::<SimilarCodeCacheClearSchemaVersion>();
 }
 
 fn register_health_action_definitions(generator: &mut schemars::SchemaGenerator) {
@@ -1178,6 +1238,21 @@ const FALLOW_OUTPUT_VARIANTS: &[(&str, &[&str], &str)] = &[
         "type-aware-status",
         &["TypeAwareStatusOutput"],
         "`fallow type-aware status --format json`. Companion discovery and\nprotocol compatibility without exposing an absolute host path.",
+    ),
+    (
+        "similar-code",
+        &["SimilarCodeOutput"],
+        "`fallow similar-code --format json`. Independently versioned, local-only\nunverified semantic candidates with reproducible generation provenance and\ntyped completion accounting.",
+    ),
+    (
+        "similar-code-inspect",
+        &["SimilarCodeInspectOutput"],
+        "`fallow similar-code inspect --format json`. Bounded source-grounded\npacket for one immutable candidate. Read-only and independently versioned.",
+    ),
+    (
+        "similar-code-review",
+        &["SimilarCodeReviewOutput"],
+        "`fallow similar-code review --format json`. Deterministically joins raw\ncandidates with a separate verdict document without mutating candidate truth.",
     ),
 ];
 
@@ -1629,6 +1704,11 @@ mod drift_tests {
             ("WalkthroughValidation", "WalkthroughValidation"),
             ("SuppressionInventory", "SuppressionInventoryOutput"),
             ("TypeAwareStatus", "TypeAwareStatusOutput"),
+            ("SimilarCode", "SimilarCodeOutput"),
+            ("SimilarCodeInspect", "SimilarCodeInspectOutput"),
+            ("SimilarCodeReview", "SimilarCodeReviewOutput"),
+            ("SimilarCodeStatus", "SimilarCodeStatusOutput"),
+            ("SimilarCodeCacheClear", "SimilarCodeCacheClearOutput"),
         ];
 
         #[expect(
@@ -1665,6 +1745,11 @@ mod drift_tests {
                 FallowOutput::WalkthroughValidation(_) => "WalkthroughValidation",
                 FallowOutput::SuppressionInventory(_) => "SuppressionInventory",
                 FallowOutput::TypeAwareStatus(_) => "TypeAwareStatus",
+                FallowOutput::SimilarCode(_) => "SimilarCode",
+                FallowOutput::SimilarCodeInspect(_) => "SimilarCodeInspect",
+                FallowOutput::SimilarCodeReview(_) => "SimilarCodeReview",
+                FallowOutput::SimilarCodeStatus(_) => "SimilarCodeStatus",
+                FallowOutput::SimilarCodeCacheClear(_) => "SimilarCodeCacheClear",
             }
         }
 

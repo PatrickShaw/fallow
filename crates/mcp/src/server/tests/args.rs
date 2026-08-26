@@ -2,10 +2,11 @@ use crate::params::*;
 use crate::tools::{
     ISSUE_TYPE_FLAGS, VALID_DUPES_MODES, build_analyze_args, build_audit_args,
     build_check_changed_args, build_check_runtime_coverage_args, build_explain_args,
-    build_feature_flags_args, build_find_dupes_args, build_fix_apply_args, build_fix_preview_args,
-    build_get_blast_radius_args, build_get_cleanup_candidates_args, build_get_hot_paths_args,
-    build_get_importance_args, build_get_token_blast_radius_args, build_guard_args,
-    build_health_args, build_impact_all_args, build_impact_args, build_impact_closure_args,
+    build_feature_flags_args, build_find_dupes_args, build_find_similar_code_args,
+    build_fix_apply_args, build_fix_preview_args, build_get_blast_radius_args,
+    build_get_cleanup_candidates_args, build_get_hot_paths_args, build_get_importance_args,
+    build_get_token_blast_radius_args, build_guard_args, build_health_args, build_impact_all_args,
+    build_impact_args, build_impact_closure_args, build_inspect_similar_code_args,
     build_list_boundaries_args, build_list_suppressions_args, build_project_info_args,
     build_security_candidates_args, build_trace_clone_args, build_trace_dependency_args,
     build_trace_export_args, build_trace_file_args,
@@ -532,6 +533,176 @@ fn security_candidates_args_do_not_expose_ci_or_write_surfaces() {
             "security_candidates must not emit {forbidden}, got {args:?}"
         );
     }
+}
+
+#[test]
+fn find_similar_code_args_minimal() {
+    let args = build_find_similar_code_args(&FindSimilarCodeParams::default()).unwrap();
+    assert_eq!(args, ["similar-code", "--format", "json", "--quiet"]);
+}
+
+#[test]
+fn find_similar_code_args_include_bounded_scope() {
+    let params = FindSimilarCodeParams {
+        root: Some("/repo".to_owned()),
+        changed_since: Some("origin/main".to_owned()),
+        paths: Some(vec!["src/a.ts".to_owned(), "src/b.ts".to_owned()]),
+        threshold: Some(0.91),
+        min_lines: Some(5),
+        top: Some(20),
+        ..Default::default()
+    };
+    let args = build_find_similar_code_args(&params).unwrap();
+    assert_eq!(
+        args,
+        [
+            "similar-code",
+            "--format",
+            "json",
+            "--quiet",
+            "--root",
+            "/repo",
+            "--changed-since",
+            "origin/main",
+            "--file",
+            "src/a.ts",
+            "--file",
+            "src/b.ts",
+            "--threshold",
+            "0.91",
+            "--min-lines",
+            "5",
+            "--top",
+            "20",
+        ]
+    );
+}
+
+#[test]
+fn find_similar_code_rejects_invalid_threshold() {
+    let params = FindSimilarCodeParams {
+        threshold: Some(1.1),
+        ..Default::default()
+    };
+    let error = build_find_similar_code_args(&params).unwrap_err();
+    assert!(parse_validation_message(&error).contains("threshold"));
+}
+
+#[test]
+fn inspect_similar_code_requires_and_forwards_candidate_id() {
+    let params: InspectSimilarCodeParams = serde_json::from_value(serde_json::json!({
+        "candidate_id": "sc_abc123",
+        "root": "/repo",
+        "snapshot": similar_code_snapshot_json("sc_abc123"),
+    }))
+    .unwrap();
+    let args = build_inspect_similar_code_args(&params).unwrap();
+    assert_eq!(
+        args,
+        [
+            "similar-code",
+            "--format",
+            "json",
+            "--quiet",
+            "--root",
+            "/repo",
+            "inspect",
+            "sc_abc123",
+            "--candidate-snapshot-stdin",
+        ]
+    );
+}
+
+fn similar_code_snapshot_json(candidate_id: &str) -> serde_json::Value {
+    let location = |path: &str| {
+        serde_json::json!({
+            "path": path,
+            "name": "candidate",
+            "start_line": 1,
+            "start_column": 1,
+            "end_line": 3,
+            "end_column": 2,
+            "source_sha256": "00".repeat(32),
+        })
+    };
+    serde_json::json!({
+        "schema_version": "1",
+        "generation": {
+            "extraction_semantics_version": 1,
+            "embedding_semantics_version": 1,
+            "provider": {
+                "provider": "official-local-companion",
+                "companion_version": "3.18.0",
+                "protocol_version": 2,
+                "source_left_machine": false,
+            },
+            "model": {
+                "model_id": "model",
+                "revision": "revision",
+                "artifact_sha256": "digest",
+                "license": "Apache-2.0",
+                "dimensions": 768,
+            },
+            "parameters": {
+                "dtype": "f32",
+                "pooling": "mean",
+                "normalized": true,
+                "batch_size": 1,
+                "max_tokens": 1024,
+                "parameter_sha256": "parameters",
+            },
+            "scope": { "active": false, "paths": [] },
+            "threshold": 0.8,
+            "min_lines": 3,
+        },
+        "candidate": {
+            "candidate_id": candidate_id,
+            "review_key": "review-key",
+            "left": location("src/a.ts"),
+            "right": location("src/b.ts"),
+            "similarity": 0.9,
+            "similarity_band": "high",
+            "verification_status": "unverified",
+            "enrichment": {
+                "graph_relationship": "not-requested",
+                "entry_point_reachability": "not-requested",
+                "callers": "not-requested",
+                "callees": "not-requested",
+                "ownership": "not-requested",
+                "churn": "not-requested",
+                "tests": "not-requested",
+                "deterministic_clone_coverage": "not-requested",
+                "runtime": "not-requested",
+            },
+            "actions": [],
+        },
+        "completion": {
+            "status": "complete",
+            "phases": [],
+            "limits": {
+                "max_files": 1,
+                "max_functions": 2,
+                "max_source_bytes": 1,
+                "max_function_bytes": 1,
+                "max_batch_size": 1,
+                "max_vector_bytes": 1,
+                "max_comparisons": 1,
+                "max_candidates": 1,
+                "max_neighbors_per_function": 1,
+                "timeout_ms": 1,
+            },
+            "skips": [],
+            "cache": {
+                "status": "disabled",
+                "hits": 0,
+                "misses": 0,
+                "writes": 0,
+                "invalid_entries": 0,
+            },
+            "provider_inference_ms": 0,
+        },
+        "diagnostics": [],
+    })
 }
 
 #[test]

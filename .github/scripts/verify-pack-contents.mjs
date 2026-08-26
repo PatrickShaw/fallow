@@ -23,6 +23,9 @@
 // check alone would pass a package that dropped the `.sig` entries from BOTH
 // `files` and disk (self-consistent but unsigned), which is the more likely
 // FUTURE regression; this invariant guards the load-bearing property directly.
+// Similar-code platform packages also carry exactly one embedded SHA-256 digest.
+// The gate recomputes it from the binary bytes inside the tarball, so packaging
+// cannot publish a sidecar that every runtime loader will reject.
 //
 // Usage:
 //   node verify-pack-contents.mjs <tarball.tgz> [<tarball.tgz> ...]
@@ -31,6 +34,7 @@
 // No external dependencies: uses node:child_process to drive the system `tar`.
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 // A `files` entry that contains any of these is a glob/negation pattern. npm
@@ -41,6 +45,10 @@ const GLOB_CHARS = /[*?[\]{}!]/;
 // Files a `@fallow-cli/<platform>` package ships that are NOT signed binaries,
 // so they have no `.sig` sibling. Matched case-insensitively at the top level.
 const PLATFORM_METADATA = /^(package\.json|readme|licen[sc]e)/i;
+const SIMILAR_CODE_PLATFORM_PACKAGE = /^@fallow-cli\/fallow-similar-code-.+$/;
+const SIMILAR_CODE_BINARIES = ["fallow-similar-code", "fallow-similar-code.exe"];
+const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const MAX_PACKED_BINARY_BYTES = 256 * 1024 * 1024;
 
 // True for the signed CLI platform packages (`@fallow-cli/linux-x64-gnu`, ...),
 // false for the `fallow` wrapper and the NAPI packages (`@fallow-cli/fallow-node*`),
@@ -108,9 +116,52 @@ function listTarballEntries(tgzPath) {
   return entries;
 }
 
+function readFileFromTarball(tgzPath, entry) {
+  return execFileSync("tar", ["-xzO", "-f", tgzPath, `package/${entry}`], {
+    maxBuffer: MAX_PACKED_BINARY_BYTES,
+  });
+}
+
+function similarCodeDigestErrors(tgzPath, manifest, entries, name) {
+  if (!SIMILAR_CODE_PLATFORM_PACKAGE.test(name)) {
+    return [];
+  }
+
+  const packagedBinaries = SIMILAR_CODE_BINARIES.filter((binary) => entries.has(binary));
+  if (packagedBinaries.length !== 1) {
+    return ["package must contain exactly one fallow-similar-code platform binary"];
+  }
+
+  const binary = packagedBinaries[0];
+  const digests = manifest.fallowDigests;
+  if (
+    digests === null ||
+    typeof digests !== "object" ||
+    Array.isArray(digests) ||
+    Object.keys(digests).length !== 1 ||
+    !Object.hasOwn(digests, binary)
+  ) {
+    return [`package.json must contain exactly one fallowDigests entry for ${binary}`];
+  }
+
+  const expected = digests[binary];
+  if (typeof expected !== "string" || !SHA256_DIGEST.test(expected)) {
+    return [`fallowDigests.${binary} must match sha256:<64 lowercase hex>`];
+  }
+
+  const actual = createHash("sha256").update(readFileFromTarball(tgzPath, binary)).digest("hex");
+  if (expected !== `sha256:${actual}`) {
+    return [`fallowDigests.${binary} does not match the packaged binary`];
+  }
+
+  return [];
+}
+
 // Verify a single tarball against its own `files` whitelist and, for CLI
-// platform packages, the every-binary-is-signed invariant.
-// Returns { ok, name, version, checked, missing, skipped, missingSignatures }.
+// platform packages, the every-binary-is-signed invariant. Similar-code
+// platform packages additionally pin the exact packed binary by SHA-256.
+// Returns { ok, name, version, checked, missing, skipped, missingSignatures,
+// digestErrors }.
 export function verifyTarball(tgzPath) {
   const manifest = readManifestFromTarball(tgzPath);
   const declared = Array.isArray(manifest.files) ? manifest.files : [];
@@ -140,15 +191,17 @@ export function verifyTarball(tgzPath) {
   }
 
   const missingSignatures = missingSignatureSiblings(name, entries);
+  const digestErrors = similarCodeDigestErrors(tgzPath, manifest, entries, name);
 
   return {
-    ok: missing.length === 0 && missingSignatures.length === 0,
+    ok: missing.length === 0 && missingSignatures.length === 0 && digestErrors.length === 0,
     name,
     version: typeof manifest.version === "string" ? manifest.version : "<unknown>",
     checked,
     missing,
     skipped,
     missingSignatures,
+    digestErrors,
   };
 }
 
@@ -184,6 +237,11 @@ function main(argv) {
     if (result.missingSignatures.length > 0) {
       console.error(
         `::error::${result.name}@${result.version} (${tgz}) ships an unsigned binary: missing ${result.missingSignatures.join(", ")}`,
+      );
+    }
+    if (result.digestErrors.length > 0) {
+      console.error(
+        `::error::${result.name}@${result.version} (${tgz}) has an invalid embedded binary digest: ${result.digestErrors.join(", ")}`,
       );
     }
   }

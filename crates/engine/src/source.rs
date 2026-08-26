@@ -7,6 +7,28 @@ pub use fallow_types::extract::{ModuleInfo, ParseResult, SourceReadFailure};
 
 type CacheStore = fallow_extract::cache::CacheStore;
 
+/// On-demand, transient function extraction for local similar-code inference.
+pub mod similar_code {
+    use std::path::Path;
+
+    pub use fallow_types::similar_code::{
+        ExtractedSimilarCodeFunction, SIMILAR_CODE_EXTRACTION_SEMANTICS_VERSION,
+        SimilarCodeExtraction, SimilarCodeExtractionLimits, SimilarCodeExtractionSkip,
+        SimilarCodeExtractionSkipReason, SimilarCodeFunctionKind, SimilarCodeFunctionLocation,
+        SimilarCodeSideEffectHint, SimilarCodeSourceDigest,
+    };
+
+    /// Extract bounded named functions without touching the normal parse cache.
+    #[must_use]
+    pub fn extract(
+        path: &Path,
+        source: &str,
+        limits: SimilarCodeExtractionLimits,
+    ) -> SimilarCodeExtraction {
+        fallow_extract::extract_similar_code_functions(path, source, limits)
+    }
+}
+
 /// Source inventory walking for coverage and upload surfaces.
 pub mod inventory {
     use std::path::Path;

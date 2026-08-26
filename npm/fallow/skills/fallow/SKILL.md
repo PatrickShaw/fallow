@@ -1,6 +1,6 @@
 ---
 name: fallow
-description: Codebase intelligence for TypeScript and JavaScript. Static analysis of code and styles reports changed-code risk, cleanup opportunities, duplication, circular dependencies, complexity hotspots, architecture boundaries, design-system drift, feature flags, and opt-in security candidates. Runtime coverage can merge production execution data for hot-path review, cold-path deletion confidence, and stale-flag evidence. Broad framework plugin coverage, zero configuration, sub-second static analysis. Use when asked to audit PR risk, find unused code or dependencies, detect duplicates, check styling consistency, inspect architecture boundaries, merge runtime coverage, auto-fix supported issues, or run fallow.
+description: Codebase intelligence for TypeScript and JavaScript. Static analysis reports changed-code risk, cleanup opportunities, duplication, circular dependencies, complexity hotspots, architecture boundaries, design-system drift, feature flags, and opt-in security candidates. Optional local similar-code discovery finds functions that may implement the same intent despite different syntax. Runtime coverage can merge production execution data. Use when asked to audit PR risk, find unused code or dependencies, compare semantically similar functions, detect duplicates, inspect architecture boundaries, merge runtime coverage, auto-fix supported issues, or run fallow.
 license: MIT
 ---
 
@@ -11,6 +11,7 @@ Codebase intelligence for TypeScript and JavaScript. The static layer analyzes c
 ## When to Use
 - Find cleanup opportunities: unused files, exports, types, members, dependencies, or stale flags.
 - Detect code duplication, circular dependencies, architecture boundary issues, and complexity hotspots.
+- Find functions that may implement the same intent despite different names, syntax, or control flow (`fallow similar-code`).
 - Check styling consistency, CSS dead surface, and design-token drift.
 - Audit changed code before a commit, PR, release, or refactor.
 - Set up CI quality gates, duplication thresholds, and regression baselines.
@@ -31,7 +32,6 @@ Codebase intelligence for TypeScript and JavaScript. The static layer analyzes c
 - Projects that are not JavaScript or TypeScript
 
 ## Prerequisites
-
 Fallow must be installed. If not available, install it:
 
 ```bash
@@ -41,7 +41,6 @@ cargo install fallow-cli   # build from source
 ```
 
 ## Agent Rules
-
 1. **Always use `--format json --quiet`** for machine-readable output and parse stdout as JSON. Compact JSON is the default; never depend on whitespace or add `--pretty` in agent pipelines. Keep stderr separate so diagnostics remain visible; never merge it into the JSON stream with `2>&1`.
 2. **Preserve and interpret the exit status.** Codes 0 and 1 are successful analysis outcomes: 0 is clean and 1 means findings. Treat every other code according to `fallow schema.exit_codes`. Do not force a successful status, because that hides validation, license, setup, network, and security-gate outcomes.
 3. **Use `--explain`** to include a `_meta` object in JSON output with metric definitions, ranges, and interpretation hints. In human format, `--explain` prints a `Description:` line under each section header.
@@ -55,7 +54,8 @@ cargo install fallow-cli   # build from source
 11. **Never enable telemetry on the user's behalf**. Fallow's product telemetry is opt-in and off by default; only the user may run `fallow telemetry enable`. You MAY set `FALLOW_AGENT_SOURCE=<allowlisted-value>` (for example `claude_code`, `codex`, `cursor`, `windsurf`, `gemini`, `cline`) so that, IF the user has already enabled telemetry, your integration is correctly attributed. Setting `FALLOW_AGENT_SOURCE` never enables telemetry by itself and uploads no codebase content.
 12. **Use type-aware analysis only for Fallow-owned project questions**. Reach for `--type-aware` to prove exact symbol use, preserve TypeScript class contracts, guard class-member cleanup, find cross-file private type leaks, suggest targeted tests, or inspect public-signature coupling. Keep `tsc --noEmit` responsible for compiler correctness and Oxlint responsible for local typed lint rules. Treat partial or unavailable semantic results as retained findings, never as deletion proof. Unknown external consumers of a published library remain outside checker-visible evidence, so preserve declared public API unless every relevant consumer project is explicitly in scope.
 13. **Use `fallow impact statusline` only for a user-facing status surface**. It intentionally emits one plain-text, path-free line and ignores `--format`. It starts no analysis, never enables Impact, and compares only whole-project scans. Do not parse this line as JSON.
-14. **Treat similar-code output as discovery only**. Never describe its score as a probability, finding, proof of equivalent behavior, or safe-refactor decision. Ask the user to run `fallow similar-code setup --local` when the pinned model is missing. Agents must not authorize setup. Inspect a candidate before judging it, keep `candidate_worthy`, `behaviorally_equivalent`, and `refactor_safe` separate, and abstain when evidence is incomplete.
+14. **Treat similar-code output as discovery only**. Never describe its score as a probability, finding, proof of equivalent behavior, or safe-refactor decision. Agents must not authorize setup. Inspect a candidate before judging it: save discovery as `similar-code.json`, inspect with `--candidates similar-code.json`, and pass the unchanged file to `fallow similar-code review`. Over MCP use `find_similar_code` with `paths:` and `inspect_similar_code` with a typed `snapshot`; it fails closed on stale source. Keep `candidate_worthy`, `behaviorally_equivalent`, and `refactor_safe` separate, use `needs-human-review`, and abstain when evidence is incomplete. Only `completion.status: "complete"` makes an empty result conclusive. Follow [the complete workflow to compare semantically similar functions](references/similar-code.md).
+
 ## Onboarding And Insight
 Offer setup only after a human-requested analysis shows findings and all signals match: `fallow config --path` exits 3, not CI, not a pipeline format, `fallow impact --format json --quiet` has `onboarding_declined: false`, and no offer happened this session. Ask after showing value. Choices: guard commits and PRs, baseline the existing backlog and clean by category, add AGENTS.md guidance, or keep as-is. On decline, run `fallow init --decline --quiet` and stay silent for this project. Mutate only after consent. For guards, inspect `fallow hooks status --format json --quiet`, then use `fallow hooks install --target agent` and `fallow hooks install --target git`; for large backlogs, pair the gate with `--save-baseline` / new-only guidance. Offer `fallow impact enable` as local-only value tracking, never as telemetry; also offer it once on already-configured projects when `fallow impact status --format json` has `enabled: false` and `explicit_decision: false`, and record a no with `fallow impact disable --quiet`. Surface value on clear events: if the agent gate blocked a commit or push and a later retry succeeded, mention what was contained; when `next_steps` carries id `impact-report`, run its command and relay the non-zero numbers to the user in one line. On request, summarize non-zero Impact counts. Ask about telemetry only after such a win, only if `fallow telemetry status --format json` has `explicit_decision: false`, and never run `fallow telemetry enable`.
 ## Task Cheat Sheet
@@ -80,7 +80,6 @@ Route by intent before reaching for the big analysis commands. Same matrix as `f
 <!-- generated:task-matrix:end -->
 
 ## Commands
-
 <!-- generated:commands:start -->
 | Command | Purpose | Key Flags |
 |---|---|---|
@@ -94,6 +93,7 @@ Route by intent before reaching for the big analysis commands. Same matrix as `f
 | `fix` | Auto-remove unused exports/deps | `--dry-run`, `--yes` (required in non-TTY) |
 | `init` | Generate config file, AGENTS.md agent guide, or pre-commit hook | `--toml`, `--agents`, `--hooks`, `--branch` |
 | `hooks` | Inspect, install, or remove fallow-managed Git and agent hooks | `status`, `install --target git`, `install --target agent`, `uninstall --target git`, `uninstall --target agent` |
+| `agent` | Wire fallow into Claude Code, Codex, or Cursor in one pass: AGENTS.md task map, skill, MCP server, commit/push gate; `status` and `uninstall` cover the same surfaces | `install --harness auto\|claude\|codex\|cursor`, `install --dry-run`, `install --approve`, `install --without <guide\|skill\|mcp\|hooks>`, `status`, `uninstall` |
 | `ci` | CI helpers for PR/MR feedback envelopes |  |
 | `ci reconcile-review` | Resolve stale review threads on a PR/MR by joining a typed review envelope (`--format review-github` / `review-gitlab`) against the provider's existing comments + threads. Posts an idempotent "Resolved in `<sha>`" follow-up per stale fingerprint, marker keyed on (fingerprint, short-sha) so re-runs on the same commit don't duplicate. Provider mutations are fail-fast; JSON can include `apply_hint`, `failed_fingerprints`, and `unapplied_fingerprints` when `apply_errors` is non-empty. | `--provider`, `--pr` (GH) / `--mr` (GL), `--repo` / `--project-id`, `--api-url`, `--envelope`, `--dry-run` |
 | `config-schema` | Print the JSON Schema for fallow configuration files |  |
@@ -124,14 +124,13 @@ Route by intent before reaching for the big analysis commands. Same matrix as `f
 | `telemetry` | Manage opt-in, off-by-default product telemetry (never collects code, paths, or names). Agents must not enable it; only the user may | `status`, `enable`, `disable`, `inspect --example` |
 | `coverage` | Runtime coverage setup, focused analysis, and cloud inventory workflow helper | `setup`, `setup --yes`, `setup --non-interactive`, `analyze --runtime-coverage <path>`, `analyze --cloud --repo owner/repo`, `upload-inventory` |
 | `coverage upload-source-maps` | Upload build source maps from CI so bundled runtime coverage resolves to original source paths. Retries 429 `Retry-After` and transient gateway failures. Use `FALLOW_CA_BUNDLE` for complete custom PEM trust bundles. | `--dir dist`, `--git-sha <sha>`, `--repo <name>`, `--strip-path=false`, `--dry-run` |
-| `setup-hooks` | Install or remove a Claude Code PreToolUse hook that gates `git commit` / `git push` on `fallow audit`, so the agent cleans findings before the command runs | `--agent`, `--dry-run`, `--force`, `--user`, `--gitignore-claude`, `--uninstall` |
+| `setup-hooks` | Deprecated (removed in the next major): use `agent install` or `hooks install --target agent`; still installs the Claude Code PreToolUse gate with a stderr warning | `--agent`, `--dry-run`, `--force`, `--user`, `--gitignore-claude`, `--uninstall` |
 | `viz` | Render the codebase as a self-contained interactive HTML map (treemap + import graph, four lenses: dead code, duplication, boundaries, complexity, with click-through detail panels), or emit the import graph as text. Read-only. | `--out <path>`, `--no-open`, `--viz-format html\|dot\|mermaid`, `--root`, `--config`, `--production`, `--no-cache` |
 
 Run `fallow <command> --help` for the full flag list per command (see also references/cli-reference.md).
 <!-- generated:commands:end -->
 
 ## Issue Types
-
 <!-- generated:issue-types:start -->
 | Type | Filter flag | Fixable | Suppress comment | Description |
 |---|---|---|---|---|
@@ -206,13 +205,16 @@ Runtime-coverage verdicts and the full security sink catalogue are listed by `fa
 
 Fallow ships an MCP server (`fallow-mcp`) that exposes these same analyses as agent tools. When the server is connected, its tools are already in your context with typed params and structured JSON returns, and each maps to a CLI fallback command. Prefer them when you want JSON without shelling out, or `code_execute` (Code Mode) to compose several read-only analyses in one sandboxed snippet (no single-call CLI equivalent). Otherwise use the CLI.
 
-Full tool catalogue, key params, runtime source-map confidence tiers, shared timeouts, and the `next_steps` dispatch mapping: **[references/mcp.md](references/mcp.md)**.
+The server also serves read-only reference resources (no subprocess, no analysis run, cacheable by URI; your client reads them through its own resource tool): `fallow://tools`, `fallow://issue-types`, `fallow://explain/{issue_type}`, `fallow://task-matrix`, and the config, plugin, and rule-pack JSON Schemas. Every payload is JSON and carries `fallow_version`.
+
+Full tool catalogue, resource catalogue, key params, runtime source-map confidence tiers, shared timeouts, and the `next_steps` dispatch mapping: **[references/mcp.md](references/mcp.md)**.
 
 ## References
 - [CLI Reference](references/cli-reference.md): complete command and flag specifications, plus configuration field details
-- [MCP Tools](references/mcp.md): MCP server tool catalogue, CLI fallbacks, params, and agent dispatch guidance
+- [MCP Tools](references/mcp.md): MCP server tool and resource catalogues, CLI fallbacks, params, and agent dispatch guidance
 - [Gotchas](references/gotchas.md): common pitfalls, edge cases, and correct usage patterns
 - [Patterns](references/patterns.md): workflow recipes for CI, monorepos, migration, and incremental adoption
+- [Similar Code](references/similar-code.md): snapshot-stable discovery, inspection, and verdict workflow
 - [Node Bindings](references/node-bindings.md): embed the analysis engine in a Node.js process via NAPI
 
 ## Common Workflows

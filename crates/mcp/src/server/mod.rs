@@ -1,6 +1,11 @@
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, ListResourceTemplatesResult, ListResourcesResult,
+    PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_router};
 
 use crate::params::{
@@ -74,7 +79,7 @@ fn resolve_binary() -> String {
 )]
 #[tool_router]
 impl FallowMcp {
-    /// Execute a bounded, read-only JavaScript Code Mode snippet against fallow's MCP host API. `code` must be a JavaScript function expression or function body that receives `{ fallow, root }` and returns a JSON-serializable value. The embedded sandbox exposes only a typed `fallow` object with read-only analysis calls: analyze, combined, checkChanged, securityCandidates, findSimilarCode, inspectSimilarCode, findDupes, projectInfo, traceExport, traceFile, impactClosure, traceDependency, traceClone, checkHealth, audit, explain, listBoundaries, featureFlags, impact, checkRuntimeCoverage, getHotPaths, getBlastRadius, getImportance, getCleanupCandidates, plus `fallow.run(tool, params)` for the same allowlist. Mutating fix tools are intentionally not exposed. The sandbox has no filesystem, network, imports, eval, Function, process, require, Deno, Bun, or shell access. `root` is injected into host calls that omit params.root. `timeout_ms` caps JS execution and subprocess-backed host calls. In Code Mode, analyze, findSimilarCode, inspectSimilarCode, findDupes, checkHealth, and audit stay subprocess-backed and are killed on timeout. API-backed host calls use `timeout_ms` as a response deadline; in-process analysis may finish after a timeout response. `max_output_bytes` caps total fallow JSON read by host calls.
+    /// Execute a bounded, read-only JavaScript Code Mode snippet against fallow's MCP host API. `code` must be a JavaScript function expression or function body that receives `{ fallow, root }` and returns a JSON-serializable value. The embedded sandbox exposes only a typed `fallow` object with read-only analysis calls: analyze, combined, checkChanged, securityCandidates, findDupes, projectInfo, traceExport, traceFile, impactClosure, traceDependency, traceClone, checkHealth, audit, explain, listBoundaries, featureFlags, impact, checkRuntimeCoverage, getHotPaths, getBlastRadius, getImportance, getCleanupCandidates, plus `fallow.run(tool, params)` for the same allowlist. Similar-code is intentionally excluded because Code Mode is capped at 30 seconds; use the standalone find_similar_code and inspect_similar_code MCP tools, which have dedicated 15-minute timeouts. Mutating fix tools are intentionally not exposed. The sandbox has no filesystem, network, imports, eval, Function, process, require, Deno, Bun, or shell access. `root` is injected into host calls that omit params.root. `timeout_ms` caps JS execution and subprocess-backed host calls. In Code Mode, analyze, findDupes, checkHealth, and audit stay subprocess-backed and are killed on timeout. API-backed host calls use `timeout_ms` as a response deadline; in-process analysis may finish after a timeout response. `max_output_bytes` caps total fallow JSON read by host calls.
     #[tool(annotations(read_only_hint = true, open_world_hint = true))]
     async fn code_execute(
         &self,
@@ -128,7 +133,7 @@ impl FallowMcp {
         run_find_similar_code(&self.binary, params.0).await
     }
 
-    /// Reproduce one unverified candidate from find_similar_code and return a bounded source-grounded evidence packet. The packet includes both source windows, syntactic behavior hints, and available Fallow context such as graph relationships, reachability, callers/callees, ownership, churn, tests, and deterministic clone overlap. Missing evidence is represented explicitly, never inferred. This remains read-only and never declares behavioral equivalence or refactor safety. Pass the exact candidate_id and the same discovery scope/options used for the original run.
+    /// Inspect one exact unverified candidate from find_similar_code without rerunning provider retrieval or global ranking. Pass candidate_id plus a bounded snapshot containing the unchanged discovery schema_version, generation, selected candidate, completion, and diagnostics fields. Current source is re-extracted and both source_sha256 values must still match before bounded source windows, syntactic behavior hints, graph relationships, reachability, callers/callees, ownership, churn, tests, and deterministic clone overlap are returned. Stale source fails closed. Missing evidence is represented explicitly, never inferred. This remains read-only and never declares behavioral equivalence or refactor safety.
     #[tool(annotations(read_only_hint = true, open_world_hint = true))]
     async fn inspect_similar_code(
         &self,
@@ -279,7 +284,7 @@ impl FallowMcp {
         run_decision_surface(&self.binary, params.0).await
     }
 
-    /// Explain one fallow issue type without running analysis. Returns the rule id, name, rationale, worked example, fix guidance, and docs URL as JSON. Use this before applying fixes when an agent or reviewer needs to understand what a finding means.
+    /// Explain one fallow issue type without running analysis. Returns the rule id, name, rationale, worked example, fix guidance, and docs URL as JSON. Use this before applying fixes when an agent or reviewer needs to understand what a finding means. If your client exposes MCP resources, `fallow://explain/{issue_type}` serves the same document as a cacheable resource read.
     #[tool(annotations(read_only_hint = true, open_world_hint = false))]
     async fn fallow_explain(
         &self,
@@ -375,7 +380,7 @@ impl FallowMcp {
         run_get_cleanup_candidates(&self.binary, params.0).await
     }
 
-    /// Return design-token blast radius from static analysis. Runs `fallow health --css --format json`; agents should read `css_analytics.token_consumers`, a reverse index keyed by each token of its defining site plus a `consumer_count` and a capped located `consumers[]` sample of `{path,line,kind}`. Covers TWO token origins, disambiguated by the consumer `kind`: Tailwind v4 `@theme` tokens (`token` is the `--`-prefixed custom property like `--color-brand`; `kind` in `theme-var` / `css-var` / `utility` / `apply`) AND CSS-in-JS token definitions (StyleX `defineVars`, vanilla-extract `createTheme` / `createThemeContract` / `createGlobalTheme`; `token` is the binding-qualified dotted access path like `vars.color.primary`, `namespace` is the defining binding, `kind` is `js-member`). The index is empty or absent on projects using neither. `consumer_count` is a static lower bound (a computed class name like `bg-${c}`, or a CSS-in-JS access through a path-aliased / bare-package import the relative-import resolver does not follow, is not counted), so it is descriptive context for sizing a token change, not a deletion gate. For Tailwind a `consumer_count` of 0 mirrors the unused-theme-token population (the dead-token verdict stays on `unused_theme_tokens` via check_health); CSS-in-JS tokens have no corroborating dead-token finding, so treat a CSS-in-JS 0 as weaker. Use this tool to scope the impact of editing or renaming a token, not to decide deletion.
+    /// Return design-token blast radius from static analysis. Runs `fallow health --css --format json`; agents should read `css_analytics.token_consumers`, a reverse index keyed by each token of its defining site plus a `consumer_count` and a capped located `consumers[]` sample of `{path,line,kind}`. Covers TWO token origins, disambiguated by token shape and consumer `kind`: Tailwind v4 `@theme` tokens (`token` is the `--`-prefixed custom property like `--color-brand`; `kind` in `theme-var` / `css-var` / `utility` / `apply`) AND CSS-in-JS token definitions (StyleX `defineVars` / `unstable_defineVarsNested`, vanilla-extract `createTheme` / `createThemeContract` / `createGlobalTheme`; `token` is the binding-qualified dotted access path like `vars.color.primary`, `namespace` is the defining binding, member reads use `js-member`, and StyleX theme-group calls use `js-call`). StyleX theme-group calls credit the complete resolved contract, including partial overrides and empty reset themes. The index is empty or absent on projects using neither. `consumer_count` is a static lower bound because computed class names, dynamic token structures, unresolved imports, and computed token access cannot always be counted. For Tailwind a `consumer_count` of 0 mirrors the unused-theme-token population (the dead-token verdict stays on `unused_theme_tokens` via check_health); CSS-in-JS tokens have no corroborating dead-token finding, so treat a CSS-in-JS 0 as weaker. Use this tool to scope the impact of editing or renaming a token, not to decide deletion.
     #[tool(annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false))]
     async fn get_token_blast_radius(
         &self,
@@ -388,7 +393,12 @@ impl FallowMcp {
 #[rmcp::tool_handler]
 impl ServerHandler for FallowMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
             .with_server_info(
                 Implementation::new("fallow-mcp", env!("CARGO_PKG_VERSION"))
                     .with_description("Codebase analysis for TypeScript/JavaScript projects"),
@@ -407,7 +417,7 @@ impl ServerHandler for FallowMcp {
                  check_health (code complexity metrics), \
                  check_runtime_coverage (merges a V8 or Istanbul runtime coverage dump into the health report; a single local capture is free, continuous/multi-capture monitoring requires a license), \
                  get_hot_paths / get_blast_radius / get_importance / get_cleanup_candidates (runtime context slices; same licensing: single local capture free), \
-                 get_token_blast_radius (free; design-token blast radius for Tailwind v4 @theme + CSS-in-JS defineVars/createTheme tokens via health --css token_consumers), \
+                 get_token_blast_radius (free; design-token blast radius for Tailwind v4 @theme + CSS-in-JS defineVars/createTheme tokens, including StyleX theme-group calls, via health --css token_consumers), \
                  audit (combined dead-code + complexity + duplication for changed files, returns verdict), \
                  decision_surface (the few consequential structural decisions a change embeds, ranked, capped, and signal_id-anchored, each as a judgment question with the routed expert), \
                  fallow_explain (rule rationale and fix guidance without running analysis), \
@@ -415,7 +425,36 @@ impl ServerHandler for FallowMcp {
                  feature_flags (detect feature flag patterns), \
                  list_suppressions (governance inventory of active fallow-ignore markers grouped per file; read-only, always exits 0), \
                  impact (read the local, opt-in value report: surfacing / trend / gate containment / resolved attribution; local-dev only, runs no analysis). \
-                 Picking check_health vs check_runtime_coverage: use check_runtime_coverage when you have a V8 or Istanbul coverage dump and want surfaced dead-in-production verdicts; use check_health for general complexity / hotspot / CRAP analysis without a coverage dump.",
+                 Picking check_health vs check_runtime_coverage: use check_runtime_coverage when you have a V8 or Istanbul coverage dump and want surfaced dead-in-production verdicts; use check_health for general complexity / hotspot / CRAP analysis without a coverage dump. \
+                 Resources (read-only reference material, no analysis run, safe to cache per server version): fallow://tools (tool manifest with CLI fallbacks), fallow://issue-types (every issue type with default severity, fixable flag, docs URL), fallow://explain (index) and fallow://explain/{issue_type} (the same document as fallow_explain), fallow://task-matrix (which read-only command to run before a task), and fallow://schema/config, fallow://schema/plugin, fallow://schema/rule-pack (JSON Schemas). Read a resource instead of calling fallow_explain when you only need reference material.",
             )
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        Ok(ListResourcesResult::with_all_items(
+            crate::resources::list_resources(),
+        ))
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        Ok(ListResourceTemplatesResult::with_all_items(
+            crate::resources::list_resource_templates(),
+        ))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        crate::resources::read_resource(&request.uri).map(ReadResourceResponse::from)
     }
 }

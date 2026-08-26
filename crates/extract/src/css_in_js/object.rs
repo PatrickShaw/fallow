@@ -36,12 +36,13 @@
 //!
 //! Only static string / number values are emitted (camelCase -> kebab-case,
 //! implicit `px` on numbers outside the unitless set, selector-shaped keys become
-//! nested rules). DYNAMIC values (identifier / member / call), SPREAD, COMPUTED keys,
-//! and objects under a NON-selector key (a `cva` `variants` map, not a style
-//! block) are DROPPED, never guessed: there is no JS interpreter and no value
-//! evaluation, so a `color: theme.primary` contributes nothing rather than a
-//! fabricated token. A bucket that drops to zero static declarations is omitted
-//! entirely (no empty synthetic rule).
+//! nested rules). DYNAMIC values (identifier / member / call), SPREAD, COMPUTED
+//! keys, and objects under a NON-selector key (a `cva` `variants` map, not a
+//! style block) are DROPPED, never guessed. StyleX condition maps are the narrow
+//! exception: literal `default` / at-rule keys and immutable string aliases are
+//! recoverable without evaluation. A `color: theme.primary` contributes nothing
+//! rather than a fabricated token. A bucket that drops to zero static
+//! declarations is omitted entirely (no empty synthetic rule).
 //!
 //! # Three sheets: atomic / structural-partial / structural
 //!
@@ -76,11 +77,13 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, Expression, ImportDeclarationSpecifier, NumericLiteral, ObjectExpression,
-    ObjectPropertyKind, Program, PropertyKey, Statement, UnaryOperator,
+    Argument, BindingPattern, Expression, IdentifierReference, ImportDeclarationSpecifier,
+    NumericLiteral, ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
+    UnaryOperator, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
+use oxc_semantic::{ReferenceId, Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType};
 use rustc_hash::FxHashMap;
 
@@ -221,28 +224,61 @@ pub fn css_in_js_object_sheets(source: &str, path: &Path) -> CssInJsObjectSheets
     // partial program, and the walk lifts whatever object styles it can reach
     // (matching `compute_css_analytics`'s error-recovery philosophy).
     let ret = Parser::new(&allocator, source, source_type).parse();
+    if !has_recognized_value_import(&ret.program) {
+        return CssInJsObjectSheets::default();
+    }
+    let semantic_ret = SemanticBuilder::new().build(&ret.program);
+    let scoping = semantic_ret.semantic.scoping();
 
     let mut collector = ObjectStyleCollector::new(source);
-    collector.build_import_map(&ret.program);
+    collector.build_import_map(&ret.program, scoping);
     if collector.imports.is_empty() {
         // No recognized CSS-in-JS import binding: provenance gate is closed, so
         // nothing can fire. Cheap exit before the call walk.
         return CssInJsObjectSheets::default();
     }
+    if collector
+        .imports
+        .values()
+        .any(|(library, _)| *library == Lib::StyleX)
+    {
+        collector.build_const_string_map(&ret.program, scoping);
+    }
     collector.visit_program(&ret.program);
     collector.finish()
+}
+
+fn has_recognized_value_import(program: &Program<'_>) -> bool {
+    program.body.iter().any(|statement| {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            return false;
+        };
+        !declaration.import_kind.is_type()
+            && module_library(declaration.source.value.as_str()).is_some()
+            && declaration.specifiers.as_ref().is_some_and(|specifiers| {
+                specifiers.iter().any(|specifier| {
+                    !matches!(
+                        specifier,
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                            if specifier.import_kind.is_type()
+                    )
+                })
+            })
+    })
 }
 
 /// Walks a parsed program collecting object-notation style buckets, gated on
 /// import provenance.
 struct ObjectStyleCollector<'a> {
     source: &'a str,
-    /// local-binding name -> (library, canonical function role). The role is the
-    /// IMPORTED (canonical) name for a named import, so an alias
-    /// (`import { style as s }`) still dispatches on `style`; the local name for a
-    /// default / namespace binding (those route through the member-call arms,
-    /// where only the library matters).
-    imports: FxHashMap<&'a str, (Lib, &'a str)>,
+    /// Resolved import reference -> (library, canonical function role). Keying
+    /// by semantic reference rather than spelling makes recognition respect
+    /// parameters, lexical scopes, loop bindings, catch bindings, and TDZ.
+    imports: FxHashMap<ReferenceId, (Lib, &'a str)>,
+    /// Resolved reference -> the value of its immutable string binding. This is
+    /// used for StyleX computed condition keys without confusing a shadowed
+    /// binding with a same-named module constant.
+    const_strings: FxHashMap<ReferenceId, (u32, &'a str)>,
     buckets: Vec<Bucket>,
 }
 
@@ -251,16 +287,16 @@ impl<'a> ObjectStyleCollector<'a> {
         Self {
             source,
             imports: FxHashMap::default(),
+            const_strings: FxHashMap::default(),
             buckets: Vec::new(),
         }
     }
 
-    /// Map each import binding from a recognized CSS-in-JS module to its library.
-    /// Named bindings (`import { style } from '@vanilla-extract/css'`) map the
-    /// local alias; default / namespace bindings (`import stylex from
-    /// '@stylexjs/stylex'`, `import styled from '@emotion/styled'`) map the
-    /// binding for later member-call recognition (`stylex.create`, `styled.div`).
-    fn build_import_map(&mut self, program: &Program<'a>) {
+    /// Map each resolved reference to an import binding from a recognized
+    /// CSS-in-JS module. Named aliases and default / namespace bindings retain
+    /// their canonical role, while same-named local bindings never enter the
+    /// map.
+    fn build_import_map(&mut self, program: &Program<'a>, scoping: &Scoping) {
         for stmt in &program.body {
             let Statement::ImportDeclaration(decl) = stmt else {
                 continue;
@@ -275,12 +311,13 @@ impl<'a> ObjectStyleCollector<'a> {
                 continue;
             };
             for specifier in specifiers {
-                let (local, role) = match specifier {
+                let (binding, role) = match specifier {
                     // A named import dispatches on its CANONICAL imported name, so
                     // `import { style as s }` still matches the `style` arm.
-                    ImportDeclarationSpecifier::ImportSpecifier(s) => {
-                        (s.local.name.as_str(), s.imported.name().as_str())
+                    ImportDeclarationSpecifier::ImportSpecifier(s) if !s.import_kind.is_type() => {
+                        (&s.local, s.imported.name().as_str())
                     }
+                    ImportDeclarationSpecifier::ImportSpecifier(_) => continue,
                     // A default import routes through the member-call / call arms.
                     // For emotion the default export IS the `css` function, so
                     // canonicalize its role to `css` and let any local alias fire
@@ -293,15 +330,37 @@ impl<'a> ObjectStyleCollector<'a> {
                         } else {
                             s.local.name.as_str()
                         };
-                        (s.local.name.as_str(), role)
+                        (&s.local, role)
                     }
                     ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
-                        (s.local.name.as_str(), s.local.name.as_str())
+                        (&s.local, s.local.name.as_str())
                     }
                 };
-                self.imports.insert(local, (lib, role));
+                let Some(symbol_id) = binding.symbol_id.get() else {
+                    continue;
+                };
+                self.imports.extend(
+                    scoping
+                        .get_resolved_reference_ids(symbol_id)
+                        .iter()
+                        .copied()
+                        .map(|reference_id| (reference_id, (lib, role))),
+                );
             }
         }
+    }
+
+    fn build_const_string_map(&mut self, program: &Program<'a>, scoping: &Scoping) {
+        let mut collector = ConstStringCollector {
+            scoping,
+            values: &mut self.const_strings,
+        };
+        collector.visit_program(program);
+    }
+
+    fn imported_binding(&self, id: &IdentifierReference<'_>) -> Option<(Lib, &'a str)> {
+        let reference_id = id.reference_id.get()?;
+        self.imports.get(&reference_id).copied()
     }
 
     fn finish(self) -> CssInJsObjectSheets {
@@ -324,14 +383,16 @@ impl<'a> ObjectStyleCollector<'a> {
     fn recognize(&self, callee: &Expression<'a>) -> Option<(Lib, CallKind)> {
         match callee {
             Expression::Identifier(id) => {
-                let (lib, role) = *self.imports.get(id.name.as_str())?;
+                let (lib, role) = self.imported_binding(id)?;
                 let kind = match (lib, role) {
                     // `style(obj)` / `css(obj)`: one object -> one bucket.
                     (Lib::VanillaExtract, "style") | (Lib::Emotion | Lib::Panda, "css") => {
                         CallKind::SingleObject
                     }
-                    // `styleVariants({ k: obj })`: one bucket per key.
-                    (Lib::VanillaExtract, "styleVariants") => CallKind::ObjectOfObjects,
+                    // `styleVariants({ k: obj })` / `create({ k: obj })`: one bucket per key.
+                    (Lib::VanillaExtract, "styleVariants") | (Lib::StyleX, "create") => {
+                        CallKind::ObjectOfObjects
+                    }
                     // `globalStyle('sel', obj)`: real-selector rule.
                     (Lib::VanillaExtract, "globalStyle") => CallKind::GlobalStyle,
                     // `recipe({ base, variants })` / `cva({...})`: lift `base` only.
@@ -346,7 +407,7 @@ impl<'a> ObjectStyleCollector<'a> {
                 let Expression::Identifier(obj) = &member.object else {
                     return None;
                 };
-                let (lib, _) = *self.imports.get(obj.name.as_str())?;
+                let (lib, _) = self.imported_binding(obj)?;
                 let kind = match (lib, member.property.name.as_str()) {
                     (Lib::EmotionStyled, _) => CallKind::SingleObject,
                     (Lib::StyleX, "create") => CallKind::ObjectOfObjects,
@@ -359,11 +420,8 @@ impl<'a> ObjectStyleCollector<'a> {
                 let Expression::Identifier(id) = &inner.callee else {
                     return None;
                 };
-                matches!(
-                    self.imports.get(id.name.as_str()),
-                    Some((Lib::EmotionStyled, _))
-                )
-                .then_some((Lib::EmotionStyled, CallKind::SingleObject))
+                matches!(self.imported_binding(id), Some((Lib::EmotionStyled, _)))
+                    .then_some((Lib::EmotionStyled, CallKind::SingleObject))
             }
             _ => None,
         }
@@ -374,11 +432,10 @@ impl<'a> ObjectStyleCollector<'a> {
         let Some((lib, kind)) = self.recognize(callee) else {
             return;
         };
-        let atomic = lib.is_atomic();
         match kind {
             CallKind::SingleObject => {
                 if let Some(obj) = object_arg(args, 0) {
-                    self.push_bucket(obj, WRAPPER, atomic, obj.span().start);
+                    self.push_bucket(obj, WRAPPER, lib, obj.span().start);
                 }
             }
             CallKind::ObjectOfObjects => {
@@ -394,9 +451,9 @@ impl<'a> ObjectStyleCollector<'a> {
                 };
                 for prop in &obj.properties {
                     if let ObjectPropertyKind::ObjectProperty(p) = prop
-                        && let Expression::ObjectExpression(inner) = &p.value
+                        && let Some(inner) = object_expression(&p.value)
                     {
-                        self.push_bucket(inner, WRAPPER, atomic, p.key.span().start);
+                        self.push_bucket(inner, WRAPPER, lib, p.key.span().start);
                     }
                 }
             }
@@ -411,9 +468,9 @@ impl<'a> ObjectStyleCollector<'a> {
                 for prop in &obj.properties {
                     if let ObjectPropertyKind::ObjectProperty(p) = prop
                         && static_key(&p.key).as_deref() == Some("base")
-                        && let Expression::ObjectExpression(inner) = &p.value
+                        && let Some(inner) = object_expression(&p.value)
                     {
-                        self.push_bucket(inner, WRAPPER, atomic, p.key.span().start);
+                        self.push_bucket(inner, WRAPPER, lib, p.key.span().start);
                     }
                 }
             }
@@ -424,7 +481,7 @@ impl<'a> ObjectStyleCollector<'a> {
                 };
                 let selector = sanitize_selector(&selector);
                 if !selector.is_empty() {
-                    self.push_bucket(obj, &selector, atomic, obj.span().start);
+                    self.push_bucket(obj, &selector, lib, obj.span().start);
                 }
             }
         }
@@ -434,20 +491,19 @@ impl<'a> ObjectStyleCollector<'a> {
     /// it, dropping the bucket when no static declaration survives and routing it
     /// to the right sheet (atomic, or structural / structural-partial by whether
     /// any declaration was dropped).
-    fn push_bucket(
-        &mut self,
-        obj: &ObjectExpression<'a>,
-        selector: &str,
-        atomic: bool,
-        offset: u32,
-    ) {
+    fn push_bucket(&mut self, obj: &ObjectExpression<'a>, selector: &str, lib: Lib, offset: u32) {
         let mut body = String::new();
         let mut dropped = false;
-        serialize_object_body(obj, &mut body, &mut dropped);
+        let context = ObjectSerializationContext {
+            stylex: lib == Lib::StyleX,
+            const_strings: &self.const_strings,
+            before: offset,
+        };
+        serialize_object_body(obj, &mut body, &mut dropped, &context);
         if body.is_empty() {
             return;
         }
-        let stream = if atomic {
+        let stream = if lib.is_atomic() {
             Stream::Atomic
         } else if dropped {
             Stream::StructuralPartial
@@ -466,6 +522,43 @@ impl<'a> Visit<'a> for ObjectStyleCollector<'a> {
     fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
         self.collect_call(&call.callee, &call.arguments);
         walk::walk_call_expression(self, call);
+    }
+}
+
+struct ConstStringCollector<'a, 's, 'm> {
+    scoping: &'s Scoping,
+    values: &'m mut FxHashMap<ReferenceId, (u32, &'a str)>,
+}
+
+impl<'a> Visit<'a> for ConstStringCollector<'a, '_, '_> {
+    fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
+        if declaration.kind == VariableDeclarationKind::Const {
+            for declarator in &declaration.declarations {
+                let BindingPattern::BindingIdentifier(binding) = &declarator.id else {
+                    continue;
+                };
+                let Some(Expression::StringLiteral(value)) = declarator
+                    .init
+                    .as_ref()
+                    .map(Expression::get_inner_expression)
+                else {
+                    continue;
+                };
+                let Some(symbol_id) = binding.symbol_id.get() else {
+                    continue;
+                };
+                self.values.extend(
+                    self.scoping
+                        .get_resolved_reference_ids(symbol_id)
+                        .iter()
+                        .copied()
+                        .map(|reference_id| {
+                            (reference_id, (declarator.span.start, value.value.as_str()))
+                        }),
+                );
+            }
+        }
+        walk::walk_variable_declaration(self, declaration);
     }
 }
 
@@ -516,7 +609,7 @@ pub(super) fn module_library(specifier: &str) -> Option<Lib> {
         "@vanilla-extract/css" | "@vanilla-extract/recipes" => Some(Lib::VanillaExtract),
         "@emotion/react" | "@emotion/css" => Some(Lib::Emotion),
         "@emotion/styled" => Some(Lib::EmotionStyled),
-        "@stylexjs/stylex" => Some(Lib::StyleX),
+        "@stylexjs/stylex" | "stylex" => Some(Lib::StyleX),
         _ if specifier
             .split(['/', '\\'])
             .any(|segment| segment == "styled-system") =>
@@ -528,17 +621,29 @@ pub(super) fn module_library(specifier: &str) -> Option<Lib> {
 }
 
 /// The object-expression argument at `index`, if present and an object literal.
-fn object_arg<'a, 'b>(args: &'b [Argument<'a>], index: usize) -> Option<&'b ObjectExpression<'a>> {
-    match args.get(index) {
-        Some(Argument::ObjectExpression(obj)) => Some(obj),
+fn object_arg<'a: 'b, 'b>(
+    args: &'b [Argument<'a>],
+    index: usize,
+) -> Option<&'b ObjectExpression<'a>> {
+    object_expression(args.get(index)?.as_expression()?)
+}
+
+/// An object literal after stripping syntax-only JavaScript / TypeScript
+/// wrappers such as parentheses, `as const`, `satisfies`, non-null assertions,
+/// type assertions, and instantiation expressions.
+fn object_expression<'a: 'b, 'b>(
+    expression: &'b Expression<'a>,
+) -> Option<&'b ObjectExpression<'a>> {
+    match expression.get_inner_expression() {
+        Expression::ObjectExpression(object) => Some(object),
         _ => None,
     }
 }
 
 /// The string-literal argument at `index`, if present.
 fn string_arg(args: &[Argument<'_>], index: usize) -> Option<String> {
-    match args.get(index) {
-        Some(Argument::StringLiteral(lit)) => Some(lit.value.to_string()),
+    match args.get(index)?.as_expression()?.get_inner_expression() {
+        Expression::StringLiteral(lit) => Some(lit.value.to_string()),
         _ => None,
     }
 }
@@ -550,7 +655,18 @@ fn string_arg(args: &[Argument<'_>], index: usize) -> Option<String> {
 /// (a real structural signal); dynamic values, spreads, computed keys, and
 /// objects under a NON-selector key (a `cva` `variants` map) are dropped and flip
 /// `dropped`.
-fn serialize_object_body(obj: &ObjectExpression<'_>, out: &mut String, dropped: &mut bool) {
+struct ObjectSerializationContext<'maps, 'ast> {
+    stylex: bool,
+    const_strings: &'maps FxHashMap<ReferenceId, (u32, &'ast str)>,
+    before: u32,
+}
+
+fn serialize_object_body(
+    obj: &ObjectExpression<'_>,
+    out: &mut String,
+    dropped: &mut bool,
+    context: &ObjectSerializationContext<'_, '_>,
+) {
     for prop in &obj.properties {
         let ObjectPropertyKind::ObjectProperty(prop) = prop else {
             // Spread (`...base`) carries no statically-known declarations.
@@ -562,13 +678,21 @@ fn serialize_object_body(obj: &ObjectExpression<'_>, out: &mut String, dropped: 
             *dropped = true;
             continue;
         };
-        match &prop.value {
+        let value = prop.value.get_inner_expression();
+        match value {
             Expression::ObjectExpression(nested) if is_selector_key(&key) => {
-                serialize_nested(&key, nested, out, dropped);
+                serialize_nested(&key, nested, out, dropped, context);
+            }
+            Expression::ObjectExpression(nested) if context.stylex => {
+                let mut conditional_body = String::new();
+                if serialize_stylex_conditional_values(&key, nested, &mut conditional_body, context)
+                {
+                    out.push_str(&conditional_body);
+                } else {
+                    *dropped = true;
+                }
             }
             Expression::ObjectExpression(_) => {
-                // An object under a non-selector key (`variants: {...}`, a StyleX
-                // conditional value): not a style block, drop it.
                 *dropped = true;
             }
             value => {
@@ -590,6 +714,7 @@ fn serialize_nested(
     nested: &ObjectExpression<'_>,
     out: &mut String,
     dropped: &mut bool,
+    context: &ObjectSerializationContext<'_, '_>,
 ) {
     // `selectors: { '&:hover': {...}, ... }` is a wrapper, not a selector: emit
     // each inner key as its own nested rule.
@@ -597,10 +722,10 @@ fn serialize_nested(
         for prop in &nested.properties {
             match prop {
                 ObjectPropertyKind::ObjectProperty(p) => {
-                    if let (Some(inner_key), Expression::ObjectExpression(inner)) =
-                        (static_key(&p.key), &p.value)
+                    if let (Some(inner_key), Some(inner)) =
+                        (static_key(&p.key), object_expression(&p.value))
                     {
-                        serialize_nested(&inner_key, inner, out, dropped);
+                        serialize_nested(&inner_key, inner, out, dropped, context);
                     } else {
                         *dropped = true;
                     }
@@ -612,7 +737,7 @@ fn serialize_nested(
     }
 
     let mut body = String::new();
-    serialize_object_body(nested, &mut body, dropped);
+    serialize_object_body(nested, &mut body, dropped, context);
     if body.is_empty() {
         return;
     }
@@ -620,6 +745,67 @@ fn serialize_nested(
     out.push('{');
     out.push_str(&body);
     out.push('}');
+}
+
+fn serialize_stylex_conditional_values(
+    property: &str,
+    conditional: &ObjectExpression<'_>,
+    out: &mut String,
+    context: &ObjectSerializationContext<'_, '_>,
+) -> bool {
+    for entry in &conditional.properties {
+        let ObjectPropertyKind::ObjectProperty(entry) = entry else {
+            return false;
+        };
+        if !is_static_stylex_condition(entry, context) {
+            return false;
+        }
+        match entry.value.get_inner_expression() {
+            Expression::ObjectExpression(nested) => {
+                if !serialize_stylex_conditional_values(property, nested, out, context) {
+                    return false;
+                }
+            }
+            value => {
+                if let Some(rendered) = serialize_value(property, value) {
+                    out.push_str(&rendered);
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn is_static_stylex_condition(
+    property: &oxc_ast::ast::ObjectProperty<'_>,
+    context: &ObjectSerializationContext<'_, '_>,
+) -> bool {
+    if !property.computed {
+        return property
+            .key
+            .static_name()
+            .is_some_and(|key| is_stylex_condition(&key));
+    }
+    let Some(expression) = property.key.as_expression() else {
+        return false;
+    };
+    match expression.get_inner_expression() {
+        Expression::StringLiteral(value) => is_stylex_condition(value.value.as_str()),
+        Expression::Identifier(id) => id
+            .reference_id
+            .get()
+            .and_then(|reference_id| context.const_strings.get(&reference_id))
+            .is_some_and(|(declaration_start, condition)| {
+                *declaration_start < context.before && is_stylex_condition(condition)
+            }),
+        _ => false,
+    }
+}
+
+fn is_stylex_condition(value: &str) -> bool {
+    value == "default" || value.starts_with(':') || value.starts_with('@') || value.starts_with('[')
 }
 
 /// Whether an object-property key introduces a nested SELECTOR / at-rule (so its
@@ -660,7 +846,7 @@ fn serialize_value(key: &str, value: &Expression<'_>) -> Option<String> {
 /// `None` for any dynamic / non-literal value. Numbers outside the unitless set
 /// gain an implicit `px`; negative numbers (`-8` as a unary minus) are handled.
 fn static_value(key: &str, value: &Expression<'_>) -> Option<String> {
-    match value {
+    match value.get_inner_expression() {
         Expression::StringLiteral(lit) => {
             let text = lit.value.as_str().trim();
             (!text.is_empty()).then(|| text.to_string())
@@ -850,6 +1036,139 @@ mod tests {
         assert!(css.contains("color:blue;"), "second bucket: css={css:?}");
         let a = compute_css_analytics(&css).expect("parses");
         assert!(a.rule_count >= 2, "two buckets: {a:?}");
+    }
+
+    #[test]
+    fn stylex_named_create_and_conditional_values_feed_atomic_vocabulary() {
+        let src = "import { create as makeStyles } from 'stylex';\n\
+                   const DARK = '@media (prefers-color-scheme: dark)';\n\
+                   export const styles = makeStyles({\n\
+                   root: { color: { default: '#111', [DARK]: '#eee' } },\n\
+                   });\n";
+        let sheets = sheets(src);
+        assert!(sheets.structural.is_none());
+        let css = sheets.atomic.expect("StyleX named create is atomic");
+        assert!(css.contains("color:#111;"), "default value: {css:?}");
+        assert!(css.contains("color:#eee;"), "conditional value: {css:?}");
+        let analytics = compute_css_analytics(&css).expect("conditional sheet parses");
+        assert!(analytics.colors.iter().any(|color| color == "#111"));
+        assert!(analytics.colors.iter().any(|color| color == "#eee"));
+    }
+
+    #[test]
+    fn stylex_dynamic_conditional_key_does_not_feed_atomic_vocabulary() {
+        let src = "import * as stylex from '@stylexjs/stylex';\n\
+                   export const styles = stylex.create({\n\
+                   root: { color: { default: '#111', [getCondition()]: '#eee' } },\n\
+                   });\n";
+        assert!(sheets(src).is_empty());
+    }
+
+    #[test]
+    fn stylex_static_computed_conditional_keys_feed_atomic_vocabulary() {
+        let src = "import * as stylex from '@stylexjs/stylex';\n\
+                   export const styles = stylex.create({\n\
+                   root: { color: { ['default']: '#111', ['@media (prefers-color-scheme: dark)']: '#eee' } },\n\
+                   });\n";
+        let css = sheets(src)
+            .atomic
+            .expect("static computed StyleX conditions are recovered");
+        assert!(css.contains("color:#111;"), "default value: {css:?}");
+        assert!(css.contains("color:#eee;"), "media value: {css:?}");
+    }
+
+    #[test]
+    fn stylex_computed_condition_declared_after_create_abstains() {
+        let src = "import * as stylex from '@stylexjs/stylex';\n\
+                   export const styles = stylex.create({\n\
+                   root: { color: { default: '#111', [DARK]: '#eee' } },\n\
+                   });\n\
+                   const DARK = '@media (prefers-color-scheme: dark)';\n";
+        assert!(sheets(src).is_empty());
+    }
+
+    #[test]
+    fn stylex_pseudo_and_selector_conditions_feed_atomic_vocabulary() {
+        let src = "import * as stylex from '@stylexjs/stylex';\n\
+                   export const styles = stylex.create({ root: { color: {\n\
+                   default: 'red', ':hover': 'blue', '[data-active]': 'green',\n\
+                   '@media (width > 10px)': { ':active': 'black' },\n\
+                   } } });\n";
+        let css = sheets(src)
+            .atomic
+            .expect("static StyleX pseudo conditions are recovered");
+        for value in ["red", "blue", "green", "black"] {
+            assert!(css.contains(&format!("color:{value};")), "value: {css:?}");
+        }
+    }
+
+    #[test]
+    fn stylex_shadowed_namespace_abstains_in_every_lexical_scope() {
+        let src = "import * as stylex from '@stylexjs/stylex';\n\
+                   const valid = stylex.create({ root: { color: 'red' } });\n\
+                   function parameter(stylex) { stylex.create({ root: { color: 'blue' } }); }\n\
+                   { stylex.create({ root: { color: 'green' } }); const stylex = local; }\n\
+                   for (const stylex of libraries) { stylex.create({ root: { color: 'pink' } }); }\n\
+                   try {} catch (stylex) { stylex.create({ root: { color: 'orange' } }); }\n";
+        let css = sheets(src).atomic.expect("unshadowed StyleX call survives");
+        assert!(css.contains("color:red;"), "module import call: {css:?}");
+        for shadowed in ["blue", "green", "pink", "orange"] {
+            assert!(
+                !css.contains(shadowed),
+                "shadowed namespace must abstain for {shadowed}: {css:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stylex_shadowed_named_create_abstains_in_every_lexical_scope() {
+        let src = "import { create as makeStyles } from '@stylexjs/stylex';\n\
+                   const valid = makeStyles({ root: { color: 'red' } });\n\
+                   function parameter(makeStyles) { makeStyles({ root: { color: 'blue' } }); }\n\
+                   { makeStyles({ root: { color: 'green' } }); const makeStyles = local; }\n\
+                   for (const makeStyles of factories) { makeStyles({ root: { color: 'pink' } }); }\n\
+                   try {} catch (makeStyles) { makeStyles({ root: { color: 'orange' } }); }\n";
+        let css = sheets(src)
+            .atomic
+            .expect("unshadowed named create call survives");
+        assert!(css.contains("color:red;"), "module import call: {css:?}");
+        for shadowed in ["blue", "green", "pink", "orange"] {
+            assert!(
+                !css.contains(shadowed),
+                "shadowed create alias must abstain for {shadowed}: {css:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stylex_transparent_typescript_wrappers_preserve_static_objects() {
+        let src = "import * as stylex from '@stylexjs/stylex';\n\
+                   export const styles = stylex.create((({\n\
+                   root: ({ color: ('red' as const), padding: (8 satisfies number) } satisfies Record<string, unknown>),\n\
+                   } as const) satisfies Record<string, unknown>));\n";
+        let css = sheets(src)
+            .atomic
+            .expect("wrapped static StyleX object is recovered");
+        assert!(css.contains("color:red;"), "wrapped string: {css:?}");
+        assert!(css.contains("padding:8px;"), "wrapped number: {css:?}");
+    }
+
+    #[test]
+    fn stylex_shadowed_computed_condition_binding_abstains() {
+        let src = "import * as stylex from '@stylexjs/stylex';\n\
+                   const CONDITION = '@media (width > 10px)';\n\
+                   function styles() {\n\
+                   const CONDITION = getCondition();\n\
+                   return stylex.create({ root: { color: { default: 'red', [CONDITION]: 'blue' } } });\n\
+                   }\n";
+        assert!(sheets(src).is_empty());
+    }
+
+    #[test]
+    fn stylex_type_only_named_create_does_not_open_gate() {
+        let src = "import { type create } from '@stylexjs/stylex';\n\
+                   const styles = create({ root: { color: 'red' } });\n";
+        assert!(sheets(src).is_empty());
     }
 
     #[test]

@@ -342,8 +342,10 @@ impl AnalysisSession {
             return Arc::clone(artifacts);
         }
 
+        let modules = self.shared_parsed_modules(false);
         let artifacts = Arc::new(crate::health::build_styling_analysis_artifacts(
             self.files(),
+            &modules,
             self.config(),
         ));
         if let Ok(mut cache) = self.styling_cache.lock() {

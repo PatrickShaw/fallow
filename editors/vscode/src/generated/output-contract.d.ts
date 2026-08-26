@@ -709,10 +709,11 @@ export type UnusedAtRuleKind = ("property-registration" | "layer")
 /**
  * The surface through which a design token is consumed. The `theme-var` /
  * `css-var` / `utility` / `apply` kinds are Tailwind v4 `@theme` consumption; the
- * `js-member` / `js-call` kinds are CSS-in-JS consumption (member access on an
- * imported StyleX/vanilla-extract token binding, or a PandaCSS `token('...')`
- * call). The kind is the disjoint origin signal that distinguishes a Tailwind
- * token entry from a CSS-in-JS token entry in the shared `token_consumers` list.
+ * `js-member` / `js-call` kinds are CSS-in-JS consumption (member access through a
+ * same-file or imported StyleX/vanilla-extract token binding, a StyleX
+ * theme-group call, or a PandaCSS token-path call). The kind is the disjoint origin signal that
+ * distinguishes a Tailwind token entry from a CSS-in-JS token entry in the
+ * shared `token_consumers` list.
  */
 export type ConsumerKind = ("theme-var" | "css-var" | "utility" | "apply" | "js-member" | "js-call")
 /**
@@ -7833,15 +7834,17 @@ near_duplicate_theme_tokens?: NearDuplicateThemeToken[]
  */
 near_duplicate_css_in_js_tokens?: NearDuplicateThemeToken[]
 /**
- * A location-aware reverse index of Tailwind v4 `@theme` token consumers:
- * per token, where it is consumed (`var()` reads, `@apply` bodies, generated
- * utility classes) and through which surface, plus the full `consumer_count`
- * (a static lower bound) and the defining site. Built from the same gated
- * candidate set as `unused_theme_tokens` (v4 + non-plugin + non-published +
- * whole-scope), so a token with `consumer_count: 0` is the same "nothing
- * consumes this" signal. Sorted by token; empty when the project is not
- * Tailwind v4 or a plugin / published-library / partial-scope run gated the
- * scan out.
+ * A location-aware reverse index of design-token consumers. Tailwind v4
+ * entries cover `@theme` tokens consumed through `var()` reads, `@apply`
+ * bodies, or generated utilities. CSS-in-JS entries cover supported StyleX,
+ * vanilla-extract, PandaCSS, styled-components, and Emotion definitions and
+ * their member or call consumers. Every entry includes the defining site,
+ * located consumer samples, and the full `consumer_count` as a static lower
+ * bound. Tailwind entries use the same gated candidate set as
+ * `unused_theme_tokens`; CSS-in-JS entries require supported direct imports.
+ * Partial-scope runs omit the index. Sorted by token and empty when no
+ * eligible token definitions are found. A zero count is evidence for
+ * investigation, not deletion proof.
  */
 token_consumers?: TokenConsumers[]
 /**
@@ -8676,13 +8679,14 @@ actions: CssCandidateAction[]
  *   `apply`), built from the same gated candidate set as `unused_theme_tokens`
  *   (v4 + non-plugin + non-published + whole-scope), so a `consumer_count: 0`
  *   corroborates the `unused_theme_tokens` "nothing consumes this" finding.
- * - CSS-in-JS tokens (kind `js-member` / `js-call`) from StyleX `defineVars`,
- *   vanilla-extract `createTheme` family definitions, and PandaCSS `defineTokens`,
- *   consumed via cross-module member access or PandaCSS `token('...')` calls. NOTE:
+ * - CSS-in-JS tokens (kind `js-member` / `js-call`) from StyleX `defineVars` /
+ *   `unstable_defineVarsNested`, vanilla-extract `createTheme` family definitions,
+ *   and PandaCSS `defineTokens`, consumed via same-file or cross-module member
+ *   access, StyleX theme-group calls, or PandaCSS `token('...')` calls. NOTE:
  *   CSS-in-JS has NO corroborating dead-token finding (there is no
  *   `unused_theme_tokens` analogue), so a CSS-in-JS `consumer_count: 0` is a weaker
- *   signal than the Tailwind case (and the cross-file scan is relative-import or
- *   generated-token-helper only, so alias / bare-package imports are not counted).
+ *   signal than the Tailwind case (and unresolved dynamic imports or computed
+ *   accesses are not counted).
  *
  * This is DESCRIPTIVE context (a blast-radius lookup), not a finding, so it
  * deliberately carries no `actions` array (unlike the cleanup-candidate types in
@@ -8694,14 +8698,14 @@ export interface TokenConsumers {
 /**
  * The token identity. For a Tailwind `@theme` token this is the full custom
  * property as authored, INCLUDING the `--` prefix (`--color-brand`). For a
- * CSS-in-JS token (kind `js-member`) this is the binding-qualified dotted
+ * CSS-in-JS token (kind `js-member` / `js-call`) this is the binding-qualified dotted
  * access path, NO `--` prefix (`vars.color.primary`), matching how consumers
  * read it. The presence of the `--` prefix distinguishes the two origins.
  */
 token: string
 /**
  * For a Tailwind token, the v4 theme namespace (`color`, `radius`,
- * `font-weight`, ...). For a CSS-in-JS token (kind `js-member`), the defining
+ * `font-weight`, ...). For a CSS-in-JS token (kind `js-member` / `js-call`), the defining
  * export BINDING the token set is accessed through (`vars`), which identifies
  * the token set, NOT a semantic group. (The field is thus overloaded by
  * origin; branch on `consumers[].kind` or the `token` shape.)
@@ -8720,9 +8724,10 @@ definition_path: string
 definition_line: number
 /**
  * The FULL number of consumer locations found, a STATIC LOWER BOUND: a
- * computed class name (`bg-${color}`) or a value read outside CSS/markup the
- * scan never sees is not counted. This is the aggregate over every consumer,
- * computed BEFORE [`consumers`](Self::consumers) is capped to a sample.
+ * computed class name (`bg-${color}`), unresolved import, dynamic token
+ * structure, or computed CSS-in-JS access is not counted. This is the
+ * aggregate over every consumer, computed BEFORE
+ * [`consumers`](Self::consumers) is capped to a sample.
  */
 consumer_count: number
 /**
@@ -8734,8 +8739,8 @@ consumer_count: number
 consumers: TokenConsumerLocation[]
 }
 /**
- * Where one Tailwind v4 `@theme` token is consumed, and through which surface.
- * One entry in a [`TokenConsumers::consumers`] sample.
+ * Where one Tailwind or CSS-in-JS design token is consumed, and through which
+ * surface. One entry in a [`TokenConsumers::consumers`] sample.
  */
 export interface TokenConsumerLocation {
 /**
@@ -13283,9 +13288,14 @@ export interface SimilarCodeGeneration {
  * Version of extraction and normalization semantics used for both IDs.
  */
 extraction_semantics_version: number
+/**
+ * Version of the calculation that produces model embeddings.
+ */
+embedding_semantics_version: number
 provider: SimilarCodeProviderProvenance
 model: SimilarCodeModelProvenance
 parameters: SimilarCodeGenerationParameters
+scope: SimilarCodeScopeProvenance
 /**
  * Minimum cosine similarity admitted into the candidate set.
  */
@@ -13366,6 +13376,19 @@ max_tokens: number
  * Digest over the complete effective generation parameter set.
  */
 parameter_sha256: string
+}
+/**
+ * Effective endpoint scope used for corpus admission and pair retention.
+ */
+export interface SimilarCodeScopeProvenance {
+/**
+ * Whether file, changed-file, diff, or workspace scoping was active.
+ */
+active: boolean
+/**
+ * Sorted project-root-relative paths satisfying every active predicate.
+ */
+paths: string[]
 }
 /**
  * One unverified semantic similar-code candidate.

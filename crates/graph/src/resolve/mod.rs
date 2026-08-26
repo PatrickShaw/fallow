@@ -128,11 +128,11 @@ impl ResolverSession {
 
         let extensions = build_extensions(input.active_plugins);
         let condition_names = build_condition_names(input.active_plugins, input.extra_conditions);
-        let resolver = create_resolver(input.active_plugins, input.extra_conditions);
+        let resolver = create_resolver(input.root, input.active_plugins, input.extra_conditions);
         let mut style_conditions = input.extra_conditions.to_vec();
         style_conditions.push("sass".to_string());
         style_conditions.push("style".to_string());
-        let style_resolver = create_resolver(input.active_plugins, &style_conditions);
+        let style_resolver = create_resolver(input.root, input.active_plugins, &style_conditions);
 
         Self {
             resolver,

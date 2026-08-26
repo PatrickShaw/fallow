@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace package when the tool is hoisted to the monorepo root. A
   `"size-limit"` array in `package.json` needs no config file. Thanks to
   [@robinvdvleuten](https://github.com/robinvdvleuten) for the contribution.
+- ([#2435](https://github.com/fallow-rs/fallow/pull/2435)). Enabled explicit support for Yarn PnP import resolution in oxc. Can result in 
+  significant performance improvements in large monorepos.
 
 ### Changed
 

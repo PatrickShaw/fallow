@@ -30,7 +30,11 @@ use super::types::{DenoImportMapEntry, ResolveContext, ResolveResult};
 /// `extra_conditions` are prepended to the resolver's `condition_names`
 /// list, giving them priority over baseline conditions during package.json
 /// `exports` / `imports` matching.
-pub(super) fn create_resolver(active_plugins: &[String], extra_conditions: &[String]) -> Resolver {
+pub(super) fn create_resolver(
+    root: &Path,
+    active_plugins: &[String],
+    extra_conditions: &[String],
+) -> Resolver {
     let mut options = ResolveOptions {
         extensions: build_extensions(active_plugins),
         extension_alias: vec![
@@ -65,7 +69,27 @@ pub(super) fn create_resolver(active_plugins: &[String], extra_conditions: &[Str
 
     options.tsconfig = Some(oxc_resolver::TsconfigDiscovery::Auto);
 
+    options.yarn_pnp = is_yarn_pnp_project(root);
+
     Resolver::new(options)
+}
+
+/// Yarn Plug'n'Play manifest filenames: `.pnp.cjs` since Yarn 3, `.pnp.js` for
+/// Yarn 2, and `.pnp.data.json` for installs that split the runtime data out of
+/// the loader script. `.pnp.mjs` in case future implementations are ESM complaint
+const YARN_PNP_MANIFESTS: [&str; 4] = [".pnp.cjs", ".pnp.js", ".pnp.mjs", ".pnp.data.json"];
+
+/// Whether `root` is a Yarn Plug'n'Play project.
+///
+/// PnP resolution is enabled per project rather than always-on. A PnP project
+/// has no populated `node_modules`, so without this every bare specifier misses
+/// and falls through to the much slower tsconfig fallback; conversely, turning
+/// it on for a non-PnP project would make the resolver consult a manifest that
+/// is not there.
+fn is_yarn_pnp_project(root: &Path) -> bool {
+    YARN_PNP_MANIFESTS
+        .iter()
+        .any(|manifest| root.join(manifest).is_file())
 }
 
 /// Return `true` for errors raised while loading a tsconfig file (as opposed to
@@ -2056,8 +2080,8 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = super::create_resolver(&[], &[]);
-        let style_resolver = super::create_resolver(&[], &["style".to_string()]);
+        let resolver = super::create_resolver(&project_root, &[], &[]);
+        let style_resolver = super::create_resolver(&project_root, &[], &["style".to_string()]);
         let extensions = react_native::build_extensions(&[]);
         let path_to_id = FxHashMap::default();
         let raw_path_to_id = FxHashMap::default();
@@ -2889,5 +2913,59 @@ mod tests {
             result.to_string_lossy().replace('\\', "/"),
             "/project/src/Button.ts"
         );
+    }
+
+    // ---- is_yarn_pnp_project ----
+
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn is_yarn_pnp_project_detects_each_manifest_filename() {
+        for manifest in super::YARN_PNP_MANIFESTS {
+            let temp = tempdir().unwrap();
+            fs::write(temp.path().join(manifest), "").unwrap();
+            assert!(
+                super::is_yarn_pnp_project(temp.path()),
+                "{manifest} should mark the project as Yarn PnP"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn is_yarn_pnp_project_false_without_manifest() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+        assert!(!super::is_yarn_pnp_project(temp.path()));
+    }
+
+    /// A directory sharing a manifest's name is not an install; `is_file`
+    /// rather than `exists` is what keeps this from being a false positive.
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn is_yarn_pnp_project_ignores_directory_named_like_manifest() {
+        let temp = tempdir().unwrap();
+        fs::create_dir(temp.path().join(".pnp.cjs")).unwrap();
+        assert!(!super::is_yarn_pnp_project(temp.path()));
+    }
+
+    /// Nested packages in a PnP monorepo carry no manifest of their own, so
+    /// detection is scoped to the project root and must not walk upwards. 
+    // That would be a waste of compute and IO
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn is_yarn_pnp_project_does_not_inherit_from_parent_directory() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join(".pnp.cjs"), "").unwrap();
+        let nested = temp.path().join("packages/app");
+        fs::create_dir_all(&nested).unwrap();
+        assert!(!super::is_yarn_pnp_project(&nested));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn create_resolver_accepts_a_yarn_pnp_project_root() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join(".pnp.cjs"), "").unwrap();
+        let _resolver = super::create_resolver(temp.path(), &[], &[]);
     }
 }

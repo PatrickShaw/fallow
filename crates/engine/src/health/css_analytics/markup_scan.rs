@@ -170,33 +170,6 @@ fn markup_scan_ctx<'a>(input: &MarkupCssCandidateInput<'a>) -> HealthScanCtx<'a>
     }
 }
 
-pub(super) fn project_uses_css_in_js(root: &std::path::Path) -> bool {
-    const CSS_IN_JS_DEPS: &[&str] = &[
-        "styled-components",
-        "@emotion/styled",
-        "@emotion/react",
-        "@emotion/css",
-        "@linaria/core",
-        "@linaria/react",
-        "@vanilla-extract/css",
-        "@pandacss/dev",
-        "@stylexjs/stylex",
-    ];
-    let Ok(text) = std::fs::read_to_string(root.join("package.json")) else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return false;
-    };
-    ["dependencies", "devDependencies", "peerDependencies"]
-        .iter()
-        .any(|key| {
-            json.get(key)
-                .and_then(serde_json::Value::as_object)
-                .is_some_and(|deps| deps.keys().any(|k| CSS_IN_JS_DEPS.contains(&k.as_str())))
-        })
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CssScanKind {
     Css,
@@ -208,7 +181,6 @@ pub(super) enum CssScanKind {
 pub(super) fn css_report_scan_target<'a>(
     file: &'a fallow_types::discover::DiscoveredFile,
     ctx: HealthScanCtx<'_>,
-    css_in_js: bool,
 ) -> Option<(&'a std::path::Path, CssScanKind)> {
     let HealthScanCtx {
         config,
@@ -224,9 +196,7 @@ pub(super) fn css_report_scan_target<'a>(
         Some("css") => CssScanKind::Css,
         Some("scss" | "sass" | "less") => CssScanKind::Preprocessor,
         Some("vue") | Some("svelte") => CssScanKind::Sfc,
-        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts") if css_in_js => {
-            CssScanKind::CssInJs
-        }
+        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts") => CssScanKind::CssInJs,
         _ => return None,
     };
 
@@ -333,6 +303,9 @@ fn sfc_css_scan_items(source: &str) -> Vec<CssScanItem<'_>> {
 fn css_in_js_scan_items<'a>(source: &'a str, path: &std::path::Path) -> Vec<CssScanItem<'a>> {
     use std::borrow::Cow;
 
+    if !source_may_import_css_in_js(source) {
+        return Vec::new();
+    }
     let mut items = Vec::new();
     if let Some(virtual_css) = crate::css::css_in_js_virtual_stylesheet(source) {
         items.push(CssScanItem {
@@ -364,4 +337,42 @@ fn css_in_js_scan_items<'a>(source: &'a str, path: &std::path::Path) -> Vec<CssS
         });
     }
     items
+}
+
+fn source_may_import_css_in_js(source: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "styled-components",
+        "@emotion/styled",
+        "@emotion/react",
+        "@emotion/css",
+        "@linaria/core",
+        "@linaria/react",
+        "@vanilla-extract/css",
+        "@vanilla-extract/recipes",
+        "@pandacss/dev",
+        "@stylexjs/stylex",
+        "styled-system",
+    ];
+    MARKERS.iter().any(|marker| source.contains(marker))
+        || source.contains("'stylex'")
+        || source.contains("\"stylex\"")
+}
+
+pub(super) fn is_css_in_js_style_source(specifier: &str) -> bool {
+    matches!(
+        specifier,
+        "styled-components"
+            | "@emotion/styled"
+            | "@emotion/react"
+            | "@emotion/css"
+            | "@linaria/core"
+            | "@linaria/react"
+            | "@vanilla-extract/css"
+            | "@vanilla-extract/recipes"
+            | "@pandacss/dev"
+            | "@stylexjs/stylex"
+            | "stylex"
+    ) || specifier
+        .split(['/', '\\'])
+        .any(|segment| segment == "styled-system")
 }

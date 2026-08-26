@@ -16,6 +16,8 @@ const DEFAULT_BASELINE = join(
   "styling-corpus-smoke-baseline.json",
 );
 const SAMPLE_PATH_LIMIT = 5;
+const STYLEX_EXAMPLE_TOKENS_PATH = "examples/example-nextjs/app/globalTokens.stylex.ts";
+const STYLEX_NESTED_TOKENS_PATH = "examples/example-nextjs/components/NestedTokensDemo.stylex.ts";
 
 const CORPUS = [
   {
@@ -345,14 +347,14 @@ const parseJson = (stdout) => {
   }
 };
 
-const collectStylingFindings = (value) => {
-  const findings = [];
+const collectObjectArrayEntries = (value, arrayKey) => {
+  const entries = [];
   const visit = (node, key = "") => {
     if (!node || typeof node !== "object") return;
     if (Array.isArray(node)) {
-      if (key === "styling_findings") {
+      if (key === arrayKey) {
         for (const item of node) {
-          if (item && typeof item === "object") findings.push(item);
+          if (item && typeof item === "object") entries.push(item);
         }
       }
       for (const item of node) visit(item);
@@ -361,7 +363,65 @@ const collectStylingFindings = (value) => {
     for (const [childKey, child] of Object.entries(node)) visit(child, childKey);
   };
   visit(value);
-  return findings;
+  return entries;
+};
+
+const collectStylingFindings = (value) => collectObjectArrayEntries(value, "styling_findings");
+
+const collectTokenConsumers = (value) => collectObjectArrayEntries(value, "token_consumers");
+
+const summarizeStyleXThemeCoverage = (value) => {
+  const consumers = collectTokenConsumers(value).filter(
+    (entry) => typeof entry.token === "string" && !entry.token.startsWith("--"),
+  );
+  const locations = consumers.flatMap((entry) =>
+    Array.isArray(entry.consumers) ? entry.consumers : [],
+  );
+  return {
+    token_definitions: consumers.length,
+    stable_conditional_definitions: consumers.filter(
+      (entry) =>
+        entry.definition_path === STYLEX_EXAMPLE_TOKENS_PATH &&
+        entry.token === "globalTokens.surfaceBg",
+    ).length,
+    nested_token_definitions: consumers.filter(
+      (entry) =>
+        entry.definition_path === STYLEX_NESTED_TOKENS_PATH &&
+        entry.token === "nestedTokens.surface.bg",
+    ).length,
+    member_consumers: locations.filter((location) => location.kind === "js-member").length,
+    theme_consumers: locations.filter((location) => location.kind === "js-call").length,
+    official_nested_theme_call_samples: countOfficialStyleXNestedThemeCallSamples(consumers),
+    phantom_stable_default_tokens: consumers.filter(
+      (entry) =>
+        entry.definition_path === STYLEX_EXAMPLE_TOKENS_PATH &&
+        entry.token === "globalTokens.surfaceBg.default",
+    ).length,
+  };
+};
+
+const countOfficialStyleXNestedThemeCallSamples = (consumers) => {
+  const locations = consumers
+    .filter(
+      (entry) =>
+        entry.definition_path === STYLEX_NESTED_TOKENS_PATH && entry.namespace === "nestedTokens",
+    )
+    .flatMap((entry) => (Array.isArray(entry.consumers) ? entry.consumers : []))
+    .filter(
+      (location) => location.kind === "js-call" && location.path === STYLEX_NESTED_TOKENS_PATH,
+    );
+  return new Set(locations.map((location) => `${location.path || ""}\0${location.line || 0}`)).size;
+};
+
+const styleXCommandFailure = (command) => {
+  if (!command) return "StyleX health command did not run";
+  if (command.timed_out) return "StyleX health command timed out";
+  if (command.spawn_error) return `StyleX health command failed to start: ${command.spawn_error}`;
+  if (command.parse_error) return `StyleX health output was invalid JSON: ${command.parse_error}`;
+  if (command.status === null || command.status > 1) {
+    return `StyleX health command failed with status ${commandStatusLabel(command)}`;
+  }
+  return null;
 };
 
 const normalizeFinding = (finding) => ({
@@ -468,6 +528,10 @@ const runFallowCommand = (fallowBin, entry, dir, command, opts) => {
   });
   const parsed = parseJson(proc.stdout || "");
   const findings = parsed.ok ? collectStylingFindings(parsed.value) : [];
+  const stylexThemeCoverage =
+    entry.name === "stylex" && command.id === "health-css" && parsed.ok
+      ? summarizeStyleXThemeCoverage(parsed.value)
+      : null;
   return {
     id: command.id,
     args: fullArgs,
@@ -479,8 +543,38 @@ const runFallowCommand = (fallowBin, entry, dir, command, opts) => {
     stderr_sample: (proc.stderr || "").trim().slice(0, 2000),
     finding_groups: groupFindings(findings),
     total_styling_findings: findings.length,
+    stylex_theme_coverage: stylexThemeCoverage,
     project: entry.name,
   };
+};
+
+const styleXContractFailures = (projects) => {
+  const project = projects.find((entry) => entry.name === "stylex");
+  if (!project) return [];
+  if (project.error) return [`StyleX project failed: ${project.error}`];
+  const command = project.commands.find((entry) => entry.id === "health-css");
+  const commandFailure = styleXCommandFailure(command);
+  if (commandFailure) return [commandFailure];
+  const coverage = command?.stylex_theme_coverage;
+  if (!coverage) return ["StyleX health output did not expose theme coverage"];
+
+  const failures = [];
+  if (coverage.token_definitions === 0) failures.push("no StyleX token definitions detected");
+  if (coverage.stable_conditional_definitions === 0) {
+    failures.push("stable StyleX conditional token shape regressed");
+  }
+  if (coverage.nested_token_definitions === 0) {
+    failures.push("no nested StyleX token definitions detected");
+  }
+  if (coverage.member_consumers === 0) failures.push("no StyleX member consumers detected");
+  if (coverage.theme_consumers === 0) failures.push("no StyleX theme consumers detected");
+  if (coverage.official_nested_theme_call_samples === 0) {
+    failures.push("official nested StyleX theme produced no theme-call sample");
+  }
+  if (coverage.phantom_stable_default_tokens !== 0) {
+    failures.push("stable conditional value was exposed as a phantom .default token");
+  }
+  return failures;
 };
 
 const stackCoverage = (projects) => {
@@ -501,9 +595,39 @@ const commandStatusLabel = (command) => {
 const renderMarkdown = (results) => {
   const lines = renderMarkdownHeader(results);
   appendStackCoverage(lines, results.stack_coverage);
+  appendStyleXThemeContract(lines, results);
   appendSpikes(lines, results.spikes);
   appendProjects(lines, results.projects);
   return `${lines.join("\n")}\n`;
+};
+
+const appendStyleXThemeContract = (lines, results) => {
+  const project = results.projects.find((entry) => entry.name === "stylex");
+  if (!project) return;
+  lines.push("", "## StyleX Theme Contract", "");
+  if (project.error) {
+    lines.push(`Failed: ${project.error}`);
+    return;
+  }
+  const coverage = project.commands.find(
+    (entry) => entry.id === "health-css",
+  )?.stylex_theme_coverage;
+  if (!coverage) {
+    lines.push("Failed: StyleX health output did not expose theme coverage.");
+    return;
+  }
+  lines.push(
+    `Status: ${results.stylex_contract_failures.length === 0 ? "pass" : "fail"}`,
+    "",
+    `Token definitions: ${coverage.token_definitions}`,
+    `Stable conditional definitions: ${coverage.stable_conditional_definitions}`,
+    `Nested token definitions: ${coverage.nested_token_definitions}`,
+    `Member consumers: ${coverage.member_consumers}`,
+    `Theme consumers: ${coverage.theme_consumers}`,
+    `Official nested theme-call samples: ${coverage.official_nested_theme_call_samples}`,
+    `Phantom stable \`.default\` tokens: ${coverage.phantom_stable_default_tokens}`,
+  );
+  for (const failure of results.stylex_contract_failures) lines.push(`- ${failure}`);
 };
 
 const renderMarkdownHeader = (results) => [
@@ -569,7 +693,7 @@ const topGroups = (command) =>
     .join("<br>");
 
 const initialResults = (opts, fallowBin, corpus) => ({
-  schema_version: 1,
+  schema_version: 2,
   generated_at: new Date().toISOString(),
   fallow_bin: fallowBin,
   cache_dir: opts.cacheDir,
@@ -584,6 +708,7 @@ const initialResults = (opts, fallowBin, corpus) => ({
   stack_coverage: stackCoverage(corpus),
   projects: [],
   spikes: [],
+  stylex_contract_failures: [],
 });
 
 const runProject = (entry, opts, fallowBin) => {
@@ -636,6 +761,7 @@ const main = () => {
     results.projects.push(runProject(entry, opts, fallowBin));
   }
 
+  results.stylex_contract_failures = styleXContractFailures(results.projects);
   results.spikes = computeSpikes(results, baseline);
   const jsonPath = join(opts.outDir, "styling-corpus-smoke.json");
   const markdownPath = join(opts.outDir, "styling-corpus-smoke.md");
@@ -645,6 +771,7 @@ const main = () => {
   console.error(`Markdown: ${markdownPath}`);
 
   if (opts.failOnSpikes && results.spikes.length > 0) return 2;
+  if (results.stylex_contract_failures.length > 0) return 3;
   if (results.projects.every((project) => project.error)) return 1;
   return 0;
 };

@@ -1640,7 +1640,7 @@ fn create_audit_css_deep_fixture() -> TempDir {
     .unwrap();
     fs::write(
         root.join("src/tokens.stylex.ts"),
-        "import * as stylex from '@stylexjs/stylex';\nexport const vars = stylex.defineVars({ color: { brand: '#123456' } });\n",
+        "import * as stylex from '@stylexjs/stylex';\nexport const vars = stylex.unstable_defineVarsNested({ color: { brand: '#123456' } });\n",
     )
     .unwrap();
     fs::write(
@@ -1678,7 +1678,7 @@ fn create_audit_css_deep_fixture() -> TempDir {
     .unwrap();
     fs::write(
         root.join("src/tokens.stylex.ts"),
-        "import * as stylex from '@stylexjs/stylex';\nexport const vars = stylex.defineVars({ color: { brand: '#123456', signal: '#123457' } });\n",
+        "import * as stylex from '@stylexjs/stylex';\nexport const vars = stylex.unstable_defineVarsNested({ color: { brand: '#123456', signal: '#123457' } });\n",
     )
     .unwrap();
     dir

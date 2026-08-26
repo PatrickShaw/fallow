@@ -50,9 +50,11 @@ pub struct StylingAnalysisArtifacts {
 
 pub(super) fn build_styling_analysis_artifacts(
     files: &[fallow_types::discover::DiscoveredFile],
+    modules: &[fallow_types::extract::ModuleInfo],
     config: &ResolvedConfig,
 ) -> StylingAnalysisArtifacts {
     let ignore_set = super::ignore::build_ignore_set(&config.health.ignore);
+    let scan_css_in_js_sources = modules_use_css_in_js(modules);
     StylingAnalysisArtifacts {
         reference_surface: css_reference_surface(files, config, &ignore_set),
         class_inventory: css_class_inventory(files, config, &ignore_set),
@@ -65,8 +67,18 @@ pub(super) fn build_styling_analysis_artifacts(
                 output_changed_files: None,
                 ws_roots: None,
             },
+            scan_css_in_js_sources,
         ),
     }
+}
+
+fn modules_use_css_in_js(modules: &[fallow_types::extract::ModuleInfo]) -> bool {
+    modules.iter().any(|module| {
+        module
+            .imports
+            .iter()
+            .any(|import| !import.is_type_only && is_css_in_js_style_source(&import.source))
+    })
 }
 
 /// Compute structural CSS analytics, honoring the same ignore / changed-since /
@@ -853,6 +865,7 @@ pub(super) struct CssAnalyticsComputation {
 fn walk_css_files(
     files: &[fallow_types::discover::DiscoveredFile],
     ctx: HealthScanCtx<'_>,
+    scan_css_in_js_sources: bool,
 ) -> CssWalkAccum {
     use fallow_output::{CssAnalyticsSummary, ScopedUnusedClasses};
 
@@ -864,12 +877,13 @@ fn walk_css_files(
     // rule, which are not listed individually), finalized after the walk.
     let mut tokens = CssTokenSets::default();
     let mut scoring = CssGradeScoring::default();
-    let css_in_js = project_uses_css_in_js(&ctx.config.root);
-
     for file in files {
-        let Some((relative, kind)) = css_report_scan_target(file, ctx, css_in_js) else {
+        let Some((relative, kind)) = css_report_scan_target(file, ctx) else {
             continue;
         };
+        if kind == CssScanKind::CssInJs && !scan_css_in_js_sources {
+            continue;
+        }
         let Ok(source) = std::fs::read_to_string(&file.path) else {
             continue;
         };
@@ -1020,14 +1034,21 @@ pub(super) fn compute_css_analytics_report_with_artifacts(
     // Collect CSS-in-JS token definers ONCE per run (parsing every candidate
     // definer file from disk). Both the comparable-token candidate pass and the
     // consumer blast-radius pass borrow this, instead of each recomputing it.
-    // `None` mirrors the old `!project_uses_css_in_js` short-circuit exactly.
-    let css_in_js_definers = project_uses_css_in_js(&config.root).then(|| {
+    let has_css_in_js_definer_source = modules.iter().any(|module| {
+        module.imports.iter().any(|import| {
+            !import.is_type_only
+                && (is_css_in_js_token_lib(&import.source)
+                    || is_theme_provider_source(&import.source))
+        })
+    });
+    let css_in_js_definers = has_css_in_js_definer_source.then(|| {
         let path_by_id: rustc_hash::FxHashMap<fallow_types::discover::FileId, &std::path::Path> =
             files.iter().map(|f| (f.id, f.path.as_path())).collect();
         collect_css_in_js_definers(modules, &path_by_id, config)
     });
 
-    let walk = css_report_walk(files, ctx, styling_artifacts);
+    let scan_css_in_js_sources = modules_use_css_in_js(modules);
+    let walk = css_report_walk(files, ctx, styling_artifacts, scan_css_in_js_sources);
     let walk_ref = walk.as_ref();
     let mut summary = walk_ref.summary.clone();
     let mut raw_style_values = walk_ref.tokens.raw_style_values.clone();
@@ -1087,6 +1108,7 @@ fn css_report_walk<'a>(
     files: &[fallow_types::discover::DiscoveredFile],
     ctx: HealthScanCtx<'_>,
     styling_artifacts: Option<&'a StylingAnalysisArtifacts>,
+    scan_css_in_js_sources: bool,
 ) -> CssReportWalk<'a> {
     let HealthScanCtx {
         changed_files,
@@ -1100,7 +1122,7 @@ fn css_report_walk<'a>(
     {
         CssReportWalk::Cached(&artifacts.whole_scope_walk)
     } else {
-        CssReportWalk::Fresh(Box::new(walk_css_files(files, ctx)))
+        CssReportWalk::Fresh(Box::new(walk_css_files(files, ctx, scan_css_in_js_sources)))
     }
 }
 

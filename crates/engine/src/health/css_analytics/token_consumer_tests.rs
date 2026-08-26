@@ -260,12 +260,16 @@ fn partial_scope_emits_nothing() {
 /// (report + scoring inputs), or `None` when nothing analyzable was found.
 fn css_computation(root: &Path, files: &[DiscoveredFile]) -> Option<CssAnalyticsComputation> {
     let config = config_at(root);
-    // The 3c CSS-analytics tests do not exercise the Phase 3d CSS-in-JS token
-    // blast-radius (which needs `ModuleInfo`), so pass an empty module slice;
-    // the token-consumer driver then no-ops (no definers).
+    let modules: Vec<fallow_types::extract::ModuleInfo> = files
+        .iter()
+        .map(|file| {
+            let source = std::fs::read_to_string(&file.path).unwrap_or_default();
+            fallow_extract::parse_source_to_module(file.id, &file.path, &source, 0, false)
+        })
+        .collect();
     compute_css_analytics_report(
         files,
-        &[],
+        &modules,
         HealthScanCtx {
             config: &config,
             ignore_set: &globset::GlobSet::empty(),
@@ -299,7 +303,7 @@ fn assert_cached_css_report_parity(
     };
     let fresh = compute_css_analytics_report_with_artifacts(files, &[], ctx, None)
         .expect("fresh CSS report is present");
-    let artifacts = build_styling_analysis_artifacts(files, &config);
+    let artifacts = build_styling_analysis_artifacts(files, &[], &config);
     let cached = compute_css_analytics_report_with_artifacts(files, &[], ctx, Some(&artifacts))
         .expect("cached CSS report is present");
 
@@ -608,7 +612,7 @@ fn stylex_define_vars_blast_radius_located_js_member_consumers() {
         0,
         "src/tokens.stylex.ts",
         "import * as stylex from '@stylexjs/stylex';\n\
-             export const vars = stylex.defineVars({ color: { primary: '#000', secondary: '#fff' } });\n",
+             export const vars = stylex.unstable_defineVarsNested({ color: { primary: '#000', secondary: '#fff' } });\n",
     );
     let consumer = write_file(
         root,
@@ -636,6 +640,126 @@ fn stylex_define_vars_blast_radius_located_js_member_consumers() {
 }
 
 #[test]
+fn stylex_theme_calls_consume_full_group_and_same_file_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("package.json"), r#"{"private":true}"#).unwrap();
+    let def = write_file(
+        root,
+        0,
+        "src/tokens.stylex.ts",
+        "import * as stylex from 'stylex';\n\
+         const DARK = '@media (prefers-color-scheme: dark)';\n\
+         export const vars = stylex.defineVars({\n\
+           surfaceBg: { default: '#fff', [DARK]: '#111' },\n\
+           text: '#222',\n\
+         });\n\
+         export const derived = stylex.create({ root: { color: vars.text } });\n\
+         export const reset = stylex.createTheme(vars, {});\n",
+    );
+    let theme = write_file(
+        root,
+        1,
+        "src/dark.ts",
+        "import { createTheme as makeTheme } from 'stylex';\n\
+         import { vars as contract } from './tokens.stylex';\n\
+         export const dark = makeTheme(contract, { text: '#eee' });\n\
+         export const dynamic = makeTheme(contract, getOverrides());\n",
+    );
+
+    let computation = css_computation_3d(root, &[def, theme]);
+    assert!(find_token(&computation, "vars.surfaceBg.default").is_none());
+    let surface = find_token(&computation, "vars.surfaceBg").expect("flat conditional token");
+    assert_eq!(
+        surface.consumer_count, 2,
+        "every statically valid theme call applies the full group"
+    );
+    assert!(
+        surface
+            .consumers
+            .iter()
+            .all(|consumer| consumer.kind == ConsumerKind::JsCall)
+    );
+    let text = find_token(&computation, "vars.text").expect("text token");
+    assert_eq!(
+        text.consumer_count, 3,
+        "member read plus every statically valid theme call"
+    );
+    assert_eq!(
+        text.consumers
+            .iter()
+            .filter(|consumer| consumer.kind == ConsumerKind::JsCall)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn stylex_nested_default_namespace_preserves_leaf_paths_and_theme_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("package.json"), r#"{"private":true}"#).unwrap();
+    let def = write_file(
+        root,
+        0,
+        "src/nested.stylex.ts",
+        "import * as stylex from '@stylexjs/stylex';\n\
+         export const vars = stylex.unstable_defineVarsNested({\n\
+           button: { primary: { background: {\n\
+             default: stylex.unstable_conditional({ default: 'blue' }),\n\
+             hovered: stylex.unstable_conditional({ default: 'navy' }),\n\
+           } } },\n\
+         });\n",
+    );
+    let consumer = write_file(
+        root,
+        1,
+        "src/theme.ts",
+        "import * as stylex from '@stylexjs/stylex';\n\
+         import { vars } from './nested.stylex';\n\
+         export const theme = stylex.unstable_createThemeNested(vars, {});\n\
+         export const color = vars.button.primary.background.hovered;\n",
+    );
+
+    let computation = css_computation_3d(root, &[def, consumer]);
+    assert!(find_token(&computation, "vars.button.primary.background").is_none());
+    let default = find_token(&computation, "vars.button.primary.background.default")
+        .expect("default token leaf");
+    assert_eq!(default.consumer_count, 1);
+    assert_eq!(default.consumers[0].kind, ConsumerKind::JsCall);
+    let hovered = find_token(&computation, "vars.button.primary.background.hovered")
+        .expect("hovered token leaf");
+    assert_eq!(hovered.consumer_count, 2);
+}
+
+#[test]
+fn stylex_workspace_only_source_activates_css_in_js_analysis() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("packages/ui")).unwrap();
+    std::fs::write(
+        root.join("packages/ui/package.json"),
+        r#"{"name":"@acme/ui","dependencies":{"@stylexjs/stylex":"0.19.0"}}"#,
+    )
+    .unwrap();
+    let tokens = write_file(
+        root,
+        0,
+        "packages/ui/src/tokens.stylex.ts",
+        "import { defineVars } from '@stylexjs/stylex';\n\
+         export const vars = defineVars({ brand: '#33679a' });\n",
+    );
+
+    let computation = css_computation_3d(root, &[tokens]);
+    assert!(find_token(&computation, "vars.brand").is_some());
+}
+
+#[test]
 fn stylex_define_vars_reports_near_duplicate_css_in_js_tokens_in_deep_mode() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -649,14 +773,14 @@ fn stylex_define_vars_reports_near_duplicate_css_in_js_tokens_in_deep_mode() {
         0,
         "src/base-tokens.stylex.ts",
         "import * as stylex from '@stylexjs/stylex';\n\
-             export const vars = stylex.defineVars({ color: { brand: '#33679a' } });\n",
+             export const vars = stylex.unstable_defineVarsNested({ color: { brand: '#33679a' } });\n",
     );
     let feature = write_file(
         root,
         1,
         "src/feature-tokens.stylex.ts",
         "import * as stylex from '@stylexjs/stylex';\n\
-             export const featureVars = stylex.defineVars({ color: { accent: '#33679b' } });\n",
+             export const featureVars = stylex.unstable_defineVarsNested({ color: { accent: '#33679b' } });\n",
     );
     let mut changed = rustc_hash::FxHashSet::default();
     changed.insert(feature.path.clone());
@@ -689,14 +813,14 @@ fn stylex_near_duplicate_css_in_js_tokens_abstain_in_partial_scope() {
         0,
         "src/base-tokens.stylex.ts",
         "import * as stylex from '@stylexjs/stylex';\n\
-             export const vars = stylex.defineVars({ color: { brand: '#33679a' } });\n",
+             export const vars = stylex.unstable_defineVarsNested({ color: { brand: '#33679a' } });\n",
     );
     let feature = write_file(
         root,
         1,
         "src/feature-tokens.stylex.ts",
         "import * as stylex from '@stylexjs/stylex';\n\
-             export const featureVars = stylex.defineVars({ color: { accent: '#33679b' } });\n",
+             export const featureVars = stylex.unstable_defineVarsNested({ color: { accent: '#33679b' } });\n",
     );
     let mut changed = rustc_hash::FxHashSet::default();
     changed.insert(feature.path.clone());
@@ -739,7 +863,7 @@ fn stylex_define_vars_blast_radius_resolves_tsconfig_alias_consumers() {
         0,
         "src/tokens/theme.stylex.ts",
         "import * as stylex from '@stylexjs/stylex';\n\
-             export const vars = stylex.defineVars({ color: { primary: '#000' } });\n",
+             export const vars = stylex.unstable_defineVarsNested({ color: { primary: '#000' } });\n",
     );
     let consumer = write_file(
         root,
@@ -779,7 +903,7 @@ fn stylex_define_vars_blast_radius_resolves_workspace_package_consumers() {
         0,
         "packages/tokens/src/index.ts",
         "import * as stylex from '@stylexjs/stylex';\n\
-             export const vars = stylex.defineVars({ color: { primary: '#000' } });\n",
+             export const vars = stylex.unstable_defineVarsNested({ color: { primary: '#000' } });\n",
     );
     let consumer = write_file(
         root,
@@ -1358,7 +1482,7 @@ fn zero_false_consumer_same_name_from_unrelated_module() {
         0,
         "src/tokens.stylex.ts",
         "import * as stylex from '@stylexjs/stylex';\n\
-             export const vars = stylex.defineVars({ color: { primary: '#000' } });\n",
+             export const vars = stylex.unstable_defineVarsNested({ color: { primary: '#000' } });\n",
     );
     // A DIFFERENT module also exporting `vars`, read as `vars.color.primary`,
     // must NOT be counted against the design-token `vars`.
@@ -1397,7 +1521,7 @@ fn zero_double_count_one_site_counts_once_and_intermediate_not_counted() {
         0,
         "src/t.stylex.ts",
         "import * as stylex from '@stylexjs/stylex';\n\
-             export const vars = stylex.defineVars({ color: { primary: '#000' } });\n",
+             export const vars = stylex.unstable_defineVarsNested({ color: { primary: '#000' } });\n",
     );
     // One access site reads `vars.color.primary` (which records TWO member-access
     // records: {vars.color, primary} + {vars, color}). It must count ONCE, and
@@ -1429,7 +1553,7 @@ fn aliased_import_and_multi_file_counting() {
         0,
         "src/t.stylex.ts",
         "import * as stylex from '@stylexjs/stylex';\n\
-             export const vars = stylex.defineVars({ color: { primary: '#000' } });\n",
+             export const vars = stylex.unstable_defineVarsNested({ color: { primary: '#000' } });\n",
     );
     let c1 = write_file(
         root,
@@ -1492,6 +1616,38 @@ fn non_css_in_js_project_emits_no_js_member_consumers() {
     if let Some(computation) = computation {
         assert!(js_token_consumers(&computation).is_empty());
     }
+}
+
+#[test]
+fn css_in_js_source_walk_activates_from_runtime_module_imports_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let runtime_file = write_file(
+        root,
+        0,
+        "src/runtime.ts",
+        "import stylex from '@stylexjs/stylex';\nexport const styles = stylex.create({ root: { color: 'red' } });\n",
+    );
+    let type_file = write_file(
+        root,
+        1,
+        "src/types.ts",
+        "import type { StyleXStyles } from '@stylexjs/stylex';\nexport type Styles = StyleXStyles<unknown>;\n",
+    );
+    let parse = |file: &DiscoveredFile| {
+        fallow_extract::parse_source_to_module(
+            file.id,
+            &file.path,
+            &std::fs::read_to_string(&file.path).unwrap(),
+            0,
+            false,
+        )
+    };
+    let runtime_module = parse(&runtime_file);
+    let type_module = parse(&type_file);
+
+    assert!(modules_use_css_in_js(&[runtime_module]));
+    assert!(!modules_use_css_in_js(&[type_module]));
 }
 
 #[test]

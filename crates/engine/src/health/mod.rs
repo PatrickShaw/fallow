@@ -90,9 +90,10 @@ use vital_signs_scope::{
 
 pub(crate) fn build_styling_analysis_artifacts(
     files: &[crate::discover::DiscoveredFile],
+    modules: &[crate::source::ModuleInfo],
     config: &fallow_config::ResolvedConfig,
 ) -> StylingAnalysisArtifacts {
-    css_analytics::build_styling_analysis_artifacts(files, config)
+    css_analytics::build_styling_analysis_artifacts(files, modules, config)
 }
 
 /// Build health shared parse data from retained dead-code artifacts.

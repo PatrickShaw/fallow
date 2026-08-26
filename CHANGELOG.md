@@ -44,6 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **StyleX theme variables now preserve the framework's real token shape and
+  theme application semantics.** Stable `defineVars` condition maps remain one
+  flat token instead of producing phantom `.default` leaves, while
+  `unstable_defineVarsNested` exposes its nested token paths. The CSS health
+  reverse index now includes same-file reads and treats `createTheme` plus
+  `unstable_createThemeNested` as full variable-group consumers, including
+  partial overrides and empty reset themes. Named aliases and namespace/default
+  imports of the StyleX API, the `stylex` package name, local static token
+  objects, and StyleX in a workspace package without a root dependency are
+  supported. Cross-file token contracts require direct named imports; barrel,
+  default, and namespace token-contract imports conservatively abstain, as do
+  custom `importSources`, CommonJS, `stylex.env`, and dynamic token structure.
+
 - **React Native and Expo platform-extension families are no longer reported
   as duplicate exports** (Closes
   [#2407](https://github.com/fallow-rs/fallow/issues/2407)). Since 3.11.0 an

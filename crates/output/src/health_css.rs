@@ -395,8 +395,8 @@ pub struct NearestStylingToken {
     pub distance: f64,
 }
 
-/// Where one Tailwind v4 `@theme` token is consumed, and through which surface.
-/// One entry in a [`TokenConsumers::consumers`] sample.
+/// Where one Tailwind or CSS-in-JS design token is consumed, and through which
+/// surface. One entry in a [`TokenConsumers::consumers`] sample.
 #[derive(Debug, Clone, serde::Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TokenConsumerLocation {
@@ -411,9 +411,10 @@ pub struct TokenConsumerLocation {
 /// The surface through which a design token is consumed. The `theme-var` /
 /// `css-var` / `utility` / `apply` kinds are Tailwind v4 `@theme` consumption; the
 /// `js-member` / `js-call` kinds are CSS-in-JS consumption (member access on an
-/// imported StyleX/vanilla-extract token binding, or a PandaCSS `token('...')`
-/// call). The kind is the disjoint origin signal that distinguishes a Tailwind
-/// token entry from a CSS-in-JS token entry in the shared `token_consumers` list.
+/// imported StyleX/vanilla-extract token binding, a StyleX theme-group call, or a
+/// PandaCSS token-path call). The kind is the disjoint origin signal that
+/// distinguishes a Tailwind token entry from a CSS-in-JS token entry in the
+/// shared `token_consumers` list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
@@ -428,12 +429,15 @@ pub enum ConsumerKind {
     Utility,
     /// A class-shaped token inside an `@apply` body in a stylesheet.
     Apply,
-    /// A cross-module JS member access on an imported CSS-in-JS token binding
+    /// A same-file or cross-module JS member access on a CSS-in-JS token binding
     /// (`import { vars } from './tokens'; vars.color.primary`), for StyleX
-    /// `defineVars` / vanilla-extract `createTheme` family tokens.
+    /// `defineVars` families or vanilla-extract `createTheme` families.
     JsMember,
-    /// A CSS-in-JS function call that consumes a token by path, such as
-    /// PandaCSS `token('colors.brand')` or `css({ color: 'colors.brand' })`.
+    /// A CSS-in-JS call that consumes this token. PandaCSS calls consume an
+    /// explicit token path (`token('colors.brand')` or a static style-object
+    /// value). StyleX `createTheme` / `unstable_createThemeNested` calls consume
+    /// every token in their resolved contract group, including tokens omitted by
+    /// partial overrides and empty reset themes.
     JsCall,
 }
 
@@ -451,13 +455,14 @@ pub enum ConsumerKind {
 ///   `apply`), built from the same gated candidate set as `unused_theme_tokens`
 ///   (v4 + non-plugin + non-published + whole-scope), so a `consumer_count: 0`
 ///   corroborates the `unused_theme_tokens` "nothing consumes this" finding.
-/// - CSS-in-JS tokens (kind `js-member` / `js-call`) from StyleX `defineVars`,
-///   vanilla-extract `createTheme` family definitions, and PandaCSS `defineTokens`,
-///   consumed via cross-module member access or PandaCSS `token('...')` calls. NOTE:
+/// - CSS-in-JS tokens (kind `js-member` / `js-call`) from StyleX `defineVars` /
+///   `unstable_defineVarsNested`, vanilla-extract `createTheme` family definitions,
+///   and PandaCSS `defineTokens`, consumed via same-file or cross-module member
+///   access, StyleX theme-group calls, or PandaCSS `token('...')` calls. NOTE:
 ///   CSS-in-JS has NO corroborating dead-token finding (there is no
 ///   `unused_theme_tokens` analogue), so a CSS-in-JS `consumer_count: 0` is a weaker
-///   signal than the Tailwind case (and the cross-file scan is relative-import or
-///   generated-token-helper only, so alias / bare-package imports are not counted).
+///   signal than the Tailwind case (and unresolved dynamic imports or computed
+///   accesses are not counted).
 ///
 /// This is DESCRIPTIVE context (a blast-radius lookup), not a finding, so it
 /// deliberately carries no `actions` array (unlike the cleanup-candidate types in
@@ -469,12 +474,12 @@ pub enum ConsumerKind {
 pub struct TokenConsumers {
     /// The token identity. For a Tailwind `@theme` token this is the full custom
     /// property as authored, INCLUDING the `--` prefix (`--color-brand`). For a
-    /// CSS-in-JS token (kind `js-member`) this is the binding-qualified dotted
+    /// CSS-in-JS token (kind `js-member` / `js-call`) this is the binding-qualified dotted
     /// access path, NO `--` prefix (`vars.color.primary`), matching how consumers
     /// read it. The presence of the `--` prefix distinguishes the two origins.
     pub token: String,
     /// For a Tailwind token, the v4 theme namespace (`color`, `radius`,
-    /// `font-weight`, ...). For a CSS-in-JS token (kind `js-member`), the defining
+    /// `font-weight`, ...). For a CSS-in-JS token (kind `js-member` / `js-call`), the defining
     /// export BINDING the token set is accessed through (`vars`), which identifies
     /// the token set, NOT a semantic group. (The field is thus overloaded by
     /// origin; branch on `consumers[].kind` or the `token` shape.)

@@ -93,7 +93,8 @@ pub fn bool_from_env(name: &str) -> Option<bool> {
 }
 
 pub fn resolve_format(cli: &Cli) -> FormatConfig {
-    let cli_format_was_explicit = std::env::args().any(|a| {
+    let cli_format_was_explicit = std::env::args_os().any(|arg| {
+        let a = arg.to_string_lossy();
         a == "--format"
             || a == "--output"
             || a.starts_with("--format=")

@@ -12,5 +12,7 @@ Analysis after setup is offline. Source is passed to the native sidecar only on
 stdin and is never logged or cached by this package.
 
 The wrapper only launches an exact-version `@fallow-cli/fallow-similar-code-*`
-platform package after verifying its detached Ed25519 signature. It does not
-contain or execute a JavaScript model runtime.
+platform package after verifying its detached Ed25519 signature and the SHA-256
+digest embedded in that exact platform package. Missing or mismatched integrity
+metadata fails closed. The wrapper does not contain or execute a JavaScript
+model runtime.

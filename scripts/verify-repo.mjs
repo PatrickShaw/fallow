@@ -61,6 +61,11 @@ const FULL_ONLY_COMMANDS = [
     args: ["--prefix", "npm/fallow", "test"],
   },
   {
+    label: "Similar-code companion npm tests",
+    command: "npm",
+    args: ["--prefix", "npm/fallow-similar-code", "test"],
+  },
+  {
     label: "Workspace tests",
     command: "cargo",
     args: ["test", "--workspace", "--lib", "--bins", "--tests", "--examples"],

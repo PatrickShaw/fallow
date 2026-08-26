@@ -30,6 +30,11 @@ Run discovery and save its independent JSON envelope:
 npx fallow similar-code --format json --quiet > similar-code.json
 ```
 
+Inference stays local and offline. A cold run may take several minutes on a
+large repository because every admitted function needs an embedding. Later
+runs reuse the project-local vector cache. `--file` and `--top` limit returned
+candidates, not the full-corpus indexing needed for unbiased comparison.
+
 Each `candidates[]` entry contains two root-relative function locations, a
 model-specific cosine score and band, `candidate_id`, `review_key`, explicit
 `verification_status: "unverified"`, evidence availability, and read-only next
@@ -100,6 +105,10 @@ MCP exposes two read-only tools:
   `files`, `workspace`, `changed_since`, `threshold`, `min_lines`, or `top`.
 - `inspect_similar_code` reproduces one `candidate_id` and returns its inspect
   packet.
+
+Both tools use a dedicated 15-minute subprocess window so a cold local run does
+not require a generic timeout override. Operators can still set
+`FALLOW_TIMEOUT_SECS` to choose a different bound.
 
 Neither tool downloads a model, writes verdicts, edits source, or turns a score
 into a finding. If setup is missing, ask the user to run
@@ -182,6 +191,13 @@ packages also carry the signed sidecar beside the multicall binary, and their
 verification sentinel covers both executables.
 
 ## Version 1 boundaries
+
+Function extraction intentionally admits supported named top-level functions,
+bound function and arrow declarations, and named methods on supported
+top-level classes and objects. Nested callbacks, constructors, accessors,
+computed methods, and other unsupported syntax stay outside version 1. Their
+omission is reported through extraction skips and partial completion rather
+than treated as proof that no similar code exists.
 
 Version 1 intentionally does not run from bare `fallow`, `audit`, `dupes`,
 GitHub Action gates, GitLab gates, SARIF, LSP, VS Code, or auto-fix. Those

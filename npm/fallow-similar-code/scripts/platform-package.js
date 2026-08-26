@@ -21,4 +21,6 @@ const getPlatformPackage = (platform, arch, libc) => {
   return PACKAGES[`${platform}-${arch}${suffix}`];
 };
 
-module.exports = { getPlatformPackage };
+const isPlatformPackage = (packageName) => Object.values(PACKAGES).includes(packageName);
+
+module.exports = { getPlatformPackage, isPlatformPackage };

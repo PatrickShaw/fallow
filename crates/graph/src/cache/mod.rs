@@ -209,7 +209,13 @@ pub use store::GraphCacheStore;
 /// resolve imports in sibling packages. Resolver output is persisted with the
 /// graph and the cache key does not cover tsconfig scope, so a warm 45 cache
 /// would keep replaying the leaked cross-package resolutions.
-pub const GRAPH_CACHE_VERSION: u32 = 46;
+///
+/// Bumped to 47 for issue #2444 (PR #2435): Yarn Plug'n'Play projects now
+/// resolve bare specifiers through the inlined `.pnp.cjs` manifest, anchored
+/// to the manifest directory, instead of missing on the empty `node_modules`
+/// and falling back. The resolver output persisted in a warm 46 cache holds
+/// those misses and would replay them as unresolved imports.
+pub const GRAPH_CACHE_VERSION: u32 = 47;
 
 /// Cached form of a resolved target.
 ///

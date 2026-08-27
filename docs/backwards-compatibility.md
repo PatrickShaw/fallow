@@ -177,6 +177,18 @@ These are documented for the rare CI script that depended on the old behavior. N
   config whose directory contains the importing files. Root and workspace
   configs are unaffected because the root is an ancestor of every file.
 
+- **A strict run fails on findings the override path used to let through**
+  ([#2445](https://github.com/fallow-rs/fallow/issues/2445)). When a config
+  contains any per-path `overrides` entry, the exit code is decided by
+  per-file severity resolution. That path never consulted import-direction
+  boundary violations, and it started from unpromoted base rules, so
+  `--fail-on-issues` and `--ci` could exit 0 on an error-severity
+  `boundary-violation` and on every `warn`-severity finding. Both are fixed,
+  which means a pipeline with overrides that passed on an earlier v3 can now
+  exit 1 without any config or code change. The findings themselves are
+  unchanged; only the exit code is. To keep the previous outcome, set the rule
+  to `off` rather than `warn`, or drop the strict flag for that job.
+
 - **Review brief schema 8 adds author actions, test adjacency, independent
   slices, and dependency decisions.** All additive. A `--walkthrough-file`
   judgment may carry `action` (`block`, `address`, `consider`, `fyi`); any

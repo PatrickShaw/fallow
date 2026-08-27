@@ -31,6 +31,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#2437](https://github.com/fallow-rs/fallow/pull/2437)). Thanks to
   [@PatrickShaw](https://github.com/PatrickShaw) for the contribution.
 
+- **`--fail-on-issues` and `--ci` now fail on boundary violations and on
+  warn-severity findings when per-path `overrides` exist** (Closes
+  [#2445](https://github.com/fallow-rs/fallow/issues/2445)). With any
+  `overrides` entry configured, the exit-code check switched to per-file
+  severity resolution, and that path never consulted import-direction
+  boundary violations, so an error-severity `boundary-violation` was reported
+  but the run exited 0. The same path also skipped the warn-to-error
+  promotion of `--fail-on-issues`, so a `warn` rule plus any override exited 0
+  as well. Both now resolve per file and promote after override resolution.
+  Because the override path handles every file once any `overrides` entry
+  exists, this affects all `warn`-severity rules in a project that configures
+  overrides, not only the rules set inside the override block: a strict run
+  that previously exited 0 now exits 1 on those findings. To keep the previous
+  outcome, set the rule to `off` rather than `warn`, or drop
+  `--fail-on-issues` and `--ci` for that job. Thanks to
+  [@DeLuke84](https://github.com/DeLuke84) for the report.
+
 ### Fixed
 
 - **A tsconfig without `include` or `files` now applies only to files under
@@ -49,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   those aliases to a config whose directory contains the importing files.
   Thanks to [@PatrickShaw](https://github.com/PatrickShaw) for the
   contribution.
+
 
 ## [3.19.0] - 2026-08-26
 

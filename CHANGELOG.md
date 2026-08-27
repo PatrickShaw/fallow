@@ -25,7 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory and every referenced project was walked for every import. Aliases
   from a referenced package no longer resolve from a sibling package, and
   monorepos with many `references` and no `include` resolve imports noticeably
-  faster. Thanks to [@PatrickShaw](https://github.com/PatrickShaw) for the
+  faster. Imports that only resolved through that leak are now reported as
+  `unresolved-import` findings, which are error severity by default and will
+  fail `--fail-on-issues`, and a file that was only reachable through such an
+  import may now be reported as unused. If a subdirectory `tsconfig.json`
+  intentionally holds shared `paths`, give it an explicit `include`, or move
+  those aliases to a config whose directory contains the importing files.
+  Thanks to [@PatrickShaw](https://github.com/PatrickShaw) for the
   contribution.
 
 ## [3.19.0] - 2026-08-26

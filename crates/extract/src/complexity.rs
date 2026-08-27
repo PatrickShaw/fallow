@@ -409,6 +409,10 @@ const fn logical_kind(op: LogicalOperator) -> ComplexityContributionKind {
 
 impl<'ast> Visit<'ast> for ComplexityVisitor<'_> {
     fn visit_function(&mut self, func: &Function<'ast>, flags: ScopeFlags) {
+        if func.body.is_none() {
+            walk::walk_function(self, func, flags);
+            return;
+        }
         let name = func
             .id
             .as_ref()
@@ -744,6 +748,75 @@ mod tests {
         let results = analyze("function foo() {}");
         let f = find_fn(&results, "foo");
         assert_eq!(f.cyclomatic, 1);
+    }
+
+    #[test]
+    fn overload_signatures_do_not_emit_complexity_units() {
+        let results = analyze(
+            "function parse(value: string): string;\n\
+             function parse(value: number): number;\n\
+             function parse(value: string | number) {\n\
+               if (typeof value === 'string') { return value; }\n\
+               return value.toString();\n\
+             }",
+        );
+        let parse_functions: Vec<_> = results
+            .iter()
+            .filter(|function| function.name == "parse")
+            .collect();
+
+        assert_eq!(parse_functions.len(), 1);
+        assert_eq!(parse_functions[0].line, 3);
+        assert_eq!(parse_functions[0].cyclomatic, 2);
+    }
+
+    #[test]
+    fn class_method_overload_signatures_do_not_emit_complexity_units() {
+        let results = analyze(
+            "class Parser {\n\
+               method(a: string): void;\n\
+               method(a: number): void;\n\
+               method(a: any) { if (a) { return; } }\n\
+             }",
+        );
+        let methods: Vec<_> = results
+            .iter()
+            .filter(|function| function.name == "method")
+            .collect();
+
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].line, 4);
+        assert_eq!(methods[0].cyclomatic, 2);
+    }
+
+    #[test]
+    fn abstract_class_methods_do_not_emit_complexity_units() {
+        let results = analyze(
+            "abstract class Shape {\n\
+               abstract area(): number;\n\
+               abstract describe(prefix: string): string;\n\
+               name() { return 'shape'; }\n\
+             }",
+        );
+
+        assert!(results.iter().all(|function| function.name != "area"));
+        assert!(results.iter().all(|function| function.name != "describe"));
+        let name = find_fn(&results, "name");
+        assert_eq!(name.line, 4);
+        assert_eq!(name.cyclomatic, 1);
+    }
+
+    #[test]
+    fn declare_function_does_not_emit_complexity_unit() {
+        let results = analyze(
+            "declare function ambient(value: string): void;\n\
+             function real(value: string) { return value; }",
+        );
+
+        assert!(results.iter().all(|function| function.name != "ambient"));
+        let real = find_fn(&results, "real");
+        assert_eq!(real.line, 2);
+        assert_eq!(real.cyclomatic, 1);
     }
 
     #[test]

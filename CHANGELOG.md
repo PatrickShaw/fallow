@@ -99,6 +99,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Thanks to [@PatrickShaw](https://github.com/PatrickShaw) for the
   contribution.
 
+- **Overload signatures, abstract members, and `declare function`
+  declarations no longer count as functions, and Istanbul coverage now matches
+  functions through their body location** (Closes
+  [#2442](https://github.com/fallow-rs/fallow/issues/2442),
+  [#2443](https://github.com/fallow-rs/fallow/pull/2443)). Function counts
+  drop for every file that carries those declarations, so its file score and
+  the project health score can move without any code change, and a file whose
+  declarations are all bodyless (an ambient `declare` module, for instance)
+  leaves the file-score table entirely. Coverage matching improves at the same
+  time: a function whose only structural match in the coverage map was its
+  body location now scores against real coverage instead of a static estimate.
+  Each removed declaration was a complexity-1 unit, so metrics averaged over
+  the function population can change on unchanged runtime code (average
+  cyclomatic complexity, its 90th percentile, and the share of functions over
+  60 lines). Per-file maintainability can also improve because a file's
+  complexity density is its total complexity divided by its lines, and the
+  combined project health score can move in either direction. Regression
+  baselines (`--regression-baseline`) compare
+  dead-code and dependency counts and are unaffected; re-save health baselines
+  (`--save-baseline`) if you run with `--coverage`, because a newly matched
+  function can cross the CRAP ceiling, changing the total tracked by `count`
+  mode or the set tracked by `identity` mode.
+
+  Mechanically, each `fnMap` entry contributes up to three candidate positions:
+  the producer's own, the declaration start, and the body start.
+  istanbul-lib-instrument records an expression-bodied arrow's body as the
+  next arrow in a curried chain, so a body-start alias yields to a declaration
+  at the same position, which keeps every arrow of a redux middleware, a
+  higher-order component, or a curried class property matchable. When two
+  nested anonymous candidates sit equally far from the target, the uniquely
+  strictly innermost body wins; when no such body exists, the function stays on
+  the estimate rather than being credited to a guess. Thanks to
+  [@PrinceD96](https://github.com/PrinceD96) for the report and the
+  contribution.
 
 ## [3.19.0] - 2026-08-26
 

@@ -1005,7 +1005,11 @@ use crate::MemberKind;
 /// import whole-object semantic facts. Warm 280 caches lack those binding,
 /// statement, stylesheet, provenance, and handoff facts, so they would replay
 /// the pre-fix crediting and MDX token source on upgrade.
-pub(super) const CACHE_VERSION: u32 = 281;
+///
+/// Bumped to 282 for issue #2442: complexity extraction no longer emits
+/// bodyless TypeScript overload and ambient declarations as runtime function
+/// units. Warm 281 caches retain those phantom complexity rows.
+pub(super) const CACHE_VERSION: u32 = 282;
 
 /// Duplication token cache version. Bump when duplicate tokenization,
 /// normalization, or the on-disk token cache schema changes.

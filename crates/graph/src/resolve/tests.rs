@@ -2120,6 +2120,144 @@ fn specifier_at_at_slash_returns_unresolvable() {
     });
 }
 
+/// Write a minimal inlined Yarn PnP manifest at `root` that maps the bare
+/// package `foo@npm:1.0.0` to an unplugged (unzipped) install directory, plus
+/// `src/app.ts` as an issuer, and return the package directory. Mirrors the
+/// shape Yarn 4 writes: a `null` top-level entry, one workspace at `./`, and
+/// per-package `packageLocation` values relative to the manifest.
+#[cfg(not(miri))]
+fn write_yarn_pnp_fixture(root: &Path) -> PathBuf {
+    let package_dir = root.join(".yarn/unplugged/foo-npm-1.0.0-0123456789/node_modules/foo");
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::write(
+        package_dir.join("package.json"),
+        r#"{"name":"foo","version":"1.0.0","main":"index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(package_dir.join("index.js"), "module.exports = 'foo';\n").unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/app.ts"), "import foo from 'foo';\n").unwrap();
+
+    let manifest = concat!(
+        "#!/usr/bin/env node\n",
+        "/* eslint-disable */\n",
+        "\"use strict\";\n",
+        "\n",
+        "const RAW_RUNTIME_STATE =\n",
+        "'{\"dependencyTreeRoots\":[{\"name\":\"app\",\"reference\":\"workspace:.\"}],",
+        "\"enableTopLevelFallback\":true,",
+        "\"ignorePatternData\":null,",
+        "\"fallbackExclusionList\":[[\"app\",[\"workspace:.\"]]],",
+        "\"fallbackPool\":[],",
+        "\"packageRegistryData\":[",
+        "[null,[[null,{\"packageLocation\":\"./\",\"packageDependencies\":[],",
+        "\"linkType\":\"SOFT\"}]]],",
+        "[\"app\",[[\"workspace:.\",{\"packageLocation\":\"./\",",
+        "\"packageDependencies\":[[\"app\",\"workspace:.\"],[\"foo\",\"npm:1.0.0\"]],",
+        "\"linkType\":\"SOFT\"}]]],",
+        "[\"foo\",[[\"npm:1.0.0\",{\"packageLocation\":",
+        "\"./.yarn/unplugged/foo-npm-1.0.0-0123456789/node_modules/foo/\",",
+        "\"packageDependencies\":[[\"foo\",\"npm:1.0.0\"]],\"linkType\":\"HARD\"}]]]",
+        "]}';\n",
+        "\n",
+        "function $$SETUP_STATE(hydrateRuntimeState, basePath) {\n",
+        "  return hydrateRuntimeState(JSON.parse(RAW_RUNTIME_STATE), ",
+        "{basePath: basePath || __dirname});\n",
+        "}\n",
+    );
+    std::fs::write(root.join(".pnp.cjs"), manifest).unwrap();
+    package_dir
+}
+
+/// Yarn PnP projects have no `node_modules`; bare specifiers go through the
+/// inlined `.pnp.cjs` manifest instead. oxc locates that manifest from the
+/// resolver's `cwd` (falling back to the process working directory) and fallow
+/// never chdirs, so the resolver must anchor it to the project itself. The
+/// test therefore runs with the process cwd elsewhere and must not chdir.
+#[test]
+#[cfg_attr(miri, ignore)] // oxc_resolver uses statx syscall unsupported by Miri
+fn yarn_pnp_bare_specifier_resolves_through_the_manifest_without_chdir() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
+    let package_dir = write_yarn_pnp_fixture(&root);
+    assert_ne!(
+        std::env::current_dir().ok().as_deref(),
+        Some(root.as_path()),
+        "the test must exercise cwd-independent manifest discovery"
+    );
+
+    let resolver = specifier::create_resolver(&root, &[], &[]);
+    let resolved = resolver
+        .resolve_file(root.join("src/app.ts"), "foo")
+        .expect("foo resolves through .pnp.cjs");
+
+    assert_eq!(resolved.full_path(), package_dir.join("index.js"));
+}
+
+/// Yarn writes the manifest only at the workspace root. Analyzing one package
+/// of a PnP monorepo must still find it and resolve through it.
+#[test]
+#[cfg_attr(miri, ignore)] // oxc_resolver uses statx syscall unsupported by Miri
+fn yarn_pnp_sub_package_root_resolves_through_the_workspace_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
+    let package_dir = write_yarn_pnp_fixture(&root);
+    let app_root = root.join("packages/app");
+    std::fs::create_dir_all(app_root.join("src")).unwrap();
+    std::fs::write(app_root.join("src/index.ts"), "import foo from 'foo';\n").unwrap();
+
+    let resolver = specifier::create_resolver(&app_root, &[], &[]);
+    let resolved = resolver
+        .resolve_file(app_root.join("src/index.ts"), "foo")
+        .expect("foo resolves through the ancestor .pnp.cjs");
+
+    assert_eq!(resolved.full_path(), package_dir.join("index.js"));
+}
+
+/// The style resolver is derived from the main one and shares its cache; it
+/// must resolve through the same manifest.
+#[test]
+#[cfg_attr(miri, ignore)] // oxc_resolver uses statx syscall unsupported by Miri
+fn yarn_pnp_style_resolver_derived_via_clone_with_options_resolves_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
+    let package_dir = write_yarn_pnp_fixture(&root);
+
+    let resolver = specifier::create_resolver(&root, &[], &[]);
+    let style_resolver = resolver.clone_with_options(specifier::build_resolve_options(
+        &root,
+        &[],
+        &["style".to_string()],
+    ));
+    let resolved = style_resolver
+        .resolve_file(root.join("src/app.ts"), "foo")
+        .expect("foo resolves through .pnp.cjs");
+
+    assert_eq!(resolved.full_path(), package_dir.join("index.js"));
+}
+
+/// Without a manifest the resolver stays on the `node_modules` path: a missing
+/// bare specifier is a plain miss, not a PnP manifest error.
+#[test]
+#[cfg_attr(miri, ignore)] // oxc_resolver uses statx syscall unsupported by Miri
+fn non_pnp_root_reports_missing_bare_specifier_as_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
+    std::fs::write(root.join("package.json"), r#"{"name":"app"}"#).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/app.ts"), "import foo from 'foo';\n").unwrap();
+
+    let resolver = specifier::create_resolver(&root, &[], &[]);
+    let err = resolver
+        .resolve_file(root.join("src/app.ts"), "foo")
+        .expect_err("no node_modules and no manifest");
+
+    assert!(
+        matches!(err, oxc_resolver::ResolveError::NotFound(_)),
+        "expected NotFound, got {err:?}"
+    );
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
 fn create_resolver_without_plugins() {

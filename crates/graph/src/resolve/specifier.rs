@@ -35,6 +35,23 @@ pub(super) fn create_resolver(
     active_plugins: &[String],
     extra_conditions: &[String],
 ) -> Resolver {
+    Resolver::new(build_resolve_options(
+        root,
+        active_plugins,
+        extra_conditions,
+    ))
+}
+
+/// Build the [`ResolveOptions`] behind [`create_resolver`].
+///
+/// Exposed so a second resolver with different conditions can be derived from
+/// an existing one through `Resolver::clone_with_options`, sharing its
+/// filesystem cache and, on Yarn Plug'n'Play projects, the parsed manifest.
+pub(super) fn build_resolve_options(
+    root: &Path,
+    active_plugins: &[String],
+    extra_conditions: &[String],
+) -> ResolveOptions {
     let mut options = ResolveOptions {
         extensions: build_extensions(active_plugins),
         extension_alias: vec![
@@ -69,27 +86,45 @@ pub(super) fn create_resolver(
 
     options.tsconfig = Some(oxc_resolver::TsconfigDiscovery::Auto);
 
-    options.yarn_pnp = is_yarn_pnp_project(root);
+    // oxc locates the PnP manifest by walking up from `cwd`, falling back to
+    // the process working directory. fallow never chdirs, so a run started
+    // outside the project (`fallow /path/to/repo`, an editor's language
+    // server) would otherwise miss the manifest and silently stay on the slow
+    // path. Anchor discovery to the manifest directory itself. Canonical,
+    // because the pnp crate diffs issuer paths against that directory and the
+    // issuers fallow feeds it are canonical.
+    let manifest_dir = find_yarn_pnp_manifest_dir(root);
+    options.yarn_pnp = manifest_dir.is_some();
+    options.cwd = manifest_dir.map(|dir| dunce::canonicalize(&dir).unwrap_or(dir));
 
-    Resolver::new(options)
+    options
 }
 
-/// Yarn Plug'n'Play manifest filenames: `.pnp.cjs` since Yarn 3, `.pnp.js` for
-/// Yarn 2, and `.pnp.data.json` for installs that split the runtime data out of
-/// the loader script. `.pnp.mjs` in case future implementations are ESM complaint
-const YARN_PNP_MANIFESTS: [&str; 4] = [".pnp.cjs", ".pnp.js", ".pnp.mjs", ".pnp.data.json"];
+/// The Yarn Plug'n'Play manifest.
+///
+/// Yarn 2 wrote `.pnp.js`, and installs with `pnpEnableInlining: false` split
+/// the runtime state into `.pnp.data.json`. The pnp crate behind oxc_resolver
+/// only opens `.pnp.cjs` and only parses an inlined payload, so those layouts
+/// are deliberately not probed: enabling PnP for them would fail every bare
+/// specifier instead of merely leaving them on the slower fallback path.
+const YARN_PNP_MANIFEST: &str = ".pnp.cjs";
 
-/// Whether `root` is a Yarn Plug'n'Play project.
+/// Find the directory holding the Yarn Plug'n'Play manifest that governs `root`.
 ///
 /// PnP resolution is enabled per project rather than always-on. A PnP project
 /// has no populated `node_modules`, so without this every bare specifier misses
 /// and falls through to the much slower tsconfig fallback; conversely, turning
 /// it on for a non-PnP project would make the resolver consult a manifest that
 /// is not there.
-fn is_yarn_pnp_project(root: &Path) -> bool {
-    YARN_PNP_MANIFESTS
-        .iter()
-        .any(|manifest| root.join(manifest).is_file())
+///
+/// Yarn writes the manifest only at the workspace root, so `root` and its
+/// ancestors are probed: analyzing one package of a PnP monorepo (`--root
+/// packages/app`, an editor workspace folder) still finds it. A directory
+/// named like the manifest is not an install, hence `is_file`.
+fn find_yarn_pnp_manifest_dir(root: &Path) -> Option<PathBuf> {
+    root.ancestors()
+        .find(|dir| dir.join(YARN_PNP_MANIFEST).is_file())
+        .map(Path::to_path_buf)
 }
 
 /// Return `true` for errors raised while loading a tsconfig file (as opposed to
@@ -2915,50 +2950,94 @@ mod tests {
         );
     }
 
-    // ---- is_yarn_pnp_project ----
+    // ---- find_yarn_pnp_manifest_dir ----
 
     #[test]
     #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
-    fn is_yarn_pnp_project_detects_each_manifest_filename() {
-        for manifest in super::YARN_PNP_MANIFESTS {
+    fn yarn_pnp_manifest_dir_is_the_root_holding_pnp_cjs() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join(".pnp.cjs"), "").unwrap();
+        assert_eq!(
+            super::find_yarn_pnp_manifest_dir(temp.path()).as_deref(),
+            Some(temp.path())
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn yarn_pnp_manifest_dir_is_none_without_manifest() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+        assert_eq!(super::find_yarn_pnp_manifest_dir(temp.path()), None);
+    }
+
+    /// Only `.pnp.cjs` is loadable by the resolver's PnP backend. The Yarn 2
+    /// loader name, the split data file, and the ESM loader shim must not
+    /// switch PnP on.
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn yarn_pnp_manifest_dir_ignores_other_pnp_filenames() {
+        for name in [".pnp.js", ".pnp.mjs", ".pnp.data.json", ".pnp.loader.mjs"] {
             let temp = tempdir().unwrap();
-            fs::write(temp.path().join(manifest), "").unwrap();
-            assert!(
-                super::is_yarn_pnp_project(temp.path()),
-                "{manifest} should mark the project as Yarn PnP"
+            fs::write(temp.path().join(name), "").unwrap();
+            assert_eq!(
+                super::find_yarn_pnp_manifest_dir(temp.path()),
+                None,
+                "{name} must not enable PnP"
             );
         }
     }
 
-    #[test]
-    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
-    fn is_yarn_pnp_project_false_without_manifest() {
-        let temp = tempdir().unwrap();
-        fs::write(temp.path().join("package.json"), "{}").unwrap();
-        assert!(!super::is_yarn_pnp_project(temp.path()));
-    }
-
-    /// A directory sharing a manifest's name is not an install; `is_file`
+    /// A directory sharing the manifest's name is not an install; `is_file`
     /// rather than `exists` is what keeps this from being a false positive.
     #[test]
     #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
-    fn is_yarn_pnp_project_ignores_directory_named_like_manifest() {
+    fn yarn_pnp_manifest_dir_ignores_directory_named_like_manifest() {
         let temp = tempdir().unwrap();
         fs::create_dir(temp.path().join(".pnp.cjs")).unwrap();
-        assert!(!super::is_yarn_pnp_project(temp.path()));
+        assert_eq!(super::find_yarn_pnp_manifest_dir(temp.path()), None);
     }
 
-    /// Nested packages in a PnP monorepo carry no manifest of their own, so
-    /// detection is scoped to the project root and must not walk upwards. 
-    // That would be a waste of compute and IO
+    /// Yarn writes the manifest only at the workspace root, so a nested
+    /// package root inherits it from the ancestor that holds it.
     #[test]
     #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
-    fn is_yarn_pnp_project_does_not_inherit_from_parent_directory() {
+    fn yarn_pnp_manifest_dir_inherits_from_ancestor() {
         let temp = tempdir().unwrap();
         fs::write(temp.path().join(".pnp.cjs"), "").unwrap();
         let nested = temp.path().join("packages/app");
         fs::create_dir_all(&nested).unwrap();
-        assert!(!super::is_yarn_pnp_project(&nested));
+        assert_eq!(
+            super::find_yarn_pnp_manifest_dir(&nested).as_deref(),
+            Some(temp.path())
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn build_resolve_options_anchors_pnp_cwd_to_the_manifest_directory() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join(".pnp.cjs"), "").unwrap();
+        let nested = temp.path().join("packages/app");
+        fs::create_dir_all(&nested).unwrap();
+
+        let options = super::build_resolve_options(&nested, &[], &[]);
+        assert!(options.yarn_pnp);
+        assert_eq!(
+            options.cwd.as_deref(),
+            Some(dunce::canonicalize(temp.path()).unwrap().as_path())
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn build_resolve_options_leaves_pnp_off_without_manifest() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("package.json"), "{}").unwrap();
+
+        let options = super::build_resolve_options(temp.path(), &[], &[]);
+        assert!(!options.yarn_pnp);
+        assert_eq!(options.cwd, None);
     }
 
     #[test]

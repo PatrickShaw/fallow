@@ -202,7 +202,13 @@ pub use store::GraphCacheStore;
 /// narrowing while resolved CommonJS and CSS Module default imports preserve
 /// whole-object handoffs. Those reference outcomes are baked into the persisted
 /// graph, so a warm 44 cache would skip the corrected build logic.
-pub const GRAPH_CACHE_VERSION: u32 = 45;
+///
+/// Bumped to 46 for issue #2444 (PR #2435): Yarn Plug'n'Play projects now
+/// resolve bare specifiers through the inlined `.pnp.cjs` manifest, anchored
+/// to the manifest directory, instead of missing on the empty `node_modules`
+/// and falling back. The resolver output persisted in a warm 45 cache holds
+/// those misses and would replay them as unresolved imports.
+pub const GRAPH_CACHE_VERSION: u32 = 46;
 
 /// Cached form of a resolved target.
 ///

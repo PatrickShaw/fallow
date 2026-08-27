@@ -2125,7 +2125,6 @@ fn specifier_at_at_slash_returns_unresolvable() {
 /// `src/app.ts` as an issuer, and return the package directory. Mirrors the
 /// shape Yarn 4 writes: a `null` top-level entry, one workspace at `./`, and
 /// per-package `packageLocation` values relative to the manifest.
-#[cfg(not(miri))]
 fn write_yarn_pnp_fixture(root: &Path) -> PathBuf {
     let package_dir = root.join(".yarn/unplugged/foo-npm-1.0.0-0123456789/node_modules/foo");
     std::fs::create_dir_all(&package_dir).unwrap();

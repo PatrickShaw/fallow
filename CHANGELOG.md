@@ -18,8 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anchors manifest discovery to that directory, so runs started outside the
   project and editor sessions resolve the same way. Manifests that are not
   inlined (`pnpEnableInlining: false`) are not supported and stay on the
-  fallback path. Thanks to [@PatrickShaw](https://github.com/PatrickShaw) for
-  the contribution.
+  fallback path. The generated `.pnp.cjs` and `.pnp.loader.mjs` files are no
+  longer discovered as project source, so they drop out of file counts and
+  never produce findings of their own. Thanks to
+  [@PatrickShaw](https://github.com/PatrickShaw) for the contribution.
 
 ### Changed
 

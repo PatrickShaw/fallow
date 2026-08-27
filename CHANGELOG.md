@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Import resolution on large project-reference monorepos is faster.** The
+  per-run tsconfig and canonicalize caches no longer serialize every lookup
+  behind a single lock or deep-copy the parsed document on every hit
+  ([#2437](https://github.com/fallow-rs/fallow/pull/2437)). Thanks to
+  [@PatrickShaw](https://github.com/PatrickShaw) for the contribution.
+
 ## [3.19.0] - 2026-08-26
 
 ### Added

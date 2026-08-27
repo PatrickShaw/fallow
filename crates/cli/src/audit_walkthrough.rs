@@ -34,7 +34,7 @@
 
 pub use fallow_output::{
     AcceptedJudgment, AgentJudgment, AgentWalkthrough, ChangeAnchor, DirectionUnit, INJECTION_NOTE,
-    RejectedJudgment, ReviewDirection, WalkthroughValidation, agent_schema,
+    RejectedJudgment, ReviewDirection, TestAdjacency, WalkthroughValidation, agent_schema,
 };
 use fallow_output::{FocusMap, RoutingFacts};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -52,6 +52,12 @@ const UNANCHORED_REASON: &str = "unanchored-signal-id";
 /// that fallow did not emit for this changed set (the anti-hallucination gate
 /// for the weaker, region-level anchor).
 const UNKNOWN_CHANGE_ANCHOR_REASON: &str = "unknown-change-anchor";
+
+/// The reason a judgment is rejected for carrying an `action` outside the closed
+/// vocabulary (`block` / `address` / `consider` / `fyi`). The label is what the
+/// receiving author acts on, so an unknown label is refused rather than passed
+/// through as noise.
+const INVALID_ACTION_REASON: &str = "invalid-action";
 
 pub type WalkthroughGuide = fallow_output::StandardWalkthroughGuide;
 
@@ -280,6 +286,7 @@ pub fn build_direction(
     focus: &FocusMap,
     out_of_diff_by_file: &FxHashMap<String, Vec<String>>,
     routing: &RoutingFacts,
+    test_adjacency: &FxHashMap<String, TestAdjacency>,
 ) -> ReviewDirection {
     // Optional expert overlay: file -> routed expert(s). Empty on the author's own
     // PR, which is why it is an overlay and not the spine.
@@ -316,6 +323,7 @@ pub fn build_direction(
                     .get(unit.file.as_str())
                     .map(|experts| experts.to_vec())
                     .unwrap_or_default(),
+                test_adjacency: test_adjacency.get(&unit.file).copied(),
             }
         })
         .collect();
@@ -409,6 +417,7 @@ pub fn validate_walkthrough(
                 signal_id: judgment.signal_id.clone(),
                 change_anchor: judgment.change_anchor.clone(),
                 reason: "stale-snapshot".to_string(),
+                invalid_value: None,
             });
         }
     } else {
@@ -447,39 +456,63 @@ fn validate_fresh_judgment(
     change_anchor_ids: &FxHashSet<String>,
 ) -> Result<AcceptedJudgment, RejectedJudgment> {
     // A signal_id (graph finding) is the strong anchor; a change_anchor
-    // (changed region) is the weaker fallback. Prefer the signal.
-    if !judgment.signal_id.is_empty() && surface.accept_signal_id(&judgment.signal_id) {
-        return Ok(AcceptedJudgment {
+    // (changed region) is the weaker fallback. Prefer the signal. The anchor
+    // is checked first so a hallucinated anchor is reported as such even when
+    // the label is also wrong: the anti-hallucination result must never hide
+    // behind a typo.
+    let anchor = if !judgment.signal_id.is_empty() && surface.accept_signal_id(&judgment.signal_id)
+    {
+        Some((judgment.signal_id.clone(), String::new(), "signal"))
+    } else if !judgment.change_anchor.is_empty()
+        && change_anchor_ids.contains(&judgment.change_anchor)
+    {
+        Some((String::new(), judgment.change_anchor.clone(), "change"))
+    } else {
+        None
+    };
+    let Some((signal_id, change_anchor, anchor_kind)) = anchor else {
+        // Cited a change_anchor (but no valid signal_id) and it did not resolve:
+        // the region-level miss. Otherwise this is the signal-id miss.
+        let reason = if judgment.signal_id.is_empty() && !judgment.change_anchor.is_empty() {
+            UNKNOWN_CHANGE_ANCHOR_REASON
+        } else {
+            UNANCHORED_REASON
+        };
+        return Err(RejectedJudgment {
             signal_id: judgment.signal_id.clone(),
-            change_anchor: String::new(),
-            anchor_kind: "signal".to_string(),
-            agent_framing: judgment.framing.clone(),
-            concern: judgment.concern.clone(),
-            deterministic: false,
-        });
-    }
-    if !judgment.change_anchor.is_empty() && change_anchor_ids.contains(&judgment.change_anchor) {
-        return Ok(AcceptedJudgment {
-            signal_id: String::new(),
             change_anchor: judgment.change_anchor.clone(),
-            anchor_kind: "change".to_string(),
-            agent_framing: judgment.framing.clone(),
-            concern: judgment.concern.clone(),
-            deterministic: false,
+            reason: reason.to_string(),
+            invalid_value: None,
+        });
+    };
+
+    // The author-action label is a closed vocabulary: an unknown label refuses
+    // the judgment so a typo never reaches the author as an unlabeled note. An
+    // empty string is an absent label, like `null`.
+    let action = judgment
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|action| !action.is_empty());
+    if let Some(action) = action
+        && !fallow_output::is_judgment_action(action)
+    {
+        return Err(RejectedJudgment {
+            signal_id: judgment.signal_id.clone(),
+            change_anchor: judgment.change_anchor.clone(),
+            reason: INVALID_ACTION_REASON.to_string(),
+            invalid_value: Some(action.to_string()),
         });
     }
 
-    // Cited a change_anchor (but no valid signal_id) and it did not resolve:
-    // the region-level miss. Otherwise this is the signal-id miss.
-    let reason = if judgment.signal_id.is_empty() && !judgment.change_anchor.is_empty() {
-        UNKNOWN_CHANGE_ANCHOR_REASON
-    } else {
-        UNANCHORED_REASON
-    };
-    Err(RejectedJudgment {
-        signal_id: judgment.signal_id.clone(),
-        change_anchor: judgment.change_anchor.clone(),
-        reason: reason.to_string(),
+    Ok(AcceptedJudgment {
+        signal_id,
+        change_anchor,
+        anchor_kind: anchor_kind.to_string(),
+        agent_framing: judgment.framing.clone(),
+        concern: judgment.concern.clone(),
+        action: action.map(str::to_string),
+        deterministic: false,
     })
 }
 
@@ -527,7 +560,13 @@ pub fn build_guide_from_result(result: &crate::audit::AuditResult) -> Walkthroug
     // Spine the direction on the CHANGE (the focus units), with routing as the
     // optional expert overlay, so the work-list is never empty on the author's own
     // PR. Borrow `digest.focus` before `digest` is moved into the guide.
-    let direction = build_direction(&digest.focus, &out_of_diff_by_file, routing);
+    let empty_adjacency = FxHashMap::default();
+    let test_adjacency = result
+        .check
+        .as_ref()
+        .and_then(|c| c.test_adjacency.as_ref())
+        .unwrap_or(&empty_adjacency);
+    let direction = build_direction(&digest.focus, &out_of_diff_by_file, routing, test_adjacency);
     build_walkthrough_guide(digest, hash, direction, result.change_anchors.clone())
 }
 
@@ -552,6 +591,8 @@ mod tests {
             boundary_introduced: vec!["ui->-db".to_string()],
             cycle_introduced: Vec::new(),
             public_api_added: Vec::new(),
+            dependency_added: Vec::new(),
+            dependency_major_bumped: Vec::new(),
         };
         let anchors = vec![BoundaryAnchor {
             zone_pair_key: "ui->-db".to_string(),
@@ -565,6 +606,7 @@ mod tests {
             deltas: &deltas,
             boundary_anchors: &anchors,
             coordination: &[],
+            dependency_anchors: &[],
             public_api_anchor_line: 0,
             affected_not_shown: 3,
             routing: &routing,
@@ -590,6 +632,7 @@ mod tests {
                 change_anchor: String::new(),
                 framing: "Intended coupling, payments boundary widened on purpose.".to_string(),
                 concern: Some("coupling".to_string()),
+                action: None,
             }],
         };
         let validation = validate_walkthrough(&agent, &surface, &FxHashSet::default(), hash);
@@ -618,6 +661,7 @@ mod tests {
                     change_anchor: String::new(),
                     framing: "real".to_string(),
                     concern: None,
+                    action: None,
                 },
                 AgentJudgment {
                     // A fabricated id fallow never emitted.
@@ -625,6 +669,7 @@ mod tests {
                     change_anchor: String::new(),
                     framing: "hallucinated decision with no graph anchor".to_string(),
                     concern: None,
+                    action: None,
                 },
             ],
         };
@@ -654,6 +699,7 @@ mod tests {
                 change_anchor: String::new(),
                 framing: "would be valid, but the tree moved".to_string(),
                 concern: None,
+                action: None,
             }],
         };
         let validation =
@@ -733,7 +779,12 @@ mod tests {
             ],
             deprioritized: vec![],
         };
-        let direction = build_direction(&focus, &FxHashMap::default(), &RoutingFacts::default());
+        let direction = build_direction(
+            &focus,
+            &FxHashMap::default(),
+            &RoutingFacts::default(),
+            &FxHashMap::default(),
+        );
         // The displayed importer count decides: b.ts (60 importers) before a.ts (5),
         // even though they share a `fan_io` and a.ts has the larger composite total.
         assert_eq!(direction.order, vec!["src/b.ts", "src/a.ts"]);
@@ -765,7 +816,12 @@ mod tests {
             ],
             deprioritized: vec![],
         };
-        let direction = build_direction(&focus, &FxHashMap::default(), &RoutingFacts::default());
+        let direction = build_direction(
+            &focus,
+            &FxHashMap::default(),
+            &RoutingFacts::default(),
+            &FxHashMap::default(),
+        );
         // top.ts (12 importers) leads; then the zero-importer files by fan-out
         // (9 before 1), so the displayed counts are non-increasing top to bottom.
         assert_eq!(
@@ -792,7 +848,12 @@ mod tests {
             "src/contract.ts".to_string(),
             vec!["src/consumer.ts".to_string()],
         );
-        let direction = build_direction(&focus, &out_of_diff, &RoutingFacts::default());
+        let direction = build_direction(
+            &focus,
+            &out_of_diff,
+            &RoutingFacts::default(),
+            &FxHashMap::default(),
+        );
         // contract.ts breaks a contract -> sorts first even with the lower importer
         // count.
         assert_eq!(direction.order, vec!["src/contract.ts", "src/orient.ts"]);
@@ -818,7 +879,12 @@ mod tests {
         // Only src/a.ts has an out-of-diff consumer; src/b.ts has none.
         let mut out_of_diff_by_file = FxHashMap::default();
         out_of_diff_by_file.insert("src/a.ts".to_string(), vec!["src/consumer.ts".to_string()]);
-        let direction = build_direction(&focus, &out_of_diff_by_file, &routing);
+        let direction = build_direction(
+            &focus,
+            &out_of_diff_by_file,
+            &routing,
+            &FxHashMap::default(),
+        );
         // a.ts breaks a contract -> sorts first with the contract-break lens,
         // carrying its budget; b.ts has no out-of-diff -> orientation, but the
         // expert overlay still attaches @team.
@@ -835,6 +901,37 @@ mod tests {
     }
 
     #[test]
+    fn direction_carries_test_adjacency_only_where_the_graph_recorded_it() {
+        let focus = FocusMap {
+            review_here: vec![focus_unit("src/a.ts", 3), focus_unit("src/b.ts", 2)],
+            deprioritized: vec![],
+        };
+        let mut test_adjacency = FxHashMap::default();
+        test_adjacency.insert("src/a.ts".to_string(), TestAdjacency::None);
+        let direction = build_direction(
+            &focus,
+            &FxHashMap::default(),
+            &RoutingFacts::default(),
+            &test_adjacency,
+        );
+        let by_file: FxHashMap<&str, Option<TestAdjacency>> = direction
+            .units
+            .iter()
+            .map(|u| (u.file.as_str(), u.test_adjacency))
+            .collect();
+        assert_eq!(by_file["src/a.ts"], Some(TestAdjacency::None));
+        assert_eq!(by_file["src/b.ts"], None, "no graph fact, no claim");
+        let json = serde_json::to_value(&direction.units).unwrap();
+        let b = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["file"] == "src/b.ts")
+            .unwrap();
+        assert!(b.get("test_adjacency").is_none());
+    }
+
+    #[test]
     fn direction_excludes_non_source_units() {
         let focus = FocusMap {
             review_here: vec![
@@ -845,7 +942,12 @@ mod tests {
             ],
             deprioritized: vec![],
         };
-        let direction = build_direction(&focus, &FxHashMap::default(), &RoutingFacts::default());
+        let direction = build_direction(
+            &focus,
+            &FxHashMap::default(),
+            &RoutingFacts::default(),
+            &FxHashMap::default(),
+        );
         // Only the source unit survives; docs/config/license churn is dropped.
         assert_eq!(direction.order, vec!["src/app.component.ts"]);
         assert_eq!(direction.units[0].concern_lens, "orientation");
@@ -956,12 +1058,14 @@ mod tests {
                     change_anchor: real.clone(),
                     framing: "this region trades simplicity for a cache".to_string(),
                     concern: None,
+                    action: None,
                 },
                 AgentJudgment {
                     signal_id: String::new(),
                     change_anchor: "chg:deadbeefdeadbeef".to_string(),
                     framing: "hallucinated region".to_string(),
                     concern: None,
+                    action: None,
                 },
             ],
         };
@@ -982,6 +1086,70 @@ mod tests {
         assert_eq!(validation.rejected[0].change_anchor, "chg:deadbeefdeadbeef");
     }
 
+    // action: a closed-vocabulary label passes through fenced on the accepted
+    // judgment; an unknown label rejects the judgment before anchoring.
+    #[test]
+    fn action_label_passes_through_and_unknown_action_rejects() {
+        let (surface, real_id) = surface_with_one_signal();
+        let hash = "graph:abc123";
+        let agent = AgentWalkthrough {
+            graph_snapshot_hash: hash.to_string(),
+            judgments: vec![
+                AgentJudgment {
+                    signal_id: real_id.clone(),
+                    change_anchor: String::new(),
+                    framing: "the ui->db edge needs an owner decision".to_string(),
+                    concern: Some("coupling".to_string()),
+                    action: Some("address".to_string()),
+                },
+                AgentJudgment {
+                    signal_id: real_id.clone(),
+                    change_anchor: String::new(),
+                    framing: "no label at all".to_string(),
+                    concern: None,
+                    action: None,
+                },
+                AgentJudgment {
+                    signal_id: real_id,
+                    change_anchor: String::new(),
+                    framing: "typo in the label".to_string(),
+                    concern: None,
+                    action: Some("must-fix".to_string()),
+                },
+                AgentJudgment {
+                    signal_id: "sig:0000000000000000".to_string(),
+                    change_anchor: String::new(),
+                    framing: "hallucinated anchor and a typo".to_string(),
+                    concern: None,
+                    action: Some("must-fix".to_string()),
+                },
+            ],
+        };
+        let validation = validate_walkthrough(&agent, &surface, &FxHashSet::default(), hash);
+        assert_eq!(validation.accepted_count, 2);
+        assert_eq!(validation.accepted[0].action.as_deref(), Some("address"));
+        assert_eq!(validation.accepted[0].concern.as_deref(), Some("coupling"));
+        assert!(!validation.accepted[0].deterministic);
+        assert_eq!(validation.accepted[1].action, None);
+        assert_eq!(validation.rejected_count, 2);
+        assert_eq!(validation.rejected[0].reason, INVALID_ACTION_REASON);
+        assert_eq!(
+            validation.rejected[0].invalid_value.as_deref(),
+            Some("must-fix"),
+            "the offending label is echoed"
+        );
+        assert_eq!(
+            validation.rejected[1].reason, UNANCHORED_REASON,
+            "a hallucinated anchor outranks a bad label"
+        );
+        assert_eq!(validation.rejected[1].invalid_value, None);
+        let json = serde_json::to_value(&validation.accepted[1]).unwrap();
+        assert!(
+            json.get("action").is_none(),
+            "an absent action is omitted from the wire, not serialized as null"
+        );
+    }
+
     // change_anchor: a stale snapshot refuses a change_anchor judgment too.
     #[test]
     fn stale_snapshot_refuses_change_anchor_judgment() {
@@ -996,6 +1164,7 @@ mod tests {
                 change_anchor: anchors[0].change_anchor.clone(),
                 framing: "valid region, but the tree moved".to_string(),
                 concern: None,
+                action: None,
             }],
         };
         let validation = validate_walkthrough(&agent, &surface, &allow, "graph:NEW");

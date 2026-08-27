@@ -202,7 +202,14 @@ pub use store::GraphCacheStore;
 /// narrowing while resolved CommonJS and CSS Module default imports preserve
 /// whole-object handoffs. Those reference outcomes are baked into the persisted
 /// graph, so a warm 44 cache would skip the corrected build logic.
-pub const GRAPH_CACHE_VERSION: u32 = 45;
+///
+/// Bumped to 46 for PR #2436: a tsconfig reached through `references` without
+/// `include` or `files` now applies only to files under its own directory
+/// instead of every file, so `paths` from a referenced package no longer
+/// resolve imports in sibling packages. Resolver output is persisted with the
+/// graph and the cache key does not cover tsconfig scope, so a warm 45 cache
+/// would keep replaying the leaked cross-package resolutions.
+pub const GRAPH_CACHE_VERSION: u32 = 46;
 
 /// Cached form of a resolved target.
 ///

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tsconfig without `include` or `files` now applies only to files under
+  its own directory when fallow follows `references`**
+  ([#2436](https://github.com/fallow-rs/fallow/pull/2436)). This matches tsc's
+  `**/*` default project scope. Previously such a referenced config matched
+  every file in the repository, so its `paths` leaked to files outside that
+  directory and every referenced project was walked for every import. Aliases
+  from a referenced package no longer resolve from a sibling package, and
+  monorepos with many `references` and no `include` resolve imports noticeably
+  faster. Thanks to @PatrickShaw.
+
 ## [3.19.0] - 2026-08-26
 
 ### Added
@@ -121,11 +133,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lowest path) before duplicate detection. A genuine duplicate in an unrelated
   file is still reported and names that file next to the family
   representative. Projects without those plugins keep the previous output.
-- **tsconfig.json setups without `includes` now run faster** 
-  [#2436](https://github.com/fallow-rs/fallow/pull/2436). Absence of `includes`
-  caused every file to be matched per tsconfig.json in a monorepo. Should
-  result in significant speed ups for monorepos with heavy usage of project 
-  references`references` and no `includes`.
 
 ## [3.18.0] - 2026-08-25
 

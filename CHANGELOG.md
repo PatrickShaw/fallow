@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Import resolution on large project-reference monorepos is faster.** The
+  per-run tsconfig and canonicalize caches no longer serialize every lookup
+  behind a single lock or deep-copy the parsed document on every hit
+  ([#2437](https://github.com/fallow-rs/fallow/pull/2437)). Thanks to
+  [@PatrickShaw](https://github.com/PatrickShaw) for the contribution.
+
 ## [3.19.0] - 2026-08-26
 
 ### Added
@@ -94,11 +102,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `data from newer fallow · upgrade this fallow`, so the fix is visible in the
   status bar and a statusline wrapper can retry with a current binary. Corrupt
   or unreadable stores keep the `data unavailable` line.
-- **Better multi-threaded support** [#2437](https://github.com/fallow-rs/fallow/pull/2437). Now using `Dashmap` instead
-  of `FxHashMap` in TSConfig cache to reduce lock contention when heavy use of
-  tsconfig.json setups (E.g. Project references) is in use. Should provide
-  significant multi-thread performance improvements for high thread environments
-  with high tsconfig count codebases.
 
 ### Fixed
 

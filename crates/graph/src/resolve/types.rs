@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use oxc_resolver::Resolver;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde_json::Value;
 
 use fallow_types::discover::FileId;
@@ -413,7 +413,7 @@ pub(super) struct ResolveContext<'a> {
 /// Session-local cache of `dunce::canonicalize` results keyed by input path.
 #[derive(Default)]
 pub(super) struct CanonicalizeCache {
-    map: DashMap<PathBuf, Option<PathBuf>>,
+    map: DashMap<PathBuf, Option<PathBuf>, FxBuildHasher>,
 }
 
 impl CanonicalizeCache {
@@ -433,16 +433,17 @@ impl CanonicalizeCache {
 /// Session-local cache for tsconfig helper lookups used during import resolution.
 #[derive(Default)]
 pub(super) struct TsconfigCache {
-    json: DashMap<PathBuf, Option<Arc<Value>>>,
-    chains: DashMap<PathBuf, Arc<[PathBuf]>>,
+    json: DashMap<PathBuf, Option<Arc<Value>>, FxBuildHasher>,
+    chains: DashMap<PathBuf, Arc<[PathBuf]>, FxBuildHasher>,
 }
 
 impl TsconfigCache {
     /// Return a cached parsed tsconfig JSON value, loading it on first miss.
     ///
     /// Handing back an [`Arc`] rather than a clone matters: a tsconfig chain is
-    /// walked once per import specifier, and deep-copying every parsed document
-    /// on each hop dominated resolution on large project-reference graphs.
+    /// walked several times per import specifier, and deep-copying every parsed
+    /// document on each hop dominated resolution on large project-reference
+    /// graphs.
     pub fn json(
         &self,
         path: &Path,
@@ -649,18 +650,15 @@ mod tests {
 
     #[test]
     fn canonicalize_cache_returns_the_same_result_on_repeat_lookups() {
-        let temp = std::env::temp_dir().join("fallow-test-canonicalize-cache");
-        std::fs::create_dir_all(&temp).unwrap();
-        let file = temp.join("file.ts");
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let file = temp.path().join("file.ts");
         std::fs::write(&file, "").unwrap();
 
         let cache = CanonicalizeCache::default();
         let expected = dunce::canonicalize(&file).ok();
         assert_eq!(cache.get(&file), expected);
         assert_eq!(cache.get(&file), expected);
-        assert!(cache.get(&temp.join("missing.ts")).is_none());
-
-        let _ = std::fs::remove_dir_all(&temp);
+        assert!(cache.get(&temp.path().join("missing.ts")).is_none());
     }
 
     #[test]

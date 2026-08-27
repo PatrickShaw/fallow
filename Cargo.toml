@@ -60,6 +60,7 @@ flate2 = "1"
 
 # Parallelism
 rayon = "1"
+dashmap = "6"
 
 # File system
 dunce = "1"
@@ -73,7 +74,6 @@ regex = { version = "1", default-features = false, features = ["std", "perf", "u
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 sha2 = "0.11"
 rustc-hash = "2"
-dashmap = "6"
 
 # HTTP
 httpdate = "1"

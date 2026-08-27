@@ -11,10 +11,11 @@ use serde_json::Value;
 
 use super::fallbacks::{
     extract_package_name_from_node_modules_path, lookup_internal_file_id, nearest_package_manifest,
-    try_css_extension_fallback, try_package_imports_fallback, try_path_alias_fallback,
-    try_pnpm_workspace_fallback, try_relative_package_root_source_fallback,
-    try_scss_include_path_fallback, try_scss_node_modules_fallback, try_scss_partial_fallback,
-    try_source_fallback, try_workspace_package_fallback,
+    normalize_path_lexically, try_css_extension_fallback, try_package_imports_fallback,
+    try_path_alias_fallback, try_pnpm_workspace_fallback,
+    try_relative_package_root_source_fallback, try_scss_include_path_fallback,
+    try_scss_node_modules_fallback, try_scss_partial_fallback, try_source_fallback,
+    try_workspace_package_fallback,
 };
 use super::path_info::{
     extract_package_name, is_bare_specifier, is_path_alias, is_valid_package_name,
@@ -414,7 +415,12 @@ fn tsconfig_applies_to_file(
     let Some(json) = read_tsconfig_json_cached(ctx, tsconfig_path) else {
         return false;
     };
-    let tsconfig_dir = tsconfig_path.parent().unwrap_or(root);
+    // `references` paths are joined verbatim, so the directory can carry `./`
+    // and `..` segments. Normalize once: the `include`/`exclude` globs are
+    // built from this string and a literal `./` or `..` never matches a
+    // normalized file path.
+    let tsconfig_dir = normalize_path_lexically(tsconfig_path.parent().unwrap_or(root));
+    let tsconfig_dir = tsconfig_dir.as_path();
     if let Some(files) = json.get("files").and_then(Value::as_array) {
         return files
             .iter()
@@ -423,10 +429,10 @@ fn tsconfig_applies_to_file(
             .any(|file| same_path(&file, from_file));
     }
 
-    let include_matches = json
-        .get("include")
-        .and_then(Value::as_array)
-        .is_none_or(|include| glob_values_match(tsconfig_dir, include, from_file));
+    let include_matches = match json.get("include").and_then(Value::as_array) {
+        Some(include) => glob_values_match(tsconfig_dir, include, from_file),
+        None => from_file.starts_with(tsconfig_dir),
+    };
     if !include_matches {
         return false;
     }
@@ -2952,6 +2958,76 @@ mod tests {
         );
     }
 
+    // ---- tsconfig_applies_to_file ----
+
+    /// Build a `ResolveContext` rooted at `root` with empty lookup tables and
+    /// hand it to `f`. Enough for helpers that only read tsconfigs from disk.
+    fn with_ctx_at_root<F: FnOnce(&ResolveContext<'_>)>(root: &Path, f: F) {
+        let resolver = super::create_resolver(root, &[], &[]);
+        let style_resolver = super::create_resolver(root, &[], &["style".to_string()]);
+        let extensions = react_native::build_extensions(&[]);
+        let path_to_id = FxHashMap::default();
+        let raw_path_to_id = FxHashMap::default();
+        let workspace_roots = FxHashMap::default();
+        let package_manifests = Vec::new();
+        let condition_names = react_native::build_condition_names(&[], &[]);
+        let tsconfig_warned = std::sync::Mutex::new(FxHashSet::default());
+        let tsconfig_cache = TsconfigCache::default();
+        let canonicalize_cache = CanonicalizeCache::default();
+        let ctx = ResolveContext {
+            resolver: &resolver,
+            style_resolver: &style_resolver,
+            extensions: &extensions,
+            path_to_id: &path_to_id,
+            raw_path_to_id: &raw_path_to_id,
+            workspace_roots: &workspace_roots,
+            package_manifests: &package_manifests,
+            has_deno_import_maps: false,
+            condition_names: &condition_names,
+            path_aliases: &[],
+            scss_include_paths: &[],
+            static_dir_mappings: &[],
+            root,
+            canonical_fallback: None,
+            tsconfig_warned: &tsconfig_warned,
+            tsconfig_cache: &tsconfig_cache,
+            canonicalize_cache: &canonicalize_cache,
+        };
+        f(&ctx);
+    }
+
+    fn write_two_sibling_packages_without_includes(root: &Path) {
+        for package in ["app", "lib"] {
+            let src = root.join("packages").join(package).join("src");
+            fs::create_dir_all(&src).unwrap();
+            fs::write(src.join("index.ts"), "export {};").unwrap();
+            fs::write(
+                root.join("packages").join(package).join("tsconfig.json"),
+                r#"{"compilerOptions":{}}"#,
+            )
+            .unwrap();
+        }
+    }
+
+    /// The regression this guards: a tsconfig with neither `files` nor
+    /// `include` used to match every file in the repo, so an unrelated sibling
+    /// project claimed ownership of it.
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn tsconfig_without_includes_does_not_apply_to_a_sibling_package() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        write_two_sibling_packages_without_includes(root);
+
+        with_ctx_at_root(root, |ctx| {
+            assert!(!super::tsconfig_applies_to_file(
+                ctx,
+                &root.join("packages/lib/tsconfig.json"),
+                &root.join("packages/app/src/index.ts"),
+            ));
+        });
+    }
+
     // ---- find_yarn_pnp_manifest_dir ----
 
     #[test]
@@ -3048,5 +3124,247 @@ mod tests {
         let temp = tempdir().unwrap();
         fs::write(temp.path().join(".pnp.cjs"), "").unwrap();
         let _resolver = super::create_resolver(temp.path(), &[], &[]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn tsconfig_without_includes_applies_to_files_in_its_own_directory() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        write_two_sibling_packages_without_includes(root);
+
+        with_ctx_at_root(root, |ctx| {
+            assert!(super::tsconfig_applies_to_file(
+                ctx,
+                &root.join("packages/app/tsconfig.json"),
+                &root.join("packages/app/src/index.ts"),
+            ));
+        });
+    }
+
+    /// `references` targets are joined onto the referencing directory verbatim,
+    /// so the tsconfig's own directory routinely arrives with `..` segments.
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn tsconfig_without_includes_applies_through_parent_dir_segments() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        write_two_sibling_packages_without_includes(root);
+
+        with_ctx_at_root(root, |ctx| {
+            assert!(super::tsconfig_applies_to_file(
+                ctx,
+                &root.join("packages/app/../lib/tsconfig.json"),
+                &root.join("packages/lib/src/index.ts"),
+            ));
+        });
+    }
+
+    /// A directory prefix must not match on a partial path component.
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn tsconfig_without_includes_does_not_apply_to_similarly_named_sibling() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let src = root.join("packages/app-extra/src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("index.ts"), "export {};").unwrap();
+        let app = root.join("packages/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("tsconfig.json"), r#"{"compilerOptions":{}}"#).unwrap();
+
+        with_ctx_at_root(root, |ctx| {
+            assert!(!super::tsconfig_applies_to_file(
+                ctx,
+                &app.join("tsconfig.json"),
+                &src.join("index.ts"),
+            ));
+        });
+    }
+
+    /// An explicit `include` still wins over the directory default.
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn explicit_include_still_narrows_within_the_tsconfig_directory() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let package = root.join("packages/app");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::create_dir_all(package.join("tools")).unwrap();
+        fs::write(package.join("src/index.ts"), "export {};").unwrap();
+        fs::write(package.join("tools/build.ts"), "export {};").unwrap();
+        fs::write(
+            package.join("tsconfig.json"),
+            r#"{"include":["src/**/*"],"compilerOptions":{}}"#,
+        )
+        .unwrap();
+
+        with_ctx_at_root(root, |ctx| {
+            let tsconfig = package.join("tsconfig.json");
+            assert!(super::tsconfig_applies_to_file(
+                ctx,
+                &tsconfig,
+                &package.join("src/index.ts")
+            ));
+            assert!(!super::tsconfig_applies_to_file(
+                ctx,
+                &tsconfig,
+                &package.join("tools/build.ts")
+            ));
+        });
+    }
+
+    /// `exclude` is still applied when the directory default stands in for a
+    /// missing `include`.
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn exclude_is_honoured_without_include() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let package = root.join("packages/app");
+        fs::create_dir_all(package.join("src/generated")).unwrap();
+        fs::write(package.join("src/index.ts"), "export {};").unwrap();
+        fs::write(package.join("src/generated/schema.ts"), "export {};").unwrap();
+        fs::write(
+            package.join("tsconfig.json"),
+            r#"{"exclude":["src/generated"],"compilerOptions":{}}"#,
+        )
+        .unwrap();
+
+        with_ctx_at_root(root, |ctx| {
+            let tsconfig = package.join("tsconfig.json");
+            assert!(super::tsconfig_applies_to_file(
+                ctx,
+                &tsconfig,
+                &package.join("src/index.ts")
+            ));
+            assert!(!super::tsconfig_applies_to_file(
+                ctx,
+                &tsconfig,
+                &package.join("src/generated/schema.ts")
+            ));
+        });
+    }
+
+    /// `files` without `include` keeps its files-only semantics: a sibling in
+    /// the same directory does not fall back to the directory default.
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn files_without_include_stays_files_only() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let package = root.join("packages/app");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(package.join("src/entry.ts"), "export {};").unwrap();
+        fs::write(package.join("src/other.ts"), "export {};").unwrap();
+        fs::write(
+            package.join("tsconfig.json"),
+            r#"{"files":["src/entry.ts"],"compilerOptions":{}}"#,
+        )
+        .unwrap();
+
+        with_ctx_at_root(root, |ctx| {
+            let tsconfig = package.join("tsconfig.json");
+            assert!(super::tsconfig_applies_to_file(
+                ctx,
+                &tsconfig,
+                &package.join("src/entry.ts")
+            ));
+            assert!(!super::tsconfig_applies_to_file(
+                ctx,
+                &tsconfig,
+                &package.join("src/other.ts")
+            ));
+        });
+    }
+
+    fn write_two_sibling_packages_with_lib_include(root: &Path) {
+        for package in ["app", "lib"] {
+            let src = root.join("packages").join(package).join("src");
+            fs::create_dir_all(&src).unwrap();
+        }
+        fs::write(root.join("packages/lib/src/x.ts"), "export {};").unwrap();
+        fs::write(root.join("packages/app/src/y.ts"), "export {};").unwrap();
+        fs::write(
+            root.join("packages/lib/tsconfig.json"),
+            r#"{"include":["src"],"compilerOptions":{}}"#,
+        )
+        .unwrap();
+    }
+
+    /// A referenced config that does have `include` must match when reached
+    /// through the verbatim `references` spelling. Both `./packages/lib` and
+    /// `../lib` keep their `.` and `..` segments in the joined path, and the
+    /// include globs are built from that path.
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn referenced_include_matches_through_dot_and_parent_dir_spellings() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        write_two_sibling_packages_with_lib_include(root);
+        let lib_x = root.join("packages/lib/src/x.ts");
+        let app_y = root.join("packages/app/src/y.ts");
+
+        with_ctx_at_root(root, |ctx| {
+            let via_dot = resolve_tsconfig_reference_path(root, "./packages/lib");
+            let via_parent = resolve_tsconfig_reference_path(&root.join("packages/app"), "../lib");
+            for reference in [via_dot, via_parent] {
+                assert!(reference.is_file(), "{}", reference.display());
+                assert!(
+                    super::tsconfig_applies_to_file(ctx, &reference, &lib_x),
+                    "{} should apply to packages/lib/src/x.ts",
+                    reference.display()
+                );
+                assert!(
+                    !super::tsconfig_applies_to_file(ctx, &reference, &app_y),
+                    "{} should not apply to packages/app/src/y.ts",
+                    reference.display()
+                );
+            }
+        });
+    }
+
+    /// End to end through the `references` walk: the lib config lands in the
+    /// chain for its own source file and stays out of the chain for a sibling
+    /// package's file.
+    #[test]
+    #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
+    fn references_walk_scopes_referenced_include_to_its_directory() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        write_two_sibling_packages_with_lib_include(root);
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"files":[],"references":[{"path":"./packages/lib"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("packages/app/tsconfig.json"),
+            r#"{"references":[{"path":"../lib"}],"compilerOptions":{}}"#,
+        )
+        .unwrap();
+        let lib_tsconfig = root.join("packages/lib/tsconfig.json");
+
+        with_ctx_at_root(root, |ctx| {
+            let chain_for = |from_file: &Path, first: &Path| {
+                let mut chain = Vec::new();
+                let mut seen = FxHashSet::default();
+                super::collect_local_tsconfig_chain(ctx, from_file, first, &mut chain, &mut seen);
+                chain
+                    .into_iter()
+                    .map(|path| super::normalize_path_lexically(&path))
+                    .collect::<Vec<_>>()
+            };
+
+            let root_config = root.join("tsconfig.json");
+            let app_config = root.join("packages/app/tsconfig.json");
+            let lib_x = root.join("packages/lib/src/x.ts");
+            let app_y = root.join("packages/app/src/y.ts");
+
+            assert!(chain_for(&lib_x, &root_config).contains(&lib_tsconfig));
+            assert!(chain_for(&lib_x, &app_config).contains(&lib_tsconfig));
+            assert!(!chain_for(&app_y, &root_config).contains(&lib_tsconfig));
+            assert!(!chain_for(&app_y, &app_config).contains(&lib_tsconfig));
+        });
     }
 }

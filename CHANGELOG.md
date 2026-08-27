@@ -15,6 +15,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#2437](https://github.com/fallow-rs/fallow/pull/2437)). Thanks to
   [@PatrickShaw](https://github.com/PatrickShaw) for the contribution.
 
+### Fixed
+
+- **A tsconfig without `include` or `files` now applies only to files under
+  its own directory when fallow follows `references`**
+  ([#2436](https://github.com/fallow-rs/fallow/pull/2436)). This matches tsc's
+  `**/*` default project scope. Previously such a referenced config matched
+  every file in the repository, so its `paths` leaked to files outside that
+  directory and every referenced project was walked for every import. Aliases
+  from a referenced package no longer resolve from a sibling package, and
+  monorepos with many `references` and no `include` resolve imports noticeably
+  faster. Imports that only resolved through that leak are now reported as
+  `unresolved-import` findings, which are error severity by default and will
+  fail `--fail-on-issues`, and a file that was only reachable through such an
+  import may now be reported as unused. If a subdirectory `tsconfig.json`
+  intentionally holds shared `paths`, give it an explicit `include`, or move
+  those aliases to a config whose directory contains the importing files.
+  Thanks to [@PatrickShaw](https://github.com/PatrickShaw) for the
+  contribution.
+
 ## [3.19.0] - 2026-08-26
 
 ### Added

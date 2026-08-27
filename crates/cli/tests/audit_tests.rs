@@ -4893,6 +4893,359 @@ fn e5_change_anchor_judgment_accepts_anchor_kind_change() {
 /// Done-condition (a): a clean agent JSON citing only emitted signal_ids with
 /// the correct snapshot hash is ACCEPTED with zero unanchored findings.
 #[test]
+fn action_label_round_trips_and_unknown_action_is_rejected() {
+    let tmp = create_boundary_walkthrough_fixture();
+    let guide = run_walkthrough_guide(tmp.path());
+    let vocabulary = guide["agent_schema"]["action_vocabulary"]
+        .as_array()
+        .expect("the guide publishes the closed action vocabulary");
+    assert!(vocabulary.iter().any(|v| v == "address"));
+    assert!(
+        guide["agent_schema"]["concern_vocabulary"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|v| v == "coupling")),
+        "the guide publishes the recommended concern vocabulary"
+    );
+    let emitted = guide["digest"]["decisions"]["emitted_signal_ids"]
+        .as_array()
+        .expect("emitted_signal_ids");
+    let real = emitted[0].as_str().unwrap().to_string();
+
+    let agent = serde_json::json!({
+        "graph_snapshot_hash": guide["graph_snapshot_hash"],
+        "judgments": [
+            { "signal_id": real, "framing": "ui now depends on db; 1 module outside the diff", "concern": "coupling", "action": "address" },
+            { "signal_id": real, "framing": "label typo", "action": "must-fix" }
+        ]
+    });
+    let agent_path = tmp.path().join("agent_action.json");
+    fs::write(&agent_path, serde_json::to_string(&agent).unwrap()).unwrap();
+
+    let validation = run_walkthrough_file(tmp.path(), &agent_path);
+    assert_eq!(
+        validation["accepted_count"],
+        1,
+        "validation: {}",
+        serde_json::to_string_pretty(&validation).unwrap_or_default()
+    );
+    assert_eq!(validation["accepted"][0]["action"], "address");
+    assert_eq!(validation["accepted"][0]["concern"], "coupling");
+    assert_eq!(validation["accepted"][0]["deterministic"], false);
+    assert_eq!(validation["rejected_count"], 1);
+    assert_eq!(validation["rejected"][0]["reason"], "invalid-action");
+}
+
+/// Two changed source files: `a.ts` has an untouched test importing it, `b.ts`
+/// has no test at all. The direction units carry that adjacency as a graph
+/// fact; the test file itself is not a unit.
+fn create_test_adjacency_fixture() -> TempDir {
+    let tmp = TempDir::new().expect("temp dir");
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name": "ta-test", "main": "src/a.ts"}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join(".fallowrc.json"),
+        r#"{ "entry": ["src/a.ts", "src/b.ts"] }"#,
+    )
+    .unwrap();
+    fs::write(dir.join("src/a.ts"), "export const a = () => 1;\n").unwrap();
+    fs::write(
+        dir.join("src/a.test.ts"),
+        "import { a } from './a';\nexport const t = a();\n",
+    )
+    .unwrap();
+    fs::write(dir.join("src/b.ts"), "export const b = () => 2;\n").unwrap();
+    git(dir, &["init", "-b", "main"]);
+    commit_all(dir, "initial");
+
+    fs::write(dir.join("src/a.ts"), "export const a = () => 10;\n").unwrap();
+    fs::write(dir.join("src/b.ts"), "export const b = () => 20;\n").unwrap();
+    commit_all(dir, "change both sources");
+    tmp
+}
+
+#[test]
+fn direction_units_carry_test_adjacency_as_a_graph_fact() {
+    let tmp = create_test_adjacency_fixture();
+    let guide = run_walkthrough_guide(tmp.path());
+    let units = guide["direction"]["units"]
+        .as_array()
+        .expect("direction units");
+    let adjacency = |file: &str| -> serde_json::Value {
+        units.iter().find(|u| u["file"] == file).unwrap_or_else(|| {
+            panic!(
+                "{file} is a direction unit. guide: {}",
+                serde_json::to_string_pretty(&guide).unwrap_or_default()
+            )
+        })["test_adjacency"]
+            .clone()
+    };
+    assert_eq!(adjacency("src/a.ts"), "untouched");
+    assert_eq!(adjacency("src/b.ts"), "none");
+    assert!(
+        !units.iter().any(|u| u["file"] == "src/a.test.ts"),
+        "a test file is not a direction unit"
+    );
+}
+
+/// Three changed modules: `src/core` defines, `src/app` consumes core, and
+/// `src/tools` touches neither. The partition splits into two independent slices.
+fn create_independent_slices_fixture() -> TempDir {
+    let tmp = TempDir::new().expect("temp dir");
+    let dir = tmp.path();
+    for sub in ["src/core", "src/app", "src/tools"] {
+        fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name": "slices-test", "main": "src/app/main.ts"}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join(".fallowrc.json"),
+        r#"{ "entry": ["src/app/main.ts", "src/tools/cli.ts"] }"#,
+    )
+    .unwrap();
+    fs::write(dir.join("src/core/lib.ts"), "export const lib = () => 1;\n").unwrap();
+    fs::write(
+        dir.join("src/app/main.ts"),
+        "import { lib } from '../core/lib';\nexport const main = () => lib();\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/tools/cli.ts"),
+        "export const cli = () => 3;\n",
+    )
+    .unwrap();
+    git(dir, &["init", "-b", "main"]);
+    commit_all(dir, "initial");
+
+    fs::write(
+        dir.join("src/core/lib.ts"),
+        "export const lib = () => 10;\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/app/main.ts"),
+        "import { lib } from '../core/lib';\nexport const main = () => lib() + 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/tools/cli.ts"),
+        "export const cli = () => 30;\n",
+    )
+    .unwrap();
+    commit_all(dir, "change all three");
+    tmp
+}
+
+#[test]
+fn partition_reports_independent_slices_along_graph_seams() {
+    let tmp = create_independent_slices_fixture();
+    let guide = run_walkthrough_guide(tmp.path());
+    let slices = guide["digest"]["partition"]["independent_slices"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "partition carries independent_slices. guide: {}",
+                serde_json::to_string_pretty(&guide).unwrap_or_default()
+            )
+        });
+    assert_eq!(
+        slices,
+        &vec![
+            serde_json::json!(["src/app", "src/core"]),
+            serde_json::json!(["src/tools"]),
+        ],
+        "app+core share an edge, tools stands alone"
+    );
+}
+
+/// The head manifest bumps `left-pad` across a major version and adds `dayjs`;
+/// `src/a.ts` imports both. Each package ships a stub under `node_modules` so
+/// the resolver records package usage.
+fn create_dependency_decision_fixture() -> TempDir {
+    let tmp = TempDir::new().expect("temp dir");
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    for pkg in ["left-pad", "dayjs"] {
+        fs::create_dir_all(dir.join("node_modules").join(pkg)).unwrap();
+        fs::write(
+            dir.join("node_modules").join(pkg).join("package.json"),
+            format!(r#"{{"name": "{pkg}", "version": "1.0.0", "main": "index.js"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("node_modules").join(pkg).join("index.js"),
+            "module.exports = () => 1;\n",
+        )
+        .unwrap();
+    }
+    fs::write(
+        dir.join("package.json"),
+        "{\n  \"name\": \"dep-test\",\n  \"main\": \"src/a.ts\",\n  \"dependencies\": {\n    \"left-pad\": \"^1.3.0\"\n  }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/a.ts"),
+        "import leftPad from 'left-pad';\nexport const a = () => leftPad('x', 2);\n",
+    )
+    .unwrap();
+    git(dir, &["init", "-b", "main"]);
+    commit_all(dir, "initial");
+
+    fs::write(
+        dir.join("package.json"),
+        "{\n  \"name\": \"dep-test\",\n  \"main\": \"src/a.ts\",\n  \"dependencies\": {\n    \"dayjs\": \"^1.11.0\",\n    \"left-pad\": \"^2.0.0\"\n  }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/a.ts"),
+        "import dayjs from 'dayjs';\nimport leftPad from 'left-pad';\nexport const a = () => leftPad(String(dayjs()), 2);\n",
+    )
+    .unwrap();
+    commit_all(dir, "bump left-pad, add dayjs");
+    tmp
+}
+
+#[test]
+fn dependency_bump_and_addition_surface_as_batched_decisions() {
+    let tmp = create_dependency_decision_fixture();
+    let guide = run_walkthrough_guide(tmp.path());
+    let pretty = || serde_json::to_string_pretty(&guide).unwrap_or_default();
+    assert_eq!(
+        guide["digest"]["deltas"]["dependency_added"],
+        serde_json::json!(["package.json::dayjs"]),
+        "guide: {}",
+        pretty()
+    );
+    assert_eq!(
+        guide["digest"]["deltas"]["dependency_major_bumped"],
+        serde_json::json!(["package.json::left-pad@^1.3.0->^2.0.0"]),
+        "guide: {}",
+        pretty()
+    );
+    let decisions = guide["digest"]["decisions"]["decisions"]
+        .as_array()
+        .expect("decisions");
+    let dependency: Vec<&serde_json::Value> = decisions
+        .iter()
+        .filter(|d| d["category"] == "dependency")
+        .collect();
+    assert_eq!(dependency.len(), 2, "one per kind. guide: {}", pretty());
+    for decision in &dependency {
+        assert_eq!(decision["anchor_file"], "package.json");
+        assert!(decision["anchor_line"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(decision["blast"], 1, "src/a.ts imports each package");
+        assert_eq!(decision["internal_consumer_count"], 0);
+        assert!(
+            decision["question"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with('?'),
+            "the decision stays a question"
+        );
+    }
+    assert!(
+        dependency
+            .iter()
+            .any(|d| d["signal_key"] == "package.json::left-pad@^1.3.0->^2.0.0"),
+        "the bump is a decision. guide: {}",
+        pretty()
+    );
+}
+
+/// The typed runtime (the route the `decision_surface` MCP tool takes, with no
+/// CLI fallback) must surface the same dependency decisions as the CLI brief.
+#[test]
+fn typed_decision_surface_route_surfaces_dependency_decisions() {
+    let tmp = create_dependency_decision_fixture();
+    let output = fallow_api::run_decision_surface(&fallow_api::DecisionSurfaceOptions {
+        analysis: fallow_api::AnalysisOptions {
+            root: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        },
+        base: Some("main~1".to_string()),
+        max_decisions: None,
+    })
+    .expect("typed decision surface runs");
+    let dependency: Vec<&fallow_output::Decision> = output
+        .surface
+        .decisions
+        .iter()
+        .filter(|d| d.category == fallow_output::DecisionCategory::Dependency)
+        .collect();
+    let keys: Vec<&str> = dependency.iter().map(|d| d.signal_key.as_str()).collect();
+    assert!(
+        keys.contains(&"package.json::left-pad@^1.3.0->^2.0.0"),
+        "the typed route surfaces the major bump: {keys:?}"
+    );
+    assert!(
+        keys.contains(&"package.json::dayjs"),
+        "the typed route surfaces the added entry: {keys:?}"
+    );
+    assert!(
+        dependency.iter().all(|d| d.blast == 1),
+        "importer counts come from the head graph on the typed route"
+    );
+    let envelope = fallow_output::build_decision_surface_output(&output.surface);
+    for decision in envelope
+        .decisions
+        .iter()
+        .filter(|d| d.decision.category == fallow_output::DecisionCategory::Dependency)
+    {
+        assert!(
+            decision
+                .actions
+                .iter()
+                .all(|a| a.action_type != fallow_output::DecisionActionType::Suppress),
+            "a manifest anchor never gets a comment-based suppress action"
+        );
+    }
+}
+
+/// A dependency-only change has no graph module to stage, so the human tour
+/// must still show the decision instead of "0 files".
+#[test]
+fn human_tour_shows_dependency_decisions_outside_staged_files() {
+    let tmp = create_dependency_decision_fixture();
+    fs::write(
+        tmp.path().join("src/a.ts"),
+        "import dayjs from 'dayjs';\nimport leftPad from 'left-pad';\nexport const a = () => leftPad(String(dayjs()), 2);\n",
+    )
+    .unwrap();
+    git(tmp.path(), &["checkout", "-q", "HEAD~1", "--", "src/a.ts"]);
+    commit_all(tmp.path(), "manifest-only head");
+    let output = run_fallow_raw(&[
+        "review",
+        "--root",
+        tmp.path().to_str().unwrap(),
+        "--base",
+        "HEAD~2",
+        "--walkthrough",
+        "--quiet",
+    ]);
+    assert_eq!(output.code, 0, "stderr: {}", output.stderr);
+    let text = format!("{}{}", output.stdout, output.stderr);
+    assert!(
+        text.contains("Decisions outside the staged files"),
+        "the tour names the unstaged decision block: {text}"
+    );
+    assert!(
+        text.contains("DEPENDENCY") && text.contains("package.json"),
+        "the dependency decision is visible in the tour: {text}"
+    );
+    assert!(
+        !text.contains("No reviewable units in this change"),
+        "a change with a decision is not orientation only: {text}"
+    );
+}
+
+#[test]
 fn e5_clean_agent_json_is_accepted_zero_unanchored() {
     let tmp = create_boundary_walkthrough_fixture();
     let guide = run_walkthrough_guide(tmp.path());

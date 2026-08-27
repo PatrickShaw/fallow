@@ -61,6 +61,8 @@ pub fn build_review_deltas(
         boundary_introduced: introduced_keys(head_boundary, base_boundary),
         cycle_introduced: introduced_keys(head_cycles, base_cycles),
         public_api_added: introduced_keys(head_public_api, base_public_api),
+        dependency_added: Vec::new(),
+        dependency_major_bumped: Vec::new(),
     }
 }
 
@@ -190,6 +192,7 @@ fn build_partition_facts(result: &AuditResult) -> PartitionFacts {
     PartitionFacts {
         units,
         order: partition.order.clone(),
+        independent_slices: partition.independent_slices.clone(),
     }
 }
 
@@ -587,6 +590,21 @@ fn print_partition_human(partition: &PartitionFacts) {
         let labeled: Vec<String> = partition.order.iter().map(|dir| unit_label(dir)).collect();
         eprintln!("  review order: {}", labeled.join(" \u{2192} "));
     }
+    if partition.independent_slices.len() >= 2 {
+        let slices: Vec<String> = partition
+            .independent_slices
+            .iter()
+            .map(|slice| {
+                let labeled: Vec<String> = slice.iter().map(|dir| unit_label(dir)).collect();
+                format!("[{}]", labeled.join(", "))
+            })
+            .collect();
+        eprintln!(
+            "  independent slices: {} (no import edge between them) {}",
+            partition.independent_slices.len(),
+            slices.join(" ")
+        );
+    }
 }
 
 /// Label a unit's module directory for human output; the empty root-group key
@@ -690,6 +708,47 @@ fn print_deltas_human(deltas: &ReviewDeltas) {
             crate::report::plural(deltas.public_api_added.len()),
         );
     }
+    if !deltas.dependency_added.is_empty() {
+        eprintln!(
+            "  new third-party dependenc{}: {}",
+            if deltas.dependency_added.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            dependency_key_names(&deltas.dependency_added)
+        );
+    }
+    if !deltas.dependency_major_bumped.is_empty() {
+        eprintln!(
+            "  major version bump{}: {}",
+            crate::report::plural(deltas.dependency_major_bumped.len()),
+            dependency_key_names(&deltas.dependency_major_bumped)
+        );
+    }
+}
+
+/// Render dependency delta keys (`<manifest>::<name>[@<from>-><to>]`) as the
+/// names a human reads: `react ^18.0.0 to ^19.0.0 (package.json)`.
+fn dependency_key_names(keys: &[String]) -> String {
+    keys.iter()
+        .map(|key| {
+            let (manifest, rest) = key.split_once("::").unwrap_or(("", key));
+            let (name, range) = rest
+                .split_once('@')
+                .map_or((rest, None), |(name, range)| (name, range.split_once("->")));
+            let range_text = range
+                .map(|(from, to)| format!(" {from} to {to}"))
+                .unwrap_or_default();
+            let manifest_text = if manifest.is_empty() || manifest == "package.json" {
+                String::new()
+            } else {
+                format!(" ({manifest})")
+            };
+            format!("{name}{range_text}{manifest_text}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Print the weakening signals (6.F headline). Advisory, reviewer-private.

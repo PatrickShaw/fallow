@@ -1165,6 +1165,8 @@ fn run_audit_head_analyses(
         check.export_lines = compute_brief_export_lines(opts.root, check, changed_files);
         check.internal_consumers =
             compute_brief_internal_consumers(opts.root, check, changed_files);
+        check.test_adjacency = compute_brief_test_adjacency(opts.root, check, changed_files);
+        check.package_importers = compute_brief_package_importers(check, changed_files);
     }
     let shared_parse = if share_dead_code_parse_with_health {
         check.as_mut().and_then(|r| r.shared_parse.take())
@@ -1259,6 +1261,45 @@ fn compute_brief_internal_consumers(
         .and_then(|out| out.graph.as_ref())?;
 
     fallow_engine::module_graph::internal_consumers_for_changed_paths(graph, root, changed_files)
+}
+
+/// Precompute the per-changed-source-file direct test adjacency for the review
+/// direction from the retained graph, BEFORE health drops it. Uses the same
+/// test-path classification as the weakening scan so the two surfaces agree.
+/// `None` when the graph is not retained.
+fn compute_brief_test_adjacency(
+    root: &std::path::Path,
+    check: &CheckResult,
+    changed_files: &FxHashSet<PathBuf>,
+) -> Option<FxHashMap<String, fallow_output::TestAdjacency>> {
+    let graph = check
+        .shared_parse
+        .as_ref()
+        .and_then(|sp| sp.analysis_output.as_ref())
+        .and_then(|out| out.graph.as_ref())?;
+
+    fallow_engine::module_graph::test_adjacency_for_changed_paths(
+        graph,
+        root,
+        changed_files,
+        &weakening::is_test_file,
+    )
+}
+
+/// Precompute per-package in-repo importer counts for the dependency decision
+/// arm from the retained graph, BEFORE health drops it. `None` when the graph
+/// is not retained or saw no package usage.
+fn compute_brief_package_importers(
+    check: &CheckResult,
+    changed_files: &FxHashSet<PathBuf>,
+) -> Option<FxHashMap<String, fallow_engine::module_graph::PackageImporters>> {
+    let graph = check
+        .shared_parse
+        .as_ref()
+        .and_then(|sp| sp.analysis_output.as_ref())
+        .and_then(|out| out.graph.as_ref())?;
+
+    fallow_engine::module_graph::package_importers_for_changed_paths(graph, changed_files)
 }
 
 /// Compute the per-file focus graph facts (fan-in/out + the dynamic-dispatch /
@@ -1589,18 +1630,22 @@ fn compute_audit_brief_data(input: AuditBriefDataInput<'_>) -> AuditBriefData {
         .map(|check| check.config.root.clone())
         .unwrap_or_default();
     let head_source = |rel: &str| std::fs::read_to_string(root.join(rel)).ok();
-    let rename_old_path = |rel: &str| -> Option<String> {
-        crate::report::ci::diff_filter::shared_diff_index()
-            .and_then(|index| index.old_path_for_root_relative(rel))
-            .map(std::borrow::Cow::into_owned)
-    };
-    compute_audit_brief_data_with_lookups(input, None, &head_source, &rename_old_path)
+    compute_audit_brief_data_with_lookups(input, None, &head_source, &shared_rename_old_path)
+}
+
+/// Resolve a head root-relative path to its pre-rename path through the run's
+/// shared diff index; `None` when the file was not renamed.
+fn shared_rename_old_path(rel: &str) -> Option<String> {
+    crate::report::ci::diff_filter::shared_diff_index()
+        .and_then(|index| index.old_path_for_root_relative(rel))
+        .map(std::borrow::Cow::into_owned)
 }
 
 struct AuditBriefExternalData {
     weakening_signals: Vec<weakening::WeakeningSignal>,
     routing: Option<routing::RoutingFacts>,
     diff_evidence: BriefDiffEvidence,
+    dependency_anchors: Vec<crate::audit_decision_surface::DependencyAnchor>,
 }
 
 fn prepare_audit_brief_external_data(
@@ -1613,10 +1658,18 @@ fn prepare_audit_brief_external_data(
     let routing =
         check.map(|check| routing::compute_routing(opts.root, &check.config, changed_files));
     let diff_evidence = compute_brief_diff_evidence(opts.root, base_ref, opts.walkthrough_file);
+    let dependency_anchors = compute_dependency_anchors(
+        opts.root,
+        base_ref,
+        changed_files,
+        check.and_then(|check| check.package_importers.as_ref()),
+        &shared_rename_old_path,
+    );
     AuditBriefExternalData {
         weakening_signals,
         routing,
         diff_evidence,
+        dependency_anchors,
     }
 }
 
@@ -1825,6 +1878,17 @@ pub fn benchmark_audit_review_brief_many_changed_files_json(
         decision_count,
         rendered_bytes: rendered.len(),
     };
+    let changed_files: FxHashSet<PathBuf> = result.changed_files.drain(..).collect();
+    let dependency_anchors = compute_dependency_anchors(
+        &corpus.root,
+        &result.base_ref,
+        &changed_files,
+        result
+            .check
+            .as_ref()
+            .and_then(|check| check.package_importers.as_ref()),
+        &shared_rename_old_path,
+    );
     corpus.state = Some(AuditReviewBenchmarkState {
         head: HeadAnalyses {
             check: result.check.take(),
@@ -1835,7 +1899,7 @@ pub fn benchmark_audit_review_brief_many_changed_files_json(
             .base_snapshot
             .take()
             .ok_or_else(|| ExitCode::from(2))?,
-        changed_files: result.changed_files.drain(..).collect(),
+        changed_files,
         external: AuditBriefExternalData {
             weakening_signals: std::mem::take(&mut result.weakening_signals),
             routing: result.routing.take(),
@@ -1843,6 +1907,7 @@ pub fn benchmark_audit_review_brief_many_changed_files_json(
                 change_anchors: std::mem::take(&mut result.change_anchors),
                 diff_index: result.diff_index.take(),
             },
+            dependency_anchors,
         },
     });
     Ok(benchmark_result)
@@ -1858,21 +1923,38 @@ fn compute_audit_brief_data_with_lookups(
         return AuditBriefData::default();
     }
 
-    let review_deltas = compute_review_deltas(input.check, input.base_snapshot);
-    let (weakening_signals, routing, preloaded_diff_evidence) = match preloaded {
+    let mut review_deltas = compute_review_deltas(input.check, input.base_snapshot);
+    // Every git-backed pass (weakening, routing, diff evidence, manifest diff)
+    // comes from the preloaded package when one exists, so the benchmark path
+    // never re-spawns git per iteration.
+    let (weakening_signals, routing, preloaded_diff_evidence, dependency_anchors) = match preloaded
+    {
         None => (
             compute_weakening_signals(input.opts.root, input.base_ref, input.changed_files),
             input.check.map(|check| {
                 routing::compute_routing(input.opts.root, &check.config, input.changed_files)
             }),
             None,
+            compute_dependency_anchors(
+                input.opts.root,
+                input.base_ref,
+                input.changed_files,
+                input
+                    .check
+                    .and_then(|check| check.package_importers.as_ref()),
+                rename_old_path,
+            ),
         ),
         Some(external) => (
             external.weakening_signals,
             external.routing,
             Some(external.diff_evidence),
+            external.dependency_anchors,
         ),
     };
+    if let Some(deltas) = review_deltas.as_mut() {
+        fallow_api::dependency_deltas::fill_dependency_delta_keys(deltas, &dependency_anchors);
+    }
 
     // Decision surface: classify the SOLID-3 candidates, rank, cap, and route.
     let decision_surface = Some(compute_decision_surface_with_lookups(
@@ -1880,8 +1962,11 @@ fn compute_audit_brief_data_with_lookups(
         input.check,
         review_deltas.as_ref(),
         routing.as_ref(),
-        head_source,
-        rename_old_path,
+        &DecisionSurfaceLookups {
+            dependency_anchors: &dependency_anchors,
+            head_source,
+            rename_old_path,
+        },
     ));
 
     let diff_evidence = preloaded_diff_evidence.unwrap_or_else(|| {
@@ -2027,13 +2112,21 @@ fn walkthrough_file_relative_to_root(
 /// coordination gaps, and the impact-closure blast magnitude, then run the
 /// extractor. The cap is taken from the audit options (clamped to [3, 5] by the
 /// extractor). Returns an empty surface when no check result is available.
+/// The per-run lookups the decision extractor needs beyond the brief data:
+/// head sources for suppression checks, the rename map for review memory, and
+/// the dependency candidates read from the changed manifests.
+struct DecisionSurfaceLookups<'a> {
+    dependency_anchors: &'a [crate::audit_decision_surface::DependencyAnchor],
+    head_source: &'a dyn Fn(&str) -> Option<String>,
+    rename_old_path: &'a dyn Fn(&str) -> Option<String>,
+}
+
 fn compute_decision_surface_with_lookups(
     opts: &AuditOptions<'_>,
     check: Option<&CheckResult>,
     review_deltas: Option<&crate::audit_brief::ReviewDeltas>,
     routing: Option<&routing::RoutingFacts>,
-    head_source: &dyn Fn(&str) -> Option<String>,
-    rename_old_path: &dyn Fn(&str) -> Option<String>,
+    lookups: &DecisionSurfaceLookups<'_>,
 ) -> crate::audit_decision_surface::DecisionSurface {
     use crate::audit_decision_surface::{
         CoordinationAnchor, DecisionInputs, extract_decision_surface,
@@ -2090,11 +2183,12 @@ fn compute_decision_surface_with_lookups(
         deltas,
         boundary_anchors: &boundary_anchors,
         coordination: &coordination,
+        dependency_anchors: lookups.dependency_anchors,
         public_api_anchor_line,
         affected_not_shown,
         routing,
-        head_source,
-        rename_old_path,
+        head_source: lookups.head_source,
+        rename_old_path: lookups.rename_old_path,
         internal_consumers: &internal_consumers,
         cap: opts.max_decisions,
     })
@@ -2246,6 +2340,81 @@ fn compute_weakening_signals(
         signals.extend(weakening_signals_for_file(&rel_str, &base, &head));
     }
     signals
+}
+
+/// Read every changed `package.json` at head and at base (through the batch
+/// git reader) and project the pairs onto dependency anchors through the
+/// shared builder in `fallow_api::dependency_deltas`, so the CLI and the typed
+/// runtime cannot drift. Manifest keys are root-relative like every other
+/// anchor; the git read uses the repository-relative path. Best-effort like the
+/// weakening scan: an unreadable manifest yields nothing, and a base-reader
+/// error stops the scan.
+fn compute_dependency_anchors(
+    root: &Path,
+    base_ref: &str,
+    changed_files: &FxHashSet<PathBuf>,
+    package_importers: Option<&FxHashMap<String, fallow_engine::module_graph::PackageImporters>>,
+    rename_old_path: &dyn Fn(&str) -> Option<String>,
+) -> Vec<crate::audit_decision_surface::DependencyAnchor> {
+    use fallow_api::dependency_deltas::{
+        ManifestPair, dependency_anchors_from_manifests, is_manifest_path,
+    };
+
+    let Some(git_root) = git_toplevel(root) else {
+        return Vec::new();
+    };
+    let root_prefix = root
+        .strip_prefix(&git_root)
+        .unwrap_or_else(|_| Path::new(""));
+    let mut manifests: Vec<(String, PathBuf, &PathBuf)> = Vec::new();
+    for abs in changed_files {
+        let (Ok(root_relative), Ok(git_relative)) =
+            (abs.strip_prefix(root), abs.strip_prefix(&git_root))
+        else {
+            continue;
+        };
+        let manifest = root_relative.to_string_lossy().replace('\\', "/");
+        if is_manifest_path(&manifest) {
+            manifests.push((manifest, git_relative.to_path_buf(), abs));
+        }
+    }
+    if manifests.is_empty() {
+        return Vec::new();
+    }
+    manifests.sort();
+    let Some(mut reader) = BaseFileReader::spawn(root) else {
+        return Vec::new();
+    };
+
+    let mut pairs = Vec::new();
+    for (manifest, git_relative, abs) in manifests {
+        let Ok(head) = std::fs::read_to_string(abs) else {
+            continue;
+        };
+        let mut base = match reader.read(base_ref, &git_relative) {
+            BaseRead::Content(base) => Some(base),
+            BaseRead::Missing => None,
+            BaseRead::Error => break,
+        };
+        // A manifest that moved with its package (`git mv packages/a
+        // packages/b`) is not new: read it at its pre-rename path so its
+        // dependency list is diffed, not reported wholesale as added.
+        if base.is_none()
+            && let Some(old) = rename_old_path(&manifest)
+        {
+            base = match reader.read(base_ref, &root_prefix.join(old)) {
+                BaseRead::Content(base) => Some(base),
+                BaseRead::Missing => None,
+                BaseRead::Error => break,
+            };
+        }
+        pairs.push(ManifestPair {
+            manifest,
+            base,
+            head,
+        });
+    }
+    dependency_anchors_from_manifests(&pairs, package_importers)
 }
 
 fn weakening_signals_for_file(

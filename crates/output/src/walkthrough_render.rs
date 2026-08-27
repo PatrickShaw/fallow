@@ -9,7 +9,29 @@
 //! functions so the two surfaces stay consistent by construction and the wire
 //! contracts (`--walkthrough-guide` JSON, audit/brief) are never touched.
 
+use crate::audit_decision_surface::Decision;
 use crate::audit_walkthrough::{DirectionUnit, StandardWalkthroughGuide};
+
+/// The surfaced decisions whose `anchor_file` is not a direction unit, in
+/// surface (rank) order. A dependency decision anchors on a `package.json`,
+/// which is never a graph module, so without this a dependency-only change
+/// renders as "0 files" while the JSON carries the top-ranked decision.
+#[must_use]
+pub fn decisions_outside_units(guide: &StandardWalkthroughGuide) -> Vec<&Decision> {
+    guide
+        .digest
+        .decisions
+        .decisions
+        .iter()
+        .filter(|decision| {
+            !guide
+                .direction
+                .order
+                .iter()
+                .any(|file| file == &decision.anchor_file)
+        })
+        .collect()
+}
 
 /// Max contract members named inline in a coordination fact before collapsing
 /// the rest into a "+N more" suffix. Keeps the most load-bearing line readable
@@ -253,6 +275,7 @@ mod tests {
             scoring_budget: 1,
             out_of_diff: Vec::new(),
             expert: Vec::new(),
+            test_adjacency: None,
         }
     }
 
@@ -316,6 +339,8 @@ mod tests {
                 judgment_shape: "",
                 echo_field: "graph_snapshot_hash",
                 anchoring_rule: "",
+                action_vocabulary: &[],
+                concern_vocabulary: &[],
             },
             injection_note: INJECTION_NOTE,
         }

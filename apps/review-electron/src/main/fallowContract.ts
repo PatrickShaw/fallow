@@ -1,6 +1,6 @@
 import type { AuditBrief } from "../model/adapter";
 
-export const REVIEW_BRIEF_SCHEMA_VERSION = 6;
+export const REVIEW_BRIEF_SCHEMA_VERSION = 8;
 
 type JsonRecord = Record<string, unknown>;
 type Guard<T> = (value: unknown) => value is T;
@@ -43,12 +43,14 @@ export interface WalkthroughValidationContract {
     anchor_kind: string;
     agent_framing: string;
     concern?: string;
+    action?: string;
     deterministic: boolean;
   }>;
   rejected: Array<{
     signal_id: string;
     change_anchor: string;
     reason: string;
+    invalid_value?: string;
   }>;
 }
 
@@ -69,7 +71,8 @@ const hasHeader = (value: unknown, kind: string): value is JsonRecord =>
   isRecord(value) &&
   value["kind"] === kind &&
   value["command"] === kind &&
-  value["schema_version"] === REVIEW_BRIEF_SCHEMA_VERSION;
+  isNumber(value["schema_version"]) &&
+  value["schema_version"] >= REVIEW_BRIEF_SCHEMA_VERSION;
 
 const isScore = (value: unknown): value is JsonRecord =>
   isRecord(value) &&
@@ -180,6 +183,7 @@ const isAcceptedJudgment = (
   isString(value["anchor_kind"]) &&
   isString(value["agent_framing"]) &&
   isOptional(value["concern"], isString) &&
+  isOptional(value["action"], isString) &&
   isBoolean(value["deterministic"]);
 
 const isRejectedJudgment = (
@@ -188,7 +192,8 @@ const isRejectedJudgment = (
   isRecord(value) &&
   isString(value["signal_id"]) &&
   isString(value["change_anchor"]) &&
-  isString(value["reason"]);
+  isString(value["reason"]) &&
+  isOptional(value["invalid_value"], isString);
 
 const isWalkthroughValidationContract = (value: unknown): value is WalkthroughValidationContract =>
   hasHeader(value, "review-walkthrough-validation") &&

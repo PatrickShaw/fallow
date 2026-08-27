@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use fallow_output::TestAdjacency;
 use fallow_types::discover::FileId;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -222,6 +223,9 @@ pub struct PartitionOrderPaths {
     pub units: Vec<ReviewUnitPaths>,
     /// File paths in dependency-sensible review order (dependencies first).
     pub order: Vec<String>,
+    /// Connected components of the inter-unit dependency graph: units that
+    /// share no import edge with any unit outside their slice.
+    pub independent_slices: Vec<Vec<String>>,
 }
 
 impl From<GraphPartitionOrderPaths> for PartitionOrderPaths {
@@ -229,6 +233,7 @@ impl From<GraphPartitionOrderPaths> for PartitionOrderPaths {
         Self {
             units: paths.units.into_iter().map(ReviewUnitPaths::from).collect(),
             order: paths.order,
+            independent_slices: paths.independent_slices,
         }
     }
 }
@@ -428,6 +433,129 @@ pub fn internal_consumers_for_changed_paths(
             .count() as u64;
         map.insert(relative_key_path(&module.path, root), count);
     }
+    Some(map)
+}
+
+/// Compute per-changed-file test adjacency for the review direction: whether a
+/// test file imports the changed module directly, and whether one of those tests
+/// is itself in the changed set. `is_test_path` classifies a root-relative,
+/// forward-slashed path; the caller owns that definition so the brief's
+/// weakening and direction surfaces agree on it. Changed test files get no
+/// entry of their own. `None` when no module matches a changed path.
+#[must_use]
+pub fn test_adjacency_for_changed_paths(
+    graph: &RetainedModuleGraph,
+    root: &Path,
+    changed_files: &FxHashSet<PathBuf>,
+    is_test_path: &dyn Fn(&str) -> bool,
+) -> Option<FxHashMap<String, TestAdjacency>> {
+    let graph = graph.as_graph();
+    // A project with no test files at all gets no adjacency claims: "no direct
+    // test" on every unit would say nothing about the change.
+    if !graph
+        .modules
+        .iter()
+        .any(|module| is_test_path(&relative_key_path(&module.path, root)))
+    {
+        return None;
+    }
+    let changed_norm = normalized_changed_paths(changed_files);
+    let mut map: FxHashMap<String, TestAdjacency> = FxHashMap::default();
+    for module in &graph.modules {
+        if !changed_norm.contains(&normalize_path(&module.path)) {
+            continue;
+        }
+        let rel = relative_key_path(&module.path, root);
+        if is_test_path(&rel) {
+            continue;
+        }
+        let mut adjacency = TestAdjacency::None;
+        for importer in graph.importers_of(module.file_id) {
+            let Some(node) = graph.modules.get(importer.0 as usize) else {
+                continue;
+            };
+            if !is_test_path(&relative_key_path(&node.path, root)) {
+                continue;
+            }
+            if changed_norm.contains(&normalize_path(&node.path)) {
+                adjacency = TestAdjacency::Changed;
+                break;
+            }
+            adjacency = TestAdjacency::Untouched;
+        }
+        map.insert(rel, adjacency);
+    }
+    if map.is_empty() {
+        return None;
+    }
+    Some(map)
+}
+
+/// In-repo importer counts for one third-party package.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackageImporters {
+    /// Modules that import the package (value imports only), id-sorted. Kept
+    /// as ids rather than a count so a decision that batches several packages
+    /// can take the union instead of double-counting a module that imports
+    /// more than one of them.
+    pub importers: Vec<FileId>,
+    /// The subset of `importers` outside the changed set, id-sorted.
+    pub out_of_diff: Vec<FileId>,
+}
+
+/// Compute per-package in-repo importer counts for every third-party package
+/// the graph saw an import of, value or type-only, split by whether the
+/// importer is in the changed set. Type-only importers count because a major
+/// bump of a types package is a compile-wide change even when no value
+/// crosses the boundary. The dependency decision arm reads these so a new or
+/// bumped `package.json` entry carries the modules it actually reaches. `None`
+/// when the graph recorded no package usage.
+#[must_use]
+pub fn package_importers_for_changed_paths(
+    graph: &RetainedModuleGraph,
+    changed_files: &FxHashSet<PathBuf>,
+) -> Option<FxHashMap<String, PackageImporters>> {
+    let graph = graph.as_graph();
+    if graph.package_usage.is_empty() && graph.type_only_package_usage.is_empty() {
+        return None;
+    }
+    let changed_norm = normalized_changed_paths(changed_files);
+    let id_to_norm: FxHashMap<FileId, String> = graph
+        .modules
+        .iter()
+        .map(|module| (module.file_id, normalize_path(&module.path)))
+        .collect();
+    let mut usage: FxHashMap<&str, Vec<FileId>> = FxHashMap::default();
+    for (package, files) in graph
+        .package_usage
+        .iter()
+        .chain(graph.type_only_package_usage.iter())
+    {
+        usage
+            .entry(package.as_str())
+            .or_default()
+            .extend(files.iter().copied());
+    }
+    let map = usage
+        .into_iter()
+        .map(|(package, files)| {
+            let mut importers: Vec<FileId> = files;
+            importers.sort_unstable_by_key(|id| id.0);
+            importers.dedup();
+            let out_of_diff: Vec<FileId> = importers
+                .iter()
+                .copied()
+                .filter(|id| id_to_norm.get(id).is_none_or(|p| !changed_norm.contains(p)))
+                .collect();
+            (
+                package.to_string(),
+                PackageImporters {
+                    importers,
+                    out_of_diff,
+                },
+            )
+        })
+        .collect();
     Some(map)
 }
 

@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim AS download
 
-ARG FALLOW_VERSION=3.19.0
+ARG FALLOW_VERSION=3.20.0
 ARG TARGETARCH
 
 RUN apt-get update \
@@ -15,11 +15,11 @@ RUN set -eux; \
   case "${TARGETARCH}" in \
     amd64) \
       asset="fallow-linux-x64-musl"; \
-      sha256="1129c1bce1b35b8ea47ee53589eb1e01fab5df479eb293cfdb1e8f73bad310bf"; \
+      sha256="d1a91b60bbaf886c64035b7df73846fe28dd5d8dad472bf33199f72aff8d1262"; \
       ;; \
     arm64) \
       asset="fallow-linux-arm64-musl"; \
-      sha256="94395df09e1d2674c9d9b7df5fae38fd70c47e7e1bd168579c9605d01d6aac73"; \
+      sha256="571c6a4ec13732e7c17516bcac801eaf306b0389a1b6e54f19a6ff269dc4a91b"; \
       ;; \
     *) \
       echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; \

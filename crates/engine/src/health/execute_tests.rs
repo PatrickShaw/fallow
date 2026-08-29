@@ -40,6 +40,7 @@ fn make_module(file_id: FileId, complexity: Vec<FunctionComplexity>) -> ModuleIn
 fn make_fc(name: &str, cyclomatic: u16, cognitive: u16, line_count: u32) -> FunctionComplexity {
     FunctionComplexity {
         name: name.to_string(),
+        is_private_member: false,
         line: 1,
         col: 0,
         cyclomatic,
@@ -1050,6 +1051,7 @@ fn collect_findings_preserves_function_metadata() {
         FileId(0),
         vec![FunctionComplexity {
             name: "processData".to_string(),
+            is_private_member: false,
             line: 42,
             col: 8,
             cyclomatic: 25,
@@ -1089,10 +1091,15 @@ fn collect_findings_preserves_function_metadata() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture; linear setup/assert, length is not a maintainability concern"
+)]
 fn merge_crap_findings_disambiguates_same_line_functions() {
     let path = PathBuf::from("/project/src/curried.ts");
     let outer = FunctionComplexity {
         name: "handler".to_string(),
+        is_private_member: false,
         line: 1,
         col: 23,
         cyclomatic: 1,
@@ -1107,6 +1114,7 @@ fn merge_crap_findings_disambiguates_same_line_functions() {
     };
     let inner = FunctionComplexity {
         name: "<arrow>".to_string(),
+        is_private_member: false,
         line: 1,
         col: 43,
         cyclomatic: 7,
@@ -1200,6 +1208,7 @@ fn merge_crap_findings_picks_outer_when_outer_exceeds() {
     let path = PathBuf::from("/project/src/curried_outer.ts");
     let outer = FunctionComplexity {
         name: "complex".to_string(),
+        is_private_member: false,
         line: 5,
         col: 10,
         cyclomatic: 8,
@@ -1214,6 +1223,7 @@ fn merge_crap_findings_picks_outer_when_outer_exceeds() {
     };
     let inner = FunctionComplexity {
         name: "<arrow>".to_string(),
+        is_private_member: false,
         line: 5,
         col: 30,
         cyclomatic: 1,

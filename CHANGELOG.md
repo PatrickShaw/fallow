@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Istanbul coverage now matches functions whose extracted position falls
+  between the producer's declaration and its body**
+  (Closes [#2448](https://github.com/fallow-rs/fallow/issues/2448),
+  [#2449](https://github.com/fallow-rs/fallow/pull/2449)). A class member
+  carrying a decorator and a wrapped parameter list is recorded with a
+  declaration on the decorator and a body below the signature, so neither
+  position identifies the member, and the innermost arrow of a curried chain
+  formatted one per line has the same shape. Fallow now reads that header span
+  when no established matcher resolves the position. Established matches keep
+  priority, and the span is read only when exactly one anonymous record covers
+  the position and no other function is declared inside it. Thanks to
+  [@PrinceD96](https://github.com/PrinceD96) for the report and the
+  implementation.
+
+- **A member whose parameter list holds a function no longer reports that
+  function's coverage** (Closes [#2448](https://github.com/fallow-rs/fallow/issues/2448)).
+  A default value, a decorator argument, or a class expression written in a
+  signature is a function of its own, a line or two from the member that holds
+  it, and the nearest-record fallback could credit either to the other. Inside
+  a signature a record now has to sit on the position or contain it, and where
+  neither does the member keeps the static estimate instead of a measured
+  number that belongs to different code.
+
+- **A coverage map with project-relative keys now joins from any working
+  directory** (Closes [#2448](https://github.com/fallow-rs/fallow/issues/2448)).
+  nyc and some Jest setups record keys relative to the project. Fallow resolved
+  them against the process directory, so a run from anywhere but the project
+  root lost the whole map at once and every function silently fell back to its
+  static estimate. They now resolve against the project root, the way the
+  coverage file path already does.
+
+- **Private class members no longer take coverage from the function that
+  encloses them** (Closes [#2448](https://github.com/fallow-rs/fallow/issues/2448)).
+  No instrumenter records a `#member` in its function map, so every candidate
+  one could reach belongs to some enclosing function. Such a member could be
+  reported as fully covered while it never ran. It now uses the static estimate
+  instead, and it is recorded under its own `#name` rather than `<anonymous>`,
+  so it is identifiable in complexity output. Private-member provenance is
+  stored separately from that display name, so a public string-named method
+  whose name begins with `#` remains eligible for exact coverage matching. The
+  rule sits at the one lookup entry point every consumer goes through, so the
+  test-covered check honours it as well.
+
+### Performance
+
+- **Coverage matching no longer rescans a file for every unmatched function.**
+  Aliases and header spans are now indexed by line, which bounds each fallback
+  to the records that can reach the target position.
+
 ## [3.20.0] - 2026-08-28
 
 ### Added

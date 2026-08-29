@@ -38,7 +38,7 @@ use fallow_types::extract::{
 
 /// Per-function state on the scope stack.
 struct FunctionFrame {
-    name: String,
+    identity: FunctionIdentity,
     span: Span,
     cyclomatic: u16,
     cognitive: u16,
@@ -64,6 +64,27 @@ struct FunctionFrame {
     contributions: Vec<ComplexityContribution>,
 }
 
+struct FunctionIdentity {
+    name: String,
+    is_private_member: bool,
+}
+
+impl FunctionIdentity {
+    fn public(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            is_private_member: false,
+        }
+    }
+
+    fn private(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            is_private_member: true,
+        }
+    }
+}
+
 /// AST visitor that computes per-function complexity metrics.
 pub struct ComplexityVisitor<'a> {
     stack: Vec<FunctionFrame>,
@@ -73,9 +94,9 @@ pub struct ComplexityVisitor<'a> {
     /// Source text the AST was parsed from. Used to compute each function's
     /// content digest (`source_hash`) from its full-span byte slice.
     source: &'a str,
-    /// Name override from a parent node (e.g., method name from `MethodDefinition`,
-    /// variable name from `const foo = function() {}`).
-    pending_name: Option<String>,
+    /// Identity override from a parent node (e.g., method identity from
+    /// `MethodDefinition`, variable name from `const foo = function() {}`).
+    pending_identity: Option<FunctionIdentity>,
 }
 
 impl<'a> ComplexityVisitor<'a> {
@@ -85,7 +106,7 @@ impl<'a> ComplexityVisitor<'a> {
             results: Vec::new(),
             line_offsets,
             source,
-            pending_name: None,
+            pending_identity: None,
         }
     }
 
@@ -103,9 +124,15 @@ impl<'a> ComplexityVisitor<'a> {
         Some(fallow_cov_protocol::source_hash_for(slice.as_bytes()))
     }
 
-    fn push_function(&mut self, name: String, span: Span, param_count: u8, prop_count: u16) {
+    fn push_function(
+        &mut self,
+        identity: FunctionIdentity,
+        span: Span,
+        param_count: u8,
+        prop_count: u16,
+    ) {
         self.stack.push(FunctionFrame {
-            name,
+            identity,
             span,
             cyclomatic: 1,
             cognitive: 0,
@@ -132,7 +159,8 @@ impl<'a> ComplexityVisitor<'a> {
                 fallow_types::extract::byte_offset_to_line_col(self.line_offsets, frame.span.end).0;
             let source_hash = self.source_hash_for_span(frame.span);
             self.results.push(FunctionComplexity {
-                name: frame.name,
+                name: frame.identity.name,
+                is_private_member: frame.identity.is_private_member,
                 line,
                 col,
                 cyclomatic: frame.cyclomatic,
@@ -257,7 +285,7 @@ impl<'a> ComplexityVisitor<'a> {
         let react_shaped = self
             .stack
             .last()
-            .is_some_and(|frame| frame_name_is_react_shaped(&frame.name));
+            .is_some_and(|frame| frame_name_is_react_shaped(&frame.identity.name));
         if let Some(frame) = self.stack.last_mut() {
             frame.hook_count = frame.hook_count.saturating_add(1);
         }
@@ -413,15 +441,15 @@ impl<'ast> Visit<'ast> for ComplexityVisitor<'_> {
             walk::walk_function(self, func, flags);
             return;
         }
-        let name = func
+        let identity = func
             .id
             .as_ref()
             .map(|id| {
-                self.pending_name.take();
-                id.name.to_string()
+                self.pending_identity.take();
+                FunctionIdentity::public(id.name.to_string())
             })
-            .or_else(|| self.pending_name.take())
-            .unwrap_or_else(|| "<anonymous>".to_string());
+            .or_else(|| self.pending_identity.take())
+            .unwrap_or_else(|| FunctionIdentity::public("<anonymous>"));
 
         let is_nested = !self.stack.is_empty();
         if is_nested {
@@ -430,7 +458,7 @@ impl<'ast> Visit<'ast> for ComplexityVisitor<'_> {
 
         let param_count = Self::count_params(&func.params);
         let prop_count = Self::count_props(&func.params);
-        self.push_function(name, func.span, param_count, prop_count);
+        self.push_function(identity, func.span, param_count, prop_count);
         walk::walk_function(self, func, flags);
         self.pop_function();
 
@@ -440,10 +468,10 @@ impl<'ast> Visit<'ast> for ComplexityVisitor<'_> {
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'ast>) {
-        let name = self
-            .pending_name
+        let identity = self
+            .pending_identity
             .take()
-            .unwrap_or_else(|| "<arrow>".to_string());
+            .unwrap_or_else(|| FunctionIdentity::public("<arrow>"));
 
         let is_nested = !self.stack.is_empty();
         if is_nested {
@@ -452,7 +480,7 @@ impl<'ast> Visit<'ast> for ComplexityVisitor<'_> {
 
         let param_count = Self::count_params(&arrow.params);
         let prop_count = Self::count_props(&arrow.params);
-        self.push_function(name, arrow.span, param_count, prop_count);
+        self.push_function(identity, arrow.span, param_count, prop_count);
         walk::walk_arrow_function_expression(self, arrow);
         self.pop_function();
 
@@ -462,41 +490,47 @@ impl<'ast> Visit<'ast> for ComplexityVisitor<'_> {
     }
 
     fn visit_method_definition(&mut self, method: &MethodDefinition<'ast>) {
+        // `static_name` has no answer for a private key, so `#work` would fall
+        // through to `<anonymous>` and read as an unnamed unit in every report.
         if let Some(name) = method.key.static_name() {
-            self.pending_name = Some(name.to_string());
+            self.pending_identity = Some(FunctionIdentity::public(name.to_string()));
+        } else if let PropertyKey::PrivateIdentifier(private) = &method.key {
+            self.pending_identity = Some(FunctionIdentity::private(format!("#{}", private.name)));
         }
         walk::walk_method_definition(self, method);
-        self.pending_name = None;
+        self.pending_identity = None;
     }
 
     fn visit_variable_declarator(&mut self, decl: &VariableDeclarator<'ast>) {
         if let Some(id) = decl.id.get_binding_identifier() {
-            self.pending_name = Some(id.name.to_string());
+            self.pending_identity = Some(FunctionIdentity::public(id.name.to_string()));
         }
         walk::walk_variable_declarator(self, decl);
-        self.pending_name = None;
+        self.pending_identity = None;
     }
 
     fn visit_property_definition(&mut self, prop: &PropertyDefinition<'ast>) {
         if let Some(name) = prop.key.static_name() {
-            self.pending_name = Some(name.to_string());
+            self.pending_identity = Some(FunctionIdentity::public(name.to_string()));
+        } else if let PropertyKey::PrivateIdentifier(private) = &prop.key {
+            self.pending_identity = Some(FunctionIdentity::private(format!("#{}", private.name)));
         }
         walk::walk_property_definition(self, prop);
-        self.pending_name = None;
+        self.pending_identity = None;
     }
 
     fn visit_object_property(&mut self, prop: &ObjectProperty<'ast>) {
         if let Some(name) = prop.key.static_name() {
-            self.pending_name = Some(name.to_string());
+            self.pending_identity = Some(FunctionIdentity::public(name.to_string()));
         }
         walk::walk_object_property(self, prop);
-        self.pending_name = None;
+        self.pending_identity = None;
     }
 
     fn visit_export_default_declaration(&mut self, decl: &ExportDefaultDeclaration<'ast>) {
-        self.pending_name = Some("default".to_string());
+        self.pending_identity = Some(FunctionIdentity::public("default"));
         walk::walk_export_default_declaration(self, decl);
-        self.pending_name = None;
+        self.pending_identity = None;
     }
 
     fn visit_if_statement(&mut self, stmt: &IfStatement<'ast>) {
@@ -787,6 +821,21 @@ mod tests {
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0].line, 4);
         assert_eq!(methods[0].cyclomatic, 2);
+    }
+
+    #[test]
+    fn class_method_extraction_preserves_private_provenance() {
+        let results = analyze(
+            "class Vault {\n\
+               #wipe() {}\n\
+               '#archive'() {}\n\
+             }",
+        );
+        let private_method = find_fn(&results, "#wipe");
+        let quoted_public_method = find_fn(&results, "#archive");
+
+        assert!(private_method.is_private_member);
+        assert!(!quoted_public_method.is_private_member);
     }
 
     #[test]

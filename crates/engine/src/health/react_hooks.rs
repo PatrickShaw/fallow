@@ -166,6 +166,7 @@ mod tests {
     ) -> FunctionComplexity {
         FunctionComplexity {
             name: name.to_string(),
+            is_private_member: false,
             line,
             col,
             cyclomatic: 1,

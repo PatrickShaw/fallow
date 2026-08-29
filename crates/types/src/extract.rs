@@ -1008,6 +1008,11 @@ pub fn is_synthetic_template_unit(name: &str) -> bool {
 pub struct FunctionComplexity {
     /// Function name (or `"<anonymous>"` for unnamed functions/arrows).
     pub name: String,
+    /// Whether this function is an ECMAScript `#`-private class member.
+    ///
+    /// Kept separately from `name` because a public string-named method may
+    /// legally begin with `#` and remains eligible for runtime coverage.
+    pub is_private_member: bool,
     /// 1-based line number where the function starts.
     pub line: u32,
     /// 0-based byte column where the function starts.
@@ -3562,6 +3567,7 @@ mod tests {
             line_offsets: vec![0, 8],
             complexity: vec![FunctionComplexity {
                 name: "work".to_string(),
+                is_private_member: false,
                 line: 1,
                 col: 0,
                 cyclomatic: 2,
@@ -4856,6 +4862,7 @@ mod tests {
     fn function_complexity_bitcode_roundtrip() {
         let fc = FunctionComplexity {
             name: "processData".to_string(),
+            is_private_member: true,
             line: 42,
             col: 4,
             cyclomatic: 15,
@@ -4888,6 +4895,7 @@ mod tests {
         let bytes = bitcode::encode(&fc);
         let decoded: FunctionComplexity = bitcode::decode(&bytes).unwrap();
         assert_eq!(decoded.name, "processData");
+        assert!(decoded.is_private_member);
         assert_eq!(decoded.line, 42);
         assert_eq!(decoded.col, 4);
         assert_eq!(decoded.cyclomatic, 15);

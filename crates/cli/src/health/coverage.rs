@@ -1100,7 +1100,7 @@ fn function_test_covered(
         && let Some(canonical_path) = canonical_path
         && let Some(coverage_pct) = coverage
             .get(canonical_path)
-            .and_then(|file| file.lookup(function.name.as_str(), function.line, function.col))
+            .and_then(|file| file.lookup_function(function))
     {
         return coverage_pct > 0.0;
     }

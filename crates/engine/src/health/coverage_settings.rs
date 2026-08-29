@@ -18,13 +18,14 @@ pub(super) struct HealthCoverageSettings {
 pub(super) fn prepare_health_coverage_settings(
     opts: &HealthExecutionOptions<'_>,
     config: &ResolvedConfig,
+    file_paths: &rustc_hash::FxHashMap<crate::discover::FileId, &std::path::PathBuf>,
 ) -> Result<HealthCoverageSettings, HealthError> {
     let config_coverage_enabled = config.rules.coverage_gaps != fallow_config::Severity::Off;
     let report_coverage_gaps =
         opts.coverage_gaps || (opts.config_activates_coverage_gaps && config_coverage_enabled);
     let enforce_coverage_gaps = opts.enforce_coverage_gap_gate
         && config.rules.coverage_gaps == fallow_config::Severity::Error;
-    let istanbul_coverage = load_health_coverage(opts, config)?;
+    let istanbul_coverage = load_health_coverage(opts, config, file_paths)?;
 
     Ok(HealthCoverageSettings {
         report_coverage_gaps,
@@ -36,12 +37,16 @@ pub(super) fn prepare_health_coverage_settings(
 fn load_health_coverage(
     opts: &HealthExecutionOptions<'_>,
     config: &ResolvedConfig,
+    file_paths: &rustc_hash::FxHashMap<crate::discover::FileId, &std::path::PathBuf>,
 ) -> Result<Option<scoring::IstanbulCoverage>, HealthError> {
     if let Some(coverage_path) = opts.coverage_inputs.coverage {
-        return match scoring::load_istanbul_coverage(
+        let discovered_sources = (!opts.coverage_inputs.coverage_relocated)
+            .then(|| discovered_regular_sources(file_paths, &config.root));
+        return match scoring::load_istanbul_coverage_for_sources(
             coverage_path,
             opts.coverage_inputs.coverage_root,
             Some(&config.root),
+            discovered_sources.as_ref(),
             opts.coverage_inputs.coverage_relocated,
         ) {
             Ok(coverage) => Ok(Some(coverage)),
@@ -58,17 +63,42 @@ fn load_health_coverage(
     let Some(auto_path) = scoring::auto_detect_coverage(&config.root) else {
         return Ok(None);
     };
+    let discovered_sources = (!opts.coverage_inputs.coverage_relocated)
+        .then(|| discovered_regular_sources(file_paths, &config.root));
     if std::env::var("CI").is_ok_and(|v| !v.is_empty()) {
         eprintln!(
             "note: using auto-detected coverage at {}; pass --coverage explicitly for deterministic CI scores",
             auto_path.display()
         );
     }
-    Ok(scoring::load_istanbul_coverage(
+    Ok(scoring::load_istanbul_coverage_for_sources(
         &auto_path,
         opts.coverage_inputs.coverage_root,
         Some(&config.root),
+        discovered_sources.as_ref(),
         opts.coverage_inputs.coverage_relocated,
     )
     .ok())
+}
+
+fn discovered_regular_sources(
+    file_paths: &rustc_hash::FxHashMap<crate::discover::FileId, &std::path::PathBuf>,
+    project_root: &std::path::Path,
+) -> rustc_hash::FxHashSet<std::path::PathBuf> {
+    let Ok(canonical_root) = dunce::canonicalize(project_root) else {
+        return rustc_hash::FxHashSet::default();
+    };
+    file_paths
+        .values()
+        .filter_map(|path| {
+            let canonical = dunce::canonicalize(path).ok()?;
+            if !canonical.starts_with(&canonical_root) {
+                return None;
+            }
+            std::fs::metadata(&canonical)
+                .ok()?
+                .is_file()
+                .then_some(canonical)
+        })
+        .collect()
 }

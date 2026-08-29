@@ -3617,6 +3617,7 @@ fn module_to_cached_roundtrip_complexity() {
         complexity: vec![
             FunctionComplexity {
                 name: "complex".to_string(),
+                is_private_member: true,
                 line: 5,
                 col: 0,
                 cyclomatic: 8,
@@ -3648,6 +3649,7 @@ fn module_to_cached_roundtrip_complexity() {
             },
             FunctionComplexity {
                 name: "simple".to_string(),
+                is_private_member: false,
                 line: 30,
                 col: 4,
                 cyclomatic: 1,
@@ -3723,6 +3725,7 @@ fn module_to_cached_roundtrip_complexity() {
 
     assert_eq!(restored.complexity.len(), 2);
     assert_eq!(restored.complexity[0].name, "complex");
+    assert!(restored.complexity[0].is_private_member);
     assert_eq!(restored.complexity[0].cyclomatic, 8);
     assert_eq!(restored.complexity[0].cognitive, 15);
     assert_eq!(restored.complexity[0].line_count, 20);
@@ -3738,6 +3741,7 @@ fn module_to_cached_roundtrip_complexity() {
         ]
     );
     assert_eq!(restored.complexity[1].name, "simple");
+    assert!(!restored.complexity[1].is_private_member);
     assert_eq!(restored.complexity[1].cyclomatic, 1);
     assert_eq!(restored.complexity[1].cognitive, 0);
 }

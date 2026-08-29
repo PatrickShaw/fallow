@@ -1009,7 +1009,15 @@ use crate::MemberKind;
 /// Bumped to 282 for issue #2442: complexity extraction no longer emits
 /// bodyless TypeScript overload and ambient declarations as runtime function
 /// units. Warm 281 caches retain those phantom complexity rows.
-pub(super) const CACHE_VERSION: u32 = 282;
+///
+/// Bumped to 283 for issue #2448: private class members are recorded under
+/// their own `#name` instead of `<anonymous>`. Warm 282 caches retain the
+/// anonymous display name for those complexity units.
+///
+/// Bumped to 284 for issue #2448: complexity units now persist private-member
+/// provenance separately from their display name. Warm 283 caches cannot
+/// distinguish an ECMAScript private member from a public quoted `#` name.
+pub(super) const CACHE_VERSION: u32 = 284;
 
 /// Duplication token cache version. Bump when duplicate tokenization,
 /// normalization, or the on-disk token cache schema changes.

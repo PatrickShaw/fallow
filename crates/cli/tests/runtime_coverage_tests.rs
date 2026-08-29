@@ -274,6 +274,73 @@ mod gated {
     }
 
     #[test]
+    fn private_member_does_not_inherit_istanbul_coverage_in_sidecar_request() {
+        let harness = Harness::new();
+        let project_root = harness.tmp.path().join("private-member-project");
+        let source_dir = project_root.join("src");
+        fs::create_dir_all(&source_dir).expect("create fixture source directory");
+        fs::write(
+            project_root.join("package.json"),
+            r#"{"name":"private-member-fixture","version":"1.0.0","type":"module"}"#,
+        )
+        .expect("write fixture package manifest");
+        let source_path = source_dir.join("vault.js");
+        fs::write(
+            &source_path,
+            "const makeVault = (\n  Vault = class {\n    #wipe() {}\n  }\n) => Vault;\nexport { makeVault };\n",
+        )
+        .expect("write private-member fixture");
+
+        let coverage_path = project_root.join("coverage-final.json");
+        let coverage = serde_json::json!({
+            (source_path.to_string_lossy().into_owned()): {
+                "path": source_path,
+                "statementMap": {},
+                "fnMap": {
+                    "0": {
+                        "name": "(anonymous_0)",
+                        "line": 5,
+                        "decl": {
+                            "start": { "line": 1, "column": 18 },
+                            "end": { "line": 1, "column": 19 }
+                        },
+                        "loc": {
+                            "start": { "line": 5, "column": 5 },
+                            "end": { "line": 5, "column": 10 }
+                        }
+                    }
+                },
+                "branchMap": {},
+                "s": {},
+                "f": { "0": 1 },
+                "b": {}
+            }
+        });
+        fs::write(
+            &coverage_path,
+            serde_json::to_vec(&coverage).expect("serialize Istanbul fixture"),
+        )
+        .expect("write Istanbul fixture");
+
+        let mut cmd = harness.fallow();
+        cmd.env("FALLOW_STUB_MODE", "assert-private-member-uncovered");
+        cmd.arg("health")
+            .arg("--root")
+            .arg(&project_root)
+            .arg("--runtime-coverage")
+            .arg(&coverage_path)
+            .arg("--format")
+            .arg("json")
+            .arg("--quiet");
+        let (stdout, stderr, code) = run_with(cmd);
+
+        assert_eq!(
+            code, 0,
+            "private member must remain uncovered in the sidecar request; stdout={stdout}; stderr={stderr}"
+        );
+    }
+
+    #[test]
     fn coverage_analyze_benchmark_transport_matches_signed_stub_output() {
         let harness = Harness::new();
         let root = fixture_path("coverage-gaps");

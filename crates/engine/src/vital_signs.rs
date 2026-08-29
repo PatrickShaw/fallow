@@ -1131,6 +1131,7 @@ mod tests {
         crate::source::ModuleInfo {
             complexity: vec![fallow_types::extract::FunctionComplexity {
                 name: format!("fn_{id}"),
+                is_private_member: false,
                 line: id + 1,
                 col: 0,
                 cyclomatic,

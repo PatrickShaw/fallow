@@ -17,6 +17,8 @@
 //! - `"malformed-stdout"`: writes non-JSON bytes, exit 0
 //! - `"empty-stdout"`: writes nothing, exit 0
 //! - `"enforce-license-gate"`: mirrors the paid-shape sidecar gate for tests
+//! - `"assert-private-member-uncovered"`: rejects a request that credits the
+//!   fixture's private class member with Istanbul coverage
 //! - `"security-hot"`: response with `src/sink.ts::render` as a hot path
 //! - `"capture-quality-short"`: clean response with a short-window
 //!   `capture_quality` (`lazy_parse_warning = true`), exit 0
@@ -66,6 +68,7 @@ fn main() -> ExitCode {
         "malformed-stdout" => emit_bytes(b"definitely not JSON\n"),
         "empty-stdout" => ExitCode::SUCCESS,
         "enforce-license-gate" => enforce_license_gate(parsed),
+        "assert-private-member-uncovered" => assert_private_member_uncovered(parsed),
         "exit-4" => {
             eprintln!("stub sidecar: simulated protocol mismatch");
             ExitCode::from(4)
@@ -83,6 +86,28 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn assert_private_member_uncovered(request: Option<Request>) -> ExitCode {
+    let Some(request) = request else {
+        eprintln!("stub sidecar: failed to parse request");
+        return ExitCode::from(5);
+    };
+    let private_member = request
+        .static_findings
+        .files
+        .iter()
+        .flat_map(|file| &file.functions)
+        .find(|function| function.name == "#wipe");
+    let Some(private_member) = private_member else {
+        eprintln!("stub sidecar: private member missing from request");
+        return ExitCode::from(5);
+    };
+    if private_member.test_covered {
+        eprintln!("stub sidecar: private member inherited foreign Istanbul coverage");
+        return ExitCode::from(5);
+    }
+    emit_clean_response(PROTOCOL_VERSION, None)
 }
 
 fn enforce_license_gate(request: Option<Request>) -> ExitCode {

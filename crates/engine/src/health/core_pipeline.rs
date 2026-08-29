@@ -164,7 +164,7 @@ fn prepare_health_analysis_prelude<R>(
         report_coverage_gaps,
         enforce_coverage_gaps,
         istanbul_coverage,
-    } = prepare_health_coverage_settings(input.opts, input.config)?;
+    } = prepare_health_coverage_settings(input.opts, input.config, &input.scope.file_paths)?;
 
     let needs_file_scores = needs_health_file_scores(
         input.opts,

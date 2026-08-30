@@ -45,6 +45,12 @@ pub struct FileScoreOutput {
     /// Istanbul match stats: functions matched / total (only meaningful with Istanbul model).
     pub(crate) istanbul_matched: usize,
     pub(crate) istanbul_total: usize,
+    /// Analyzed files the coverage map carried an entry for. Read against the
+    /// map's own file count, this separates a map that did not join from code
+    /// the map says nothing ran in.
+    pub(crate) istanbul_files_joined: usize,
+    /// Files the coverage map describes, joined or not. Zero without a map.
+    pub(crate) istanbul_files_total: usize,
     /// Per-file, per-function CRAP data used to emit `--max-crap` findings.
     /// Absolute paths match `FileHealthScore.path`. Absent entries indicate the
     /// file had zero functions.
@@ -74,6 +80,8 @@ struct FileScoreOutputParts<'a> {
     direct_callers: rustc_hash::FxHashMap<std::path::PathBuf, Vec<DirectCallerEvidence>>,
     istanbul_matched: usize,
     istanbul_total: usize,
+    istanbul_files_joined: usize,
+    istanbul_files_total: usize,
     per_function_crap: rustc_hash::FxHashMap<std::path::PathBuf, Vec<PerFunctionCrap>>,
     template_inherit: rustc_hash::FxHashMap<crate::discover::FileId, TemplateInheritContext>,
 }
@@ -473,9 +481,12 @@ fn crap_for_function(
             fallow_output::CoverageSource::Istanbul,
         );
     }
+    // The same static estimate the run without a coverage map would have
+    // used. A map that says nothing about this function is not evidence that
+    // it ran, so passing one must never lower its CRAP below the estimate.
     if is_test_reachable {
         return (
-            cc,
+            crap_formula(cc, INDIRECT_TEST_COVERAGE_ESTIMATE),
             None,
             fallow_output::CoverageTier::from_pct(INDIRECT_TEST_COVERAGE_ESTIMATE),
             fallow_output::CoverageSource::Estimated,
@@ -1483,6 +1494,11 @@ impl IstanbulCoverage {
     pub fn get(&self, path: &std::path::Path) -> Option<&IstanbulFileCoverage> {
         self.files.get(path)
     }
+
+    /// How many files the coverage map describes, joined or not.
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
 }
 
 /// Precedence decision for per-function CRAP coverage inputs.
@@ -2283,6 +2299,8 @@ pub(super) fn compute_file_scores(
         direct_callers,
         istanbul_matched: acc.istanbul_matched,
         istanbul_total: acc.istanbul_total,
+        istanbul_files_joined: acc.istanbul_files_joined,
+        istanbul_files_total: acc.istanbul_files_total,
         per_function_crap: acc.per_function_crap,
         template_inherit,
     }))
@@ -2312,6 +2330,8 @@ struct FileScoreAccumulator {
     unused_export_names: rustc_hash::FxHashMap<std::path::PathBuf, Vec<String>>,
     per_function_crap: rustc_hash::FxHashMap<std::path::PathBuf, Vec<PerFunctionCrap>>,
     istanbul_matched: usize,
+    istanbul_files_joined: usize,
+    istanbul_files_total: usize,
     istanbul_total: usize,
 }
 
@@ -2326,6 +2346,8 @@ impl FileScoreAccumulator {
             per_function_crap: rustc_hash::FxHashMap::default(),
             istanbul_matched: 0,
             istanbul_total: 0,
+            istanbul_files_joined: 0,
+            istanbul_files_total: 0,
         }
     }
 }
@@ -2338,6 +2360,9 @@ fn accumulate_file_scores(
 ) -> FileScoreAccumulator {
     let mut acc = FileScoreAccumulator {
         unused_export_names,
+        istanbul_files_total: ctx
+            .istanbul_coverage
+            .map_or(0, IstanbulCoverage::file_count),
         ..FileScoreAccumulator::with_capacity(ctx.graph.modules.len())
     };
     for node in &ctx.graph.modules {
@@ -2404,6 +2429,7 @@ fn compute_one_file_score(
     let crap = compute_file_score_crap(node, ctx, &path_owned, &ceilings);
     acc.istanbul_matched += crap.istanbul_matched;
     acc.istanbul_total += crap.istanbul_total;
+    acc.istanbul_files_joined += usize::from(crap.coverage_file_joined);
     record_per_function_crap(&mut acc.per_function_crap, &path_owned, crap.per_function);
 
     // `crap_effective_threshold` is the file's lowest effective ceiling, on the
@@ -2496,6 +2522,8 @@ fn build_file_score_output(parts: FileScoreOutputParts<'_>) -> FileScoreOutput {
         analysis_snapshot,
         istanbul_matched: parts.istanbul_matched,
         istanbul_total: parts.istanbul_total,
+        istanbul_files_joined: parts.istanbul_files_joined,
+        istanbul_files_total: parts.istanbul_files_total,
         per_function_crap: parts.per_function_crap,
         template_inherit_provenance,
     }
@@ -2566,6 +2594,9 @@ struct FileScoreCrap {
     per_function: Vec<PerFunctionCrap>,
     istanbul_matched: usize,
     istanbul_total: usize,
+    /// The coverage map carried an entry for this file. Distinguishes a map
+    /// that did not join from code the map genuinely says nothing ran in.
+    coverage_file_joined: bool,
 }
 
 impl FileScoreCrap {
@@ -2576,6 +2607,7 @@ impl FileScoreCrap {
             per_function: Vec::new(),
             istanbul_matched: 0,
             istanbul_total: 0,
+            coverage_file_joined: false,
         }
     }
 
@@ -2586,16 +2618,18 @@ impl FileScoreCrap {
             per_function: result.per_function,
             istanbul_matched: 0,
             istanbul_total: 0,
+            coverage_file_joined: false,
         }
     }
 
-    fn istanbul(result: IstanbulCrapResult) -> Self {
+    fn istanbul(result: IstanbulCrapResult, coverage_file_joined: bool) -> Self {
         Self {
             max: result.max_crap,
             signals: result.signals,
             per_function: result.per_function,
             istanbul_matched: result.matched,
             istanbul_total: result.total,
+            coverage_file_joined,
         }
     }
 }
@@ -2657,12 +2691,15 @@ fn compute_istanbul_file_crap(
     is_test_reachable: bool,
     ceilings: &CrapCeilingLookup<'_>,
 ) -> FileScoreCrap {
-    FileScoreCrap::istanbul(compute_crap_scores_istanbul(
-        &module.complexity,
-        file_coverage,
-        is_test_reachable,
-        ceilings,
-    ))
+    FileScoreCrap::istanbul(
+        compute_crap_scores_istanbul(
+            &module.complexity,
+            file_coverage,
+            is_test_reachable,
+            ceilings,
+        ),
+        file_coverage.is_some(),
+    )
 }
 
 fn compute_static_file_crap(
@@ -2915,6 +2952,63 @@ mod tests {
             std::path::Path::new("src/test.ts"),
         );
         compute_crap_scores_istanbul(complexity, file_coverage, is_test_reachable, &ceilings)
+    }
+
+    /// A coverage map that says nothing about a function is not evidence that
+    /// the function ran, so passing one must not score it lower than the run
+    /// without a map would have. Both paths use the same static estimate for a
+    /// function whose file tests reach.
+    #[test]
+    fn an_unmatched_function_scores_the_same_with_and_without_a_coverage_map() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let source_path = temp.path().join("src/grade.ts");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(&source_path, "// geometry fixture\n").unwrap();
+
+        // A map that carries the file but records a function fallow never
+        // extracted, which is what a stale map or an unresolved producer
+        // anchor produces.
+        let coverage_path = temp.path().join("coverage-final.json");
+        write_single_file_istanbul_fixture(
+            &coverage_path,
+            &source_path,
+            &serde_json::json!({
+                "0": {
+                    "name": "unrelated",
+                    "line": 40,
+                    "decl": { "start": { "line": 40, "column": 0 }, "end": { "line": 40, "column": 9 } },
+                    "loc": { "start": { "line": 40, "column": 20 }, "end": { "line": 44, "column": 1 } }
+                }
+            }),
+            &serde_json::json!({ "0": 1 }),
+        );
+        let coverage = load_istanbul_coverage(&coverage_path, None, None, false).unwrap();
+        let canonical_source = dunce::canonicalize(&source_path).unwrap();
+        let file_coverage = coverage.get(&canonical_source).unwrap();
+
+        let function = make_fn_complexity(10);
+        let with_map =
+            istanbul_crap_default(std::slice::from_ref(&function), Some(file_coverage), true);
+        let estimated = compute_crap_scores_estimated(
+            std::slice::from_ref(&function),
+            &rustc_hash::FxHashSet::default(),
+            true,
+            fallow_output::CoverageSource::Estimated,
+            &CrapCeilingLookup::new(
+                CrapScoreThresholds {
+                    resolver: &test_crap_resolver(CRAP_THRESHOLD),
+                    enforce_crap: true,
+                },
+                std::path::Path::new("src/test.ts"),
+            ),
+        );
+
+        assert_eq!(with_map.matched, 0);
+        assert!(
+            (with_map.per_function[0].crap - estimated.per_function[0].crap).abs() < f64::EPSILON,
+            "a map that attributes nothing must not change the score"
+        );
+        assert_eq!(with_map.per_function[0].coverage_pct, None);
     }
 
     fn test_istanbul_file_coverage(
@@ -5519,11 +5613,15 @@ mod tests {
         assert_eq!(result.signals.above, 1);
     }
 
+    /// A file tests reach, with no coverage data for it at all, keeps the
+    /// static estimate rather than being scored as fully covered.
     #[test]
-    fn istanbul_crap_falls_back_to_binary_when_no_file_coverage() {
+    fn istanbul_crap_uses_the_static_estimate_when_no_file_coverage() {
         let funcs = vec![make_fn_complexity(5)];
         let result = istanbul_crap_default(&funcs, None, true);
-        assert!((result.max_crap - 5.0).abs() < f64::EPSILON);
+        // The reported score is rounded to one decimal, so compare against
+        // the estimate rather than the formula's last bit.
+        assert!((result.max_crap - 10.4).abs() < 1e-9);
         assert_eq!(result.signals.above, 0);
     }
 

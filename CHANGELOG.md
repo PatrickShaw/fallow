@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.21.0] - 2026-08-31
+
 ### Added
 
 - **A conformance corpus of real coverage-producer geometry**
@@ -7238,7 +7240,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--changed-since` and `--fail-on-issues` for CI
 - Cross-workspace resolution for npm/yarn/pnpm workspaces
 
-[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.20.0...HEAD
+[Unreleased]: https://github.com/fallow-rs/fallow/compare/v3.21.0...HEAD
+[3.21.0]: https://github.com/fallow-rs/fallow/compare/v3.20.0...v3.21.0
 [3.20.0]: https://github.com/fallow-rs/fallow/compare/v3.19.0...v3.20.0
 [3.19.0]: https://github.com/fallow-rs/fallow/compare/v3.18.0...v3.19.0
 [3.18.0]: https://github.com/fallow-rs/fallow/compare/v3.17.0...v3.18.0

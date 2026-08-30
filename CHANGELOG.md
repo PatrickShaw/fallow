@@ -20,6 +20,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Coverage maps written by `v8-to-istanbul` are no longer rejected**
+  (Closes [#2454](https://github.com/fallow-rs/fallow/issues/2454)). c8, nyc in
+  v8 mode, and older vitest versions write a map in which the implicit else of
+  a bare `if` carries `column: -1`. Positions are unsigned, so a single
+  unplaceable coordinate in `branchMap`, a section fallow never reads, aborted
+  the run with exit 2. Such coordinates are now clamped on a retry, which only
+  runs after the strict parse has failed.
+
+- **An accessor keeps its coverage whichever way the producer named it**
+  (Closes [#2456](https://github.com/fallow-rs/fallow/issues/2456)). Raw V8
+  coverage and `oxc-coverage-instrument` record `get area` and `set area` where
+  istanbul-lib-instrument leaves the record anonymous, and fallow extracts the
+  unit as `area`. A covered accessor was reported as unmeasured under the first
+  two. A record now answers to its property name as well as to the spelling the
+  producer recorded.
+
+
+
 - **A coverage map that attributes nothing to a function no longer lowers its
   CRAP** (Closes [#2453](https://github.com/fallow-rs/fallow/issues/2453)). A
   function whose file tests reach, but which no record in the map could be
@@ -30,7 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes a score for a function it actually measured.
 
 
-### Fixed
 
 - **A telemetry spool lock that cannot be opened is no longer reported as
   contention.** `SpoolLock::try_acquire` mapped a lock file it could not open

@@ -155,6 +155,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails after the body is already on disk no longer deletes that file either,
   which used to turn a keep-alive teardown into a failed install.
 
+- **Code Mode bounds the value a snippet returns, not only the fallow JSON it
+  reads.** `max_output_bytes` capped host-call output alone, so a snippet could
+  hand its calling agent a 3 MB result under a 1 KB cap, bounded only by the
+  32 MB sandbox heap. The serialized result is now measured against the same
+  number: a larger one is refused with `ok:false` and reported through the
+  additive `truncated`, `result_bytes`, and `result_preview` fields. A thrown
+  error message is clamped the same way, and a `fallow.all` fan-out shares one
+  budget rather than giving each element the whole of it. `schema_version`
+  stays `mcp-code-execute/v1` and every new field is optional.
+
+- **A Code Mode refusal no longer carries process-cleanup noise.** The
+  output-cap refusal and the deadline message are contract strings that a
+  snippet acts on, but both were assembled with the helper that appends
+  best-effort teardown diagnostics, so a refusal intermittently read
+  `code mode host output exceeded 500 bytes; cleanup errors: failed to
+  terminate subprocess tree: Operation not permitted (os error 1)`. Terminating
+  the process group is a cleanup concern rather than part of the host call's
+  outcome, and it fails whenever the group leader has already become an unreaped
+  zombie. Both messages are now exactly what the envelope documents.
+
+- **The Code Mode allowlist is read from one source.** It lived in five
+  hand-kept lists that had to agree by hand. `McpToolInfo` now carries the Code
+  Mode alias, the sandbox bindings project that data, and drift tests bind the
+  enum to the manifest in both directions. The allowlist reaches the `fallow`
+  schema, the `fallow://tools` resource, and `capabilities.json`, so an agent
+  reads reachability from data instead of parsing a tool description.
+
+### Security
+
+- **The Code Mode sandbox no longer leaves the `Function` constructor
+  reachable.** The sandbox advertised that it had no `Function`, but undefining
+  the global binding left the intrinsic in place, so `(function(){}).constructor`
+  still compiled and ran code inside a sandbox that was documented as unable to.
+  The function, async, generator, and async-generator prototypes now carry a
+  non-configurable `undefined` constructor, and a test pins the sandbox global
+  set so a future runtime cannot widen it unnoticed.
+
 ## [3.21.0] - 2026-08-31
 
 ### Added

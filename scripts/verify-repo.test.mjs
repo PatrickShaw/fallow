@@ -20,6 +20,7 @@ const FAST_COMMANDS = [
   ["npm", ["run", "fmt:js:check"]],
   ["npm", ["run", "generate:contracts:check"]],
   ["npm", ["run", "check:crate-boundaries"]],
+  ["npm", ["run", "check:emitted-versions"]],
 ];
 
 const FULL_ONLY_COMMANDS = [

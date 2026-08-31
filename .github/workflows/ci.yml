@@ -525,6 +525,8 @@ jobs:
         run: node scripts/check-comment-quality.mjs --all
       - name: Script tests
         run: node --test scripts/*.test.mjs
+      - name: Emitted version drift
+        run: npm run check:emitted-versions
       - name: Install type-aware sidecar dependencies
         run: npm ci --prefix tools/type-aware-sidecar --no-audit --no-fund --ignore-scripts
       - name: Type-aware sidecar tests

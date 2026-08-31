@@ -47,6 +47,11 @@ const FAST_COMMANDS = [
     command: "npm",
     args: ["run", "check:crate-boundaries"],
   },
+  {
+    label: "Emitted version drift",
+    command: "npm",
+    args: ["run", "check:emitted-versions"],
+  },
 ];
 
 const FULL_ONLY_COMMANDS = [

@@ -385,7 +385,7 @@ Human output groups paths under "Shared with your team (commit these)" and "Loca
 {
   "kind": "agent-install",
   "schema_version": 1,
-  "fallow_version": "3.20.0",
+  "fallow_version": "3.21.0",
   "root": "/abs/path",
   "mode": "install",
   "dry_run": false,

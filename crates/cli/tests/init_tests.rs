@@ -9,6 +9,8 @@ mod common;
 
 use common::run_fallow_raw;
 use std::fs;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Create a unique temp dir for init tests.
@@ -33,6 +35,112 @@ fn init_temp_dir(suffix: &str) -> std::path::PathBuf {
 /// Clean up a temp dir after a test.
 fn cleanup(dir: &std::path::Path) {
     let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+struct LefthookExecutionFixture {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    shell: PathBuf,
+    restricted_bin: PathBuf,
+    run_script: String,
+}
+
+#[cfg(unix)]
+impl LefthookExecutionFixture {
+    fn new() -> Self {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("package.json"), r#"{"name":"lefthook-test"}"#).unwrap();
+        fs::write(root.join("lefthook.yml"), "pre-commit: {}\n").unwrap();
+
+        let git = executable_on_path("git");
+        let shell = executable_on_path("sh");
+        let status = Command::new(&git)
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .env_clear()
+            .status()
+            .expect("initialize temporary Git repository");
+        assert!(status.success());
+
+        let output = run_fallow_raw(&[
+            "--root",
+            root.to_str().unwrap(),
+            "hooks",
+            "install",
+            "--target",
+            "git",
+            "--branch",
+            "develop",
+        ]);
+        assert_eq!(
+            output.code, 0,
+            "hooks install should generate a Lefthook job, stderr: {}",
+            output.stderr
+        );
+
+        let restricted_bin = root.join("restricted-bin");
+        fs::create_dir(&restricted_bin).unwrap();
+        symlink(git, restricted_bin.join("git")).unwrap();
+
+        Self {
+            run_script: lefthook_run_script(&output.stderr),
+            _dir: dir,
+            root,
+            shell,
+            restricted_bin,
+        }
+    }
+
+    fn run(&self, environment: &[(&str, &Path)]) -> std::process::ExitStatus {
+        let mut command = Command::new(&self.shell);
+        command
+            .args(["-c", &self.run_script])
+            .current_dir(&self.root)
+            .env_clear()
+            .env("PATH", &self.restricted_bin);
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+        command.status().expect("execute generated Lefthook job")
+    }
+}
+
+#[cfg(unix)]
+fn executable_on_path(name: &str) -> PathBuf {
+    let path = std::env::var_os("PATH").expect("test process must have PATH");
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .and_then(|candidate| fs::canonicalize(candidate).ok())
+        .unwrap_or_else(|| panic!("{name} must be available for the execution test"))
+}
+
+#[cfg(unix)]
+fn lefthook_run_script(hint: &str) -> String {
+    let yaml_start = hint
+        .find("pre-commit:")
+        .expect("generated hint must contain a Lefthook config");
+    let config: serde_yaml_ng::Value = serde_yaml_ng::from_str(&hint[yaml_start..])
+        .expect("generated Lefthook hint must be valid YAML");
+    config["pre-commit"]["commands"]["fallow"]["run"]
+        .as_str()
+        .expect("generated Lefthook command must contain a run script")
+        .to_string()
+}
+
+#[cfg(unix)]
+fn write_test_executable(path: &Path, shell: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(path.parent().expect("test executable has a parent")).unwrap();
+    fs::write(path, format!("#!{}\n{body}\n", shell.display())).unwrap();
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap();
 }
 
 #[test]
@@ -236,5 +344,183 @@ fn hooks_namespace_validation_respects_json_format() {
             .unwrap_or_default()
             .contains("--agent, --user, and --gitignore-claude"),
         "unexpected error payload: {json}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lefthook_job_executes_project_local_fallow_outside_path() {
+    let fixture = LefthookExecutionFixture::new();
+    let local_fallow = fixture.root.join("node_modules/.bin/fallow");
+    let args_file = fixture.root.join("fallow-args");
+    write_test_executable(
+        &local_fallow,
+        &fixture.shell,
+        r#"printf '%s\n' "$@" > "$FALLOW_TEST_ARGS""#,
+    );
+
+    let lookup = Command::new(&fixture.shell)
+        .args(["-c", "command -v fallow"])
+        .current_dir(&fixture.root)
+        .env_clear()
+        .env("PATH", &fixture.restricted_bin)
+        .status()
+        .expect("probe restricted PATH");
+    assert!(!lookup.success(), "fallow must not be available on PATH");
+
+    assert!(fixture.run(&[("FALLOW_TEST_ARGS", &args_file)]).success());
+    assert_eq!(
+        fs::read_to_string(args_file).expect("project-local fallow must be invoked"),
+        "audit\n--base\ndevelop\n--quiet\n--gate-marker\npre-commit\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lefthook_job_propagates_project_local_fallow_failure() {
+    let fixture = LefthookExecutionFixture::new();
+    write_test_executable(
+        &fixture.root.join("node_modules/.bin/fallow"),
+        &fixture.shell,
+        "exit 23",
+    );
+
+    assert_eq!(fixture.run(&[]).code(), Some(23));
+}
+
+#[cfg(unix)]
+#[test]
+fn lefthook_job_prefers_fallow_on_path() {
+    let fixture = LefthookExecutionFixture::new();
+    let source_file = fixture.root.join("fallow-source");
+    let args_file = fixture.root.join("fallow-args");
+
+    write_test_executable(
+        &fixture.root.join("node_modules/.bin/fallow"),
+        &fixture.shell,
+        "printf '%s\\n' local > \"$FALLOW_TEST_SOURCE\"",
+    );
+    write_test_executable(
+        &fixture.restricted_bin.join("fallow"),
+        &fixture.shell,
+        "printf '%s\\n' path > \"$FALLOW_TEST_SOURCE\"\nprintf '%s\\n' \"$@\" > \"$FALLOW_TEST_ARGS\"",
+    );
+
+    assert!(
+        fixture
+            .run(&[
+                ("FALLOW_TEST_ARGS", &args_file),
+                ("FALLOW_TEST_SOURCE", &source_file),
+            ])
+            .success()
+    );
+    assert_eq!(fs::read_to_string(source_file).unwrap(), "path\n");
+    assert_eq!(
+        fs::read_to_string(args_file).unwrap(),
+        "audit\n--base\ndevelop\n--quiet\n--gate-marker\npre-commit\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lefthook_job_uses_yarn_for_plug_and_play_dependency() {
+    let fixture = LefthookExecutionFixture::new();
+    let source_file = fixture.root.join("fallow-source");
+    let args_file = fixture.root.join("fallow-args");
+    write_test_executable(
+        &fixture.restricted_bin.join("yarn"),
+        &fixture.shell,
+        r#"if [ "$1" = bin ] && [ "$2" = fallow ]; then
+  printf '%s\n' /virtual/fallow
+  exit 0
+fi
+if [ "$1" = exec ] && [ "$2" = fallow ]; then
+  shift 2
+  # Real yarn parses what follows the command name as its own flags and
+  # forwards only what comes after the separator. Measured on yarn 1.22.22:
+  # `yarn exec fallow audit --base HEAD` reaches the binary as `audit` alone,
+  # so a stand-in that forwards everything would pass while the hook audits
+  # the wrong base.
+  if [ "$1" = -- ]; then
+    shift
+  else
+    set --
+  fi
+  printf '%s\n' yarn > "$FALLOW_TEST_SOURCE"
+  printf '%s\n' "$@" > "$FALLOW_TEST_ARGS"
+  exit 0
+fi
+exit 1"#,
+    );
+
+    assert!(
+        fixture
+            .run(&[
+                ("FALLOW_TEST_ARGS", &args_file),
+                ("FALLOW_TEST_SOURCE", &source_file),
+            ])
+            .success()
+    );
+    assert_eq!(fs::read_to_string(source_file).unwrap(), "yarn\n");
+    assert_eq!(
+        fs::read_to_string(args_file).unwrap(),
+        "audit\n--base\ndevelop\n--quiet\n--gate-marker\npre-commit\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lefthook_job_skips_yarn_without_fallow_binary() {
+    let fixture = LefthookExecutionFixture::new();
+    let source_file = fixture.root.join("fallow-source");
+    write_test_executable(
+        &fixture.restricted_bin.join("yarn"),
+        &fixture.shell,
+        r#"if [ "$1" = bin ] && [ "$2" = fallow ]; then
+  exit 0
+fi
+if [ "$1" = exec ]; then
+  printf '%s\n' invoked > "$FALLOW_TEST_SOURCE"
+fi
+exit 1"#,
+    );
+
+    assert!(
+        fixture
+            .run(&[("FALLOW_TEST_SOURCE", &source_file)])
+            .success()
+    );
+    assert!(
+        !source_file.exists(),
+        "empty yarn bin output must not select yarn exec"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lefthook_job_skips_failed_yarn_lookup_with_stdout() {
+    let fixture = LefthookExecutionFixture::new();
+    let source_file = fixture.root.join("fallow-source");
+    write_test_executable(
+        &fixture.restricted_bin.join("yarn"),
+        &fixture.shell,
+        r#"if [ "$1" = bin ] && [ "$2" = fallow ]; then
+  printf '%s\n' "Usage Error: Couldn't find a binary named fallow"
+  exit 1
+fi
+if [ "$1" = exec ]; then
+  printf '%s\n' invoked > "$FALLOW_TEST_SOURCE"
+fi
+exit 1"#,
+    );
+
+    assert!(
+        fixture
+            .run(&[("FALLOW_TEST_SOURCE", &source_file)])
+            .success()
+    );
+    assert!(
+        !source_file.exists(),
+        "failed yarn bin lookup must not select yarn exec"
     );
 }

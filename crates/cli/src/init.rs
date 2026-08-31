@@ -838,8 +838,8 @@ fn existing_hook_hint(hook_path: &str, fallback_base_ref: &str) -> String {
     )
 }
 
-/// Hint printed when Lefthook is the active hook manager. Embeds the same
-/// resolution block as the standalone hook script under a `run: |` scalar.
+/// Hint printed when Lefthook is the active hook manager. Resolves package-local
+/// launchers under a `run: |` scalar without changing standalone hook behavior.
 fn lefthook_hint(fallback_base_ref: &str) -> String {
     format!(
         r#"Lefthook detected. Add the following to your lefthook.yml:
@@ -848,14 +848,24 @@ fn lefthook_hint(fallback_base_ref: &str) -> String {
     commands:
       fallow:
         run: |
-          command -v fallow >/dev/null 2>&1 || exit 0
+          if command -v fallow >/dev/null 2>&1; then
+            run_fallow() {{ fallow "$@"; }}
+          elif [ -x ./node_modules/.bin/fallow ]; then
+            run_fallow() {{ ./node_modules/.bin/fallow "$@"; }}
+          elif command -v yarn >/dev/null 2>&1 \
+            && FALLOW_BIN="$(yarn bin fallow 2>/dev/null)" \
+            && [ -n "$FALLOW_BIN" ]; then
+            run_fallow() {{ yarn exec fallow -- "$@"; }}
+          else
+            exit 0
+          fi
           UPSTREAM="$(git rev-parse --abbrev-ref --symbolic-full-name '@{{upstream}}' 2>/dev/null || true)"
           if [ -n "$UPSTREAM" ]; then
             BASE="$(git merge-base "$UPSTREAM" HEAD 2>/dev/null || echo "$UPSTREAM")"
           else
             BASE="{fallback_base_ref}"
           fi
-          fallow audit --base "$BASE" --quiet --gate-marker pre-commit"#
+          run_fallow audit --base "$BASE" --quiet --gate-marker pre-commit"#
     )
 }
 
@@ -1651,7 +1661,9 @@ mod tests {
         assert!(hint.contains("@{upstream}"));
         assert!(hint.contains("git merge-base \"$UPSTREAM\" HEAD"));
         assert!(hint.contains("BASE=\"develop\""));
-        assert!(hint.contains("fallow audit --base \"$BASE\" --quiet"));
+        assert!(hint.contains("./node_modules/.bin/fallow"));
+        assert!(hint.contains("yarn exec fallow -- \"$@\""));
+        assert!(hint.contains("run_fallow audit --base \"$BASE\" --quiet"));
     }
 
     #[test]

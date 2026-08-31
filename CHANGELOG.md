@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Release publication is gated on the curated release metadata**
+  (Closes [#2414](https://github.com/fallow-rs/fallow/issues/2414)). The rules
+  for a release title and its notes lived only in the maintainer runbook, which
+  said so out loud: nothing enforced them, so a dispatch that skipped the
+  runbook published every registry against notes that were never written. The
+  release is tag-last, so the two halves of that metadata exist at different
+  moments and are now checked at both. `release.yml` verifies `CHANGELOG.md` at
+  dispatch, before anything builds: one dated section for the tag, a non-empty
+  body, no em-dash, a compare link back to the previous released version, and
+  an empty `[Unreleased]` section so nothing ships uncredited. A new
+  `release-published.yml` re-checks the title prefix and summary, the non-empty
+  body, the comparison URL, em-dashes, and third-party names against the
+  published release, where those fields first exist and remain repairable.
+  Verified against every 3.x release without a false failure.
+
 ## [3.21.0] - 2026-08-31
 
 ### Added
@@ -5786,6 +5803,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`--workspace` accepts multiple patterns with globs and `!` negation.** The global `-w` / `--workspace` flag is no longer limited to a single exact package name; it now accepts comma-separated values (`-w web,admin`), repeated flags (`-w web -w admin`), glob patterns matched against BOTH the `package.json` name AND the workspace path relative to the repo root (`-w 'apps/*'`, `-w '@scope/*'`), and `!`-prefixed negations (`-w '!apps/legacy'`). Combinations follow gitignore-style rules: positive-only includes matches, negative-only starts from all workspaces and removes matches, mixed applies positives then subtracts negatives. Literal package names that happen to contain glob metacharacters (e.g. `web-[staging]`) are handled by an exact-name short-circuit so they still match without any quoting dance. Single-value usage (`-w my-package`) stays fully back-compatible. Propagated through `dead-code`, `health` (including hotspots, coverage sidecar, large-function analysis), `flags`, `audit`, and the combined pipeline. MCP `workspace` param keeps its `Option<String>` shape so existing agent integrations continue to work; docstrings document the new syntax. Unmatched positive patterns are collected into a single "no workspaces matched patterns: 'X', 'Y'. Available: a, b, ..." error (exit 2) rather than one error per miss, and the available-workspaces list caps at 10 names for large monorepos. The "all workspaces excluded" error splits Included vs Excluded so a typo in a negation pattern is immediately visible. Closes knip issue #1441.
+
+## [2.40.3] - 2026-04-17
 
 ### Fixed
 

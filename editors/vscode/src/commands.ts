@@ -25,12 +25,14 @@ import {
   getResolvedConfigPath,
   getAutoDownload,
   getTypeAwareSettings,
+  getTypeAwareTimeoutSeconds,
   type TypeAwareSettings,
 } from "./config.js";
 import {
   buildAnalysisArgs,
   compareVersions,
   countCheckIssues,
+  describeAnalysisFailure,
   planDegradation,
 } from "./analysis-utils.js";
 import {
@@ -53,6 +55,7 @@ import { buildHealthArgs, parseUnknownHealthSubcommand } from "./health-utils.js
 import { registerChild, unregisterChild } from "./process-registry.js";
 import { buildSecurityArgs, parseUnknownSubcommand } from "./security-utils.js";
 import { appendTypeAwareArgs, TYPE_AWARE_MIN_CLI_VERSION } from "./type-aware-utils.js";
+import { noteTypeAwareDegradation, typeAwareDegradationWarnings } from "./typeAwareDegradation.js";
 import {
   cacheWorkspacesOutput,
   getCachedWorkspacesOutput,
@@ -733,7 +736,7 @@ export const runAnalysis = async (
     noteSkippedCapabilities(skipped, cliBinary, outputChannel);
 
     const output = await execFallowTolerant(analysisArgs, root, cliBinary, outputChannel, {
-      env: buildAnalysisProcessEnv(),
+      env: buildAnalysisProcessEnv(process.env, getTypeAwareTimeoutSeconds()),
     });
 
     if (output.trim().length === 0) {
@@ -745,6 +748,7 @@ export const runAnalysis = async (
     }
 
     const result = JSON.parse(output) as FallowCombinedResult;
+    noteTypeAwareDegradation(typeAwareDegradationWarnings(result), outputChannel);
     check = result.check ? filterCheckResult(result.check) : null;
     dupes = result.dupes ?? null;
     backoff.recordSuccess(backoffKey);
@@ -752,7 +756,15 @@ export const runAnalysis = async (
     if (err instanceof AnalysisBackoffBlockedError) {
       throw err;
     }
-    const message = err instanceof Error ? err.message : String(err);
+    // Under `--format json` the CLI's diagnostic is the stdout envelope, not
+    // stderr, so the FallowExecError message alone would report a bare exit
+    // code and drop the reason (issue #2499).
+    const message =
+      err instanceof FallowExecError
+        ? describeAnalysisFailure(err.stdout, err.message)
+        : err instanceof Error
+          ? err.message
+          : String(err);
     const paused =
       backoffKey !== null && options.force !== true ? backoff.recordFailure(backoffKey) : null;
     if (paused) {

@@ -1087,16 +1087,35 @@ pub fn execute_check(opts: &CheckOptions<'_>) -> Result<CheckResult, ExitCode> {
             opts.retain_modules_for_health,
         );
         data.results.unused_files = reported_unused_files;
-        let outcome = outcome.map_err(|error| {
-            emit_error(
-                &format!("Type-aware analysis failed: {error}"),
-                2,
-                opts.output,
-            )
-        })?;
-        outcome.map_or((None, None), |outcome| {
-            (Some(outcome.type_aware), outcome.type_coupling)
-        })
+        match outcome {
+            Ok(outcome) => outcome.map_or((None, None), |outcome| {
+                (Some(outcome.type_aware), outcome.type_coupling)
+            }),
+            Err(error) => {
+                let meta = crate::type_aware_degrade::degrade_or_fail(
+                    &crate::type_aware_degrade::DegradeContext {
+                        root: &config.root,
+                        error: &error.to_string(),
+                        failure_label: "Type-aware analysis failed",
+                        require: config.type_aware.require,
+                        quiet: opts.quiet,
+                        output: opts.output,
+                    },
+                )?;
+                // `degrade_or_fail` already put this on stderr, honoring
+                // `--quiet`. Copying it into the outcome would print the same
+                // sentence a second time from `print_type_aware_warnings`,
+                // which has no quiet or format guard. The warning still travels
+                // in `meta` for `_meta.type_aware.warnings`.
+                (
+                    Some(fallow_api::TypeAwareOutcome {
+                        meta,
+                        warnings: Vec::new(),
+                    }),
+                    None,
+                )
+            }
+        }
     } else {
         (None, None)
     };
@@ -1311,7 +1330,7 @@ pub fn print_check_result(result: &CheckResult, opts: PrintCheckOptions) -> Exit
     }
 
     print_type_aware_summary(result);
-    print_type_aware_warnings(result);
+    print_type_aware_warnings(result, prepared.quiet);
 
     if type_aware_completeness_failed(result, prepared.quiet) {
         return ExitCode::from(1);
@@ -1355,6 +1374,13 @@ fn print_type_aware_summary(result: &CheckResult) {
         return;
     }
     if let Some(meta) = &result.type_aware_meta {
+        // A pass that never ran has nothing to summarize: every count is zero
+        // because no query happened, not because the project is clean. The
+        // degradation warning already said what happened, so a second line of
+        // zeroes would only dispute it.
+        if !meta.executed && meta.warning_count > 0 {
+            return;
+        }
         println!(
             "{}",
             crate::report::human_status_line(
@@ -1400,7 +1426,10 @@ fn count_noun(count: usize, singular: &str, plural: &str) -> String {
     format!("{count} {noun}")
 }
 
-fn print_type_aware_warnings(result: &CheckResult) {
+fn print_type_aware_warnings(result: &CheckResult, quiet: bool) {
+    if quiet {
+        return;
+    }
     for warning in &result.type_aware_warnings {
         eprintln!(
             "{}",

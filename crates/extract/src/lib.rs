@@ -274,28 +274,32 @@ fn parse_single_file_cached(
 ) -> ParseFileResult {
     let cached_by_path = cache.and_then(|store| store.get_by_path_only(&file.path));
 
+    // The fingerprint gate only needs the file's size and mtime, and a hit
+    // returns without ever reading the contents. Opening the file to `fstat` it
+    // therefore cost an open, an fstat and a close where a bare `stat` answers
+    // the same question in one syscall — on a warm cache that is three
+    // syscalls per already-parsed file, which is most of the repository.
+    //
+    // A file that can be `stat`ed but not opened now reports the cache hit its
+    // fingerprint entitles it to, instead of a read failure for contents that
+    // were never going to be read. Anything that misses the gate still falls
+    // through to the read below and surfaces the failure there.
     if let Some(cached) = cached_by_path
         && cached.file_size == file.size_bytes
+        && let Ok(metadata) = std::fs::metadata(&file.path)
+        && metadata.len() == cached.file_size
     {
-        let source_file = match std::fs::File::open(&file.path) {
-            Ok(source_file) => source_file,
-            Err(error) => return ParseFileResult::read_failure(file, &error),
-        };
-        if let Ok(metadata) = source_file.metadata()
-            && metadata.len() == cached.file_size
+        let fingerprint =
+            fallow_types::source_fingerprint::SourceFingerprint::from_metadata(&metadata);
+        if cached.source_fingerprint() == fingerprint
+            && fingerprint.has_known_mtime()
+            && (!need_complexity || !cached.complexity.is_empty())
         {
-            let fingerprint =
-                fallow_types::source_fingerprint::SourceFingerprint::from_metadata(&metadata);
-            if cached.source_fingerprint() == fingerprint
-                && fingerprint.has_known_mtime()
-                && (!need_complexity || !cached.complexity.is_empty())
-            {
-                return ParseFileResult::cache_hit(cache::cached_to_module_opts(
-                    cached,
-                    file.id,
-                    need_complexity,
-                ));
-            }
+            return ParseFileResult::cache_hit(cache::cached_to_module_opts(
+                cached,
+                file.id,
+                need_complexity,
+            ));
         }
     }
 

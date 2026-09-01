@@ -1,7 +1,7 @@
 //! Type definitions and constants for import resolution.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use dashmap::DashMap;
 use oxc_resolver::Resolver;
@@ -437,7 +437,7 @@ impl CanonicalizeCache {
 /// Session-local cache for tsconfig helper lookups used during import resolution.
 #[derive(Default)]
 pub(super) struct TsconfigCache {
-    json: DashMap<PathBuf, Option<Arc<Value>>, FxBuildHasher>,
+    json: DashMap<PathBuf, Arc<OnceLock<Option<Arc<Value>>>>, FxBuildHasher>,
     chains: DashMap<PathBuf, Arc<[PathBuf]>, FxBuildHasher>,
 }
 
@@ -448,18 +448,26 @@ impl TsconfigCache {
     /// walked several times per import specifier, and deep-copying every parsed
     /// document on each hop dominated resolution on large project-reference
     /// graphs.
+    ///
+    /// Imports resolve in parallel and every worker walks up to the same few
+    /// root tsconfigs, so a plain check-then-insert let an unbounded number of
+    /// threads miss on the same path at once and each read and parse the file
+    /// before the first insert landed. The entry is a [`OnceLock`] published
+    /// under the map lock and initialized outside it: exactly one thread loads,
+    /// the rest block on the result, and no filesystem work happens while a
+    /// map shard is held.
     pub fn json(
         &self,
         path: &Path,
         load: impl FnOnce(&Path) -> Option<Value>,
     ) -> Option<Arc<Value>> {
-        if let Some(value) = self.json.get(path) {
-            return value.clone();
-        }
-
-        let value = load(path).map(Arc::new);
-        self.json.insert(path.to_path_buf(), value.clone());
-        value
+        let cell = Arc::clone(
+            self.json
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Arc::new(OnceLock::new()))
+                .value(),
+        );
+        cell.get_or_init(|| load(path).map(Arc::new)).clone()
     }
 
     /// Return the cached tsconfig chain for a source file, if one exists.

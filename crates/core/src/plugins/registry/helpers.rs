@@ -306,9 +306,16 @@ impl ConfigCandidateIndex {
     /// workspace subdirectory) without a recursive filesystem walk.
     #[must_use]
     pub(crate) fn any_descendant_contains(&self, root: &Path, name: &OsStr) -> bool {
+        // Test the filename before the containment prefix. `names.contains` is
+        // a single hash probe while `dir.starts_with` walks both paths
+        // component by component, and this scan runs once per (workspace,
+        // file-activated plugin), so on a large monorepo the prefix test was
+        // being paid for thousands of directories that hold no candidate at
+        // all. Ordering the cheap, highly selective test first confines the
+        // path walk to the few directories that actually carry `name`.
         self.dirs
             .iter()
-            .any(|(dir, names)| dir.starts_with(root) && names.contains(name))
+            .any(|(dir, names)| names.contains(name) && dir.starts_with(root))
     }
 
     /// Whether any directory at or below `root` contains a file whose name

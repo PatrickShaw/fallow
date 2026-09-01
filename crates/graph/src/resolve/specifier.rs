@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use oxc_resolver::{Resolution, ResolveError, ResolveOptions, Resolver};
 use serde_json::Value;
 
@@ -22,7 +22,7 @@ use super::path_info::{
     normalize_npm_specifier,
 };
 use super::react_native::{build_condition_names, build_extensions};
-use super::types::{DenoImportMapEntry, ResolveContext, ResolveResult};
+use super::types::{DenoImportMapEntry, ResolveContext, ResolveResult, TsconfigGlobList};
 
 /// Create an `oxc_resolver` instance with standard configuration.
 ///
@@ -430,7 +430,13 @@ fn tsconfig_applies_to_file(
     }
 
     let include_matches = match json.get("include").and_then(Value::as_array) {
-        Some(include) => glob_values_match(tsconfig_dir, include, from_file),
+        Some(include) => glob_values_match(
+            ctx,
+            tsconfig_path,
+            TsconfigGlobList::Include,
+            include,
+            from_file,
+        ),
         None => from_file.starts_with(tsconfig_dir),
     };
     if !include_matches {
@@ -440,10 +446,42 @@ fn tsconfig_applies_to_file(
     !json
         .get("exclude")
         .and_then(Value::as_array)
-        .is_some_and(|exclude| glob_values_match(tsconfig_dir, exclude, from_file))
+        .is_some_and(|exclude| {
+            glob_values_match(
+                ctx,
+                tsconfig_path,
+                TsconfigGlobList::Exclude,
+                exclude,
+                from_file,
+            )
+        })
 }
 
-fn glob_values_match(base_dir: &Path, values: &[Value], path: &Path) -> bool {
+/// Match `path` against one of `tsconfig_path`'s glob lists.
+///
+/// The compiled matcher is memoized per (tsconfig, list) because the lists are
+/// fixed for the run while the query runs once per candidate source file.
+fn glob_values_match(
+    ctx: &ResolveContext<'_>,
+    tsconfig_path: &Path,
+    list: TsconfigGlobList,
+    values: &[Value],
+    path: &Path,
+) -> bool {
+    ctx.tsconfig_cache
+        .globset(tsconfig_path, list, || {
+            // `references` paths are joined verbatim, so the declaring directory
+            // can carry `./` and `..` segments that never match a normalized
+            // file path. Normalize once, on the miss that builds the matcher.
+            let base_dir = normalize_path_lexically(tsconfig_path.parent().unwrap_or(ctx.root));
+            build_glob_set(&base_dir, values)
+        })
+        .is_some_and(|set| set.is_match(path))
+}
+
+/// Compile a tsconfig glob list into a matcher, or `None` when no entry yields
+/// a usable pattern.
+fn build_glob_set(base_dir: &Path, values: &[Value]) -> Option<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     let mut has_patterns = false;
     for value in values.iter().filter_map(Value::as_str) {
@@ -460,7 +498,10 @@ fn glob_values_match(base_dir: &Path, values: &[Value], path: &Path) -> bool {
         builder.add(glob);
         has_patterns = true;
     }
-    has_patterns && builder.build().is_ok_and(|set| set.is_match(path))
+    if !has_patterns {
+        return None;
+    }
+    builder.build().ok()
 }
 
 fn has_glob_meta(value: &str) -> bool {
@@ -1977,7 +2018,7 @@ mod tests {
     use crate::resolve::types::{CanonicalizeCache, ResolveContext, TsconfigCache};
 
     use super::{
-        SpecifierNormalization, extension_alias_matches, glob_values_match, has_glob_meta,
+        SpecifierNormalization, build_glob_set, extension_alias_matches, has_glob_meta,
         is_bare_style_package_reference, is_bare_style_subpath, is_js_ts_extension,
         is_node_modules_path, is_plain_css_file, is_relative_tsconfig_extends,
         is_safe_static_dir_relative_path, is_style_file, is_tsconfig_error,
@@ -2094,11 +2135,10 @@ mod tests {
         let source = root.join("src/features/button.ts");
         fs::write(&source, "export const button = true;\n").expect("source");
 
-        assert!(glob_values_match(
-            root,
-            &[serde_json::json!("src")],
-            &source
-        ));
+        assert!(
+            build_glob_set(root, &[serde_json::json!("src")])
+                .is_some_and(|set| set.is_match(&source))
+        );
     }
 
     #[cfg_attr(miri, ignore = "tempdir is blocked by Miri isolation")]
@@ -2111,11 +2151,10 @@ mod tests {
         let source = root.join("test/button.ts");
         fs::write(&source, "export const button = true;\n").expect("source");
 
-        assert!(!glob_values_match(
-            root,
-            &[serde_json::json!("src")],
-            &source
-        ));
+        assert!(
+            !build_glob_set(root, &[serde_json::json!("src")])
+                .is_some_and(|set| set.is_match(&source))
+        );
     }
 
     #[test]
@@ -2863,9 +2902,9 @@ mod tests {
     fn glob_values_match_invalid_glob_pattern_is_skipped() {
         let base = Path::new("/project");
         let source = Path::new("/project/src/index.ts");
-        let result = glob_values_match(base, &[serde_json::json!("[invalid")], source);
+        let set = build_glob_set(base, &[serde_json::json!("[invalid")]);
         assert!(
-            !result,
+            !set.is_some_and(|set| set.is_match(source)),
             "an invalid glob pattern must not accidentally match"
         );
     }
@@ -2876,7 +2915,7 @@ mod tests {
     fn glob_values_match_empty_values_returns_false() {
         let base = Path::new("/project");
         let source = Path::new("/project/src/index.ts");
-        assert!(!glob_values_match(base, &[], source));
+        assert!(!build_glob_set(base, &[]).is_some_and(|set| set.is_match(source)));
     }
 
     // ---- should_preserve: from_style flag enables preservation for bare package from scss importer ----

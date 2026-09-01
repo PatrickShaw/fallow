@@ -434,11 +434,19 @@ impl CanonicalizeCache {
     }
 }
 
+/// Which glob list of a tsconfig a cached [`globset::GlobSet`] was built from.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(super) enum TsconfigGlobList {
+    Include,
+    Exclude,
+}
+
 /// Session-local cache for tsconfig helper lookups used during import resolution.
 #[derive(Default)]
 pub(super) struct TsconfigCache {
     json: DashMap<PathBuf, Option<Arc<Value>>, FxBuildHasher>,
     chains: DashMap<PathBuf, Arc<[PathBuf]>, FxBuildHasher>,
+    globsets: DashMap<(PathBuf, TsconfigGlobList), Option<Arc<globset::GlobSet>>, FxBuildHasher>,
 }
 
 impl TsconfigCache {
@@ -470,6 +478,31 @@ impl TsconfigCache {
     /// Store the computed tsconfig chain for a source file.
     pub fn store_chain(&self, from_file: &Path, chain: Arc<[PathBuf]>) {
         self.chains.insert(from_file.to_path_buf(), chain);
+    }
+
+    /// Return the compiled matcher for one of a tsconfig's glob lists, building
+    /// it on first miss.
+    ///
+    /// A tsconfig's `include` / `exclude` lists are fixed for the run, but the
+    /// matcher is consulted once per candidate source file. Compiling the globs
+    /// per query re-ran glob parsing and regex construction for every
+    /// (tsconfig, file) pair, which dominated resolution on repositories with
+    /// many project references. `None` records that the list produced no usable
+    /// pattern, so a failed compilation is not silently retried per file.
+    pub fn globset(
+        &self,
+        tsconfig_path: &Path,
+        list: TsconfigGlobList,
+        build: impl FnOnce() -> Option<globset::GlobSet>,
+    ) -> Option<Arc<globset::GlobSet>> {
+        let key = (tsconfig_path.to_path_buf(), list);
+        if let Some(cached) = self.globsets.get(&key) {
+            return cached.clone();
+        }
+
+        let set = build().map(Arc::new);
+        self.globsets.insert(key, set.clone());
+        set
     }
 }
 

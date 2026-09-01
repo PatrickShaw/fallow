@@ -438,6 +438,7 @@ pub fn build_brief_output_with_diff(
     let impact_closure = build_impact_closure_facts(result);
     let focus = build_focus_map(result, &deltas);
     ReviewBriefOutput {
+        branching: build_branching_report(result),
         schema_version: ReviewBriefSchemaVersion::default(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         command: "audit-brief".to_string(),
@@ -451,6 +452,37 @@ pub fn build_brief_output_with_diff(
         routing: result.routing.clone().unwrap_or_default(),
         decisions: result.decision_surface.clone().unwrap_or_default(),
     }
+}
+
+/// Compare branching across the accounting set, or `None` when there is no
+/// base to compare against.
+///
+/// Both sides are restricted to the changed files before comparing. The base
+/// pass analyzes the whole base worktree, so an unrestricted comparison would
+/// describe the repository rather than the changeset.
+fn build_branching_report(result: &AuditResult) -> Option<fallow_output::BranchingReport> {
+    let base = result.base_snapshot.as_ref()?;
+    let health = result.health.as_ref()?;
+    let root = health.config.root.as_path();
+    let accounting: rustc_hash::FxHashSet<String> = result
+        .changed_files
+        .iter()
+        .map(|path| crate::audit::keys::relative_key_path(path, root))
+        .collect();
+    let restrict = |source: &fallow_output::BranchingSnapshot| -> fallow_output::BranchingSnapshot {
+        source
+            .iter()
+            .filter(|(path, _)| accounting.contains(path.as_str()))
+            .map(|(path, totals)| (path.clone(), *totals))
+            .collect()
+    };
+    let head = crate::audit::branching_keys(&health.branching_by_file, root);
+    Some(fallow_output::BranchingReport::compare(
+        &restrict(&base.branching),
+        &restrict(&head),
+        fallow_output::DEFAULT_BRANCHING_TOLERANCE,
+        &crate::audit::weakening::is_test_file,
+    ))
 }
 
 /// Build the reused "subtract" section (dead-code / duplication / complexity)
@@ -559,6 +591,7 @@ fn print_brief_human(
                 brief.graph_facts.boundaries_touched.join(", ")
             );
         }
+        print_branching_human(brief.branching.as_ref());
         print_partition_human(&brief.partition);
         print_impact_closure_human(&brief.impact_closure);
         print_focus_human(&brief.focus, show_deprioritized);
@@ -571,6 +604,71 @@ fn print_brief_human(
     // when the underlying verdict is a fail. Headers stay off (the brief owns its
     // own header line above).
     crate::audit::print_audit_findings(result, quiet, explain, false);
+}
+
+/// The brief lines naming the files that split in place, or `None` when none
+/// did.
+///
+/// Split out from the printer so the wording and the width are testable: every
+/// line has to hold under 80 columns, and the brief has no other place where a
+/// reader meets the phrase "branch point".
+fn branching_human_lines(report: Option<&fallow_output::BranchingReport>) -> Option<Vec<String>> {
+    let report = report.filter(|report| report.is_reportable())?;
+    // States what was measured. Concluding "this was split" would overclaim:
+    // the peak is a file-level maximum, so it can also fall because the largest
+    // function left the file while other functions arrived.
+    let mut lines =
+        vec!["  branching: branching about level, more functions, smaller peak".to_string()];
+    for split in report.split_in_place.iter().take(2) {
+        lines.push(format!("         {}", elide_path(&split.path, 71)));
+        lines.push(format!(
+            "           {} to {} branch points, {} to {} functions, peak {} to {}",
+            split.branch_points_before,
+            split.branch_points_after,
+            split.functions_before,
+            split.functions_after,
+            split.peak_before,
+            split.peak_after,
+        ));
+    }
+    let remaining = report.split_in_place.len().saturating_sub(2);
+    if remaining > 0 {
+        lines.push(format!(
+            "         and {remaining} more file{}",
+            crate::report::plural(remaining)
+        ));
+    }
+    Some(lines)
+}
+
+/// Shorten a path from the left, keeping the file name, so a deep path cannot
+/// push a brief line past the terminal width.
+fn elide_path(path: &str, budget: usize) -> String {
+    if path.chars().count() <= budget {
+        return path.to_string();
+    }
+    let tail: String = path
+        .chars()
+        .rev()
+        .take(budget.saturating_sub(4))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!(".../{tail}")
+}
+
+/// Print branching conservation on the human brief. Caller has already gated on
+/// `!quiet`. Renders nothing unless a file demonstrably split in place: the set
+/// totals are context, and every sibling section is silent when it has nothing
+/// to say.
+fn print_branching_human(report: Option<&fallow_output::BranchingReport>) {
+    let Some(lines) = branching_human_lines(report) else {
+        return;
+    };
+    for line in lines {
+        eprintln!("{line}");
+    }
 }
 
 /// Print the Stage 2 partition + order on the human brief: the by-module units
@@ -1351,5 +1449,95 @@ mod tests {
         };
         assert!(gap.note.contains("attention pointer"));
         assert!(gap.note.contains("not a correctness proof"));
+    }
+
+    fn branching_fixture(
+        previous: (u32, u32, u16),
+        current: (u32, u32, u16),
+    ) -> fallow_output::BranchingReport {
+        let unit = |(branch_points, functions, peak): (u32, u32, u16)| {
+            std::iter::once((
+                "src/checkout/pricing.ts".to_string(),
+                fallow_types::extract::FileBranching {
+                    branch_points,
+                    functions,
+                    peak_cyclomatic: peak,
+                    cognitive: branch_points,
+                    cognitive_nesting_weight: 0,
+                    has_synthetic_units: false,
+                },
+            ))
+            .collect::<fallow_output::BranchingSnapshot>()
+        };
+        fallow_output::BranchingReport::compare(
+            &unit(previous),
+            &unit(current),
+            fallow_output::DEFAULT_BRANCHING_TOLERANCE,
+            &|_| false,
+        )
+    }
+
+    #[test]
+    fn branching_lines_are_silent_without_a_split() {
+        assert!(branching_human_lines(None).is_none());
+        let flat = branching_fixture((12, 3, 5), (12, 3, 5));
+        assert!(
+            branching_human_lines(Some(&flat)).is_none(),
+            "set totals alone are context, matching every sibling section"
+        );
+    }
+
+    #[test]
+    fn branching_lines_name_the_file_that_split() {
+        let report = branching_fixture((39, 1, 40), (39, 8, 6));
+        let lines = branching_human_lines(Some(&report)).expect("a split renders");
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("branching about level, more functions, smaller peak"));
+        assert!(
+            lines[1].ends_with("src/checkout/pricing.ts"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("39 to 39 branch points, 1 to 8 functions, peak 40 to 6"),
+            "{}",
+            lines[2]
+        );
+    }
+
+    #[test]
+    fn branching_lines_fit_eighty_columns() {
+        // A long path with four-digit counts, which is the widest realistic
+        // shape.
+        let long = "src/features/checkout/pricing/discounts/calculate-line-totals.ts";
+        let unit = |branch_points: u32, functions: u32, peak: u16| {
+            std::iter::once((
+                long.to_string(),
+                fallow_types::extract::FileBranching {
+                    branch_points,
+                    functions,
+                    peak_cyclomatic: peak,
+                    cognitive: branch_points,
+                    cognitive_nesting_weight: 0,
+                    has_synthetic_units: false,
+                },
+            ))
+            .collect::<fallow_output::BranchingSnapshot>()
+        };
+        let report = fallow_output::BranchingReport::compare(
+            &unit(9999, 1000, 9999),
+            &unit(9999, 4000, 12),
+            fallow_output::DEFAULT_BRANCHING_TOLERANCE,
+            &|_| false,
+        );
+
+        for line in branching_human_lines(Some(&report)).expect("a split renders") {
+            assert!(
+                line.chars().count() <= 80,
+                "{} columns: {line}",
+                line.chars().count()
+            );
+        }
     }
 }

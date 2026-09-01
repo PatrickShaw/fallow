@@ -269,7 +269,7 @@ fn listed_in_root_deps() {
         Path::new("/project/src/index.ts"),
         "react",
         &root_deps,
-        &ws_dep_map,
+        &WorkspaceDepIndex::new(&ws_dep_map),
     ));
 }
 
@@ -283,7 +283,7 @@ fn workspace_file_does_not_inherit_root_deps() {
         Path::new("/project/packages/app/src/index.ts"),
         "react",
         &root_deps,
-        &ws_dep_map,
+        &WorkspaceDepIndex::new(&ws_dep_map),
     ));
 }
 
@@ -297,7 +297,7 @@ fn listed_in_workspace_deps() {
         Path::new("/project/packages/app/src/index.ts"),
         "lodash",
         &root_deps,
-        &ws_dep_map,
+        &WorkspaceDepIndex::new(&ws_dep_map),
     ));
 }
 
@@ -309,7 +309,7 @@ fn not_listed_anywhere() {
         Path::new("/project/src/index.ts"),
         "axios",
         &root_deps,
-        &ws_dep_map,
+        &WorkspaceDepIndex::new(&ws_dep_map),
     ));
 }
 
@@ -323,7 +323,7 @@ fn listed_in_different_workspace_not_matching() {
         Path::new("/project/packages/app/src/index.ts"),
         "lodash",
         &root_deps,
-        &ws_dep_map,
+        &WorkspaceDepIndex::new(&ws_dep_map),
     ));
 }
 
@@ -346,13 +346,13 @@ fn nested_workspace_uses_most_specific_manifest() {
         Path::new("/project/packages/app/plugins/widget/src/index.ts"),
         "vue",
         &root_deps,
-        &ws_dep_map,
+        &WorkspaceDepIndex::new(&ws_dep_map),
     ));
     assert!(!is_package_listed_for_file(
         Path::new("/project/packages/app/plugins/widget/src/index.ts"),
         "react",
         &root_deps,
-        &ws_dep_map,
+        &WorkspaceDepIndex::new(&ws_dep_map),
     ));
 }
 

@@ -152,12 +152,43 @@ fn node_modules_package_json(base: &Path, package_name: &str) -> PathBuf {
     path.join("package.json")
 }
 
-fn deepest_matching_workspace<'a>(path: &Path, workspace_roots: &[&'a Path]) -> Option<&'a Path> {
-    workspace_roots
-        .iter()
-        .copied()
-        .filter(|root| path.starts_with(root))
-        .max_by_key(|root| root.components().count())
+/// Longest-prefix lookup from a file path to the workspace root that owns it.
+///
+/// The obvious formulation — scan every workspace root, keep the ones that are
+/// a prefix of the path, take the deepest — costs O(workspaces x path length)
+/// per query because both `Path::starts_with` and `Path::components` walk the
+/// whole path. Monorepos make that quadratic: a repository with 844 workspaces
+/// and 18k files ran that scan for every (file, package) pair, and path
+/// component iteration alone accounted for roughly a third of total CPU.
+///
+/// A workspace root can only own a file when it is one of that file's
+/// ancestors, so the search inverts: hash the roots once, then walk the file's
+/// ancestors from deepest to shallowest and stop at the first hit. That is
+/// O(path length) hash lookups per query and independent of workspace count.
+///
+/// The two formulations agree exactly. `Path::starts_with` matches on component
+/// boundaries, which is precisely the set of paths `Path::ancestors` yields, and
+/// no two distinct ancestors of one path share a component count, so the
+/// deepest match is unique and the ancestor walk finds it first.
+struct WorkspaceRootIndex<'a> {
+    roots: FxHashMap<&'a Path, &'a Path>,
+}
+
+impl<'a> WorkspaceRootIndex<'a> {
+    fn new(workspace_roots: &[&'a Path]) -> Self {
+        Self {
+            roots: workspace_roots.iter().map(|root| (*root, *root)).collect(),
+        }
+    }
+
+    /// Return the deepest workspace root that contains `path`, if any.
+    fn owner_of(&self, path: &Path) -> Option<&'a Path> {
+        if self.roots.is_empty() {
+            return None;
+        }
+        path.ancestors()
+            .find_map(|ancestor| self.roots.get(ancestor).copied())
+    }
 }
 
 /// One workspace manifest, read once for the whole unused-dependency pass.
@@ -328,10 +359,11 @@ fn collect_workspace_used_packages<'a>(
     workspace_roots: &[&'a Path],
 ) -> FxHashMap<&'a Path, FxHashSet<&'a str>> {
     use rayon::prelude::*;
+    let index = WorkspaceRootIndex::new(workspace_roots);
     let module_workspaces: Vec<Option<&Path>> = graph
         .modules
         .par_iter()
-        .map(|module| deepest_matching_workspace(&module.path, workspace_roots))
+        .map(|module| index.owner_of(&module.path))
         .collect();
     let mut by_ws: FxHashMap<&Path, FxHashSet<&str>> = workspace_roots
         .iter()
@@ -424,13 +456,14 @@ fn collect_package_workspace_usage(
     workspace_roots: &[&Path],
 ) -> FxHashMap<String, Vec<PathBuf>> {
     let mut usage: FxHashMap<String, Vec<PathBuf>> = FxHashMap::default();
+    let index = WorkspaceRootIndex::new(workspace_roots);
 
     for (package_name, file_ids) in &graph.package_usage {
         for id in file_ids {
             let Some(module) = graph.modules.get(id.0 as usize) else {
                 continue;
             };
-            let Some(ws_root) = deepest_matching_workspace(&module.path, workspace_roots) else {
+            let Some(ws_root) = index.owner_of(&module.path) else {
                 continue;
             };
             usage
@@ -1271,29 +1304,48 @@ pub fn find_dev_dependencies_in_production(
     findings
 }
 
+/// Declared-dependency sets keyed for longest-prefix lookup by file path.
+///
+/// Built once per unused-dependency pass and queried once per (file, package)
+/// pair, so the lookup must not depend on the workspace count. See
+/// [`WorkspaceRootIndex`] for why the ancestor walk replaces a linear scan.
+pub struct WorkspaceDepIndex<'a> {
+    deps_by_root: FxHashMap<&'a Path, &'a FxHashSet<String>>,
+}
+
+impl<'a> WorkspaceDepIndex<'a> {
+    #[must_use]
+    pub fn new(ws_dep_map: &'a [(PathBuf, FxHashSet<String>)]) -> Self {
+        Self {
+            deps_by_root: ws_dep_map
+                .iter()
+                .map(|(root, deps)| (root.as_path(), deps))
+                .collect(),
+        }
+    }
+
+    fn owning_workspace_deps(&self, file_path: &Path) -> Option<&'a FxHashSet<String>> {
+        if self.deps_by_root.is_empty() {
+            return None;
+        }
+        file_path
+            .ancestors()
+            .find_map(|ancestor| self.deps_by_root.get(ancestor).copied())
+    }
+}
+
 /// Check whether a package is listed in root deps or in the workspace that owns `file_path`.
 pub fn is_package_listed_for_file(
     file_path: &Path,
     package_name: &str,
     root_deps: &FxHashSet<String>,
-    ws_dep_map: &[(PathBuf, FxHashSet<String>)],
+    ws_deps_by_root: &WorkspaceDepIndex<'_>,
 ) -> bool {
-    if let Some(ws_deps) = owning_workspace_deps(file_path, ws_dep_map) {
+    if let Some(ws_deps) = ws_deps_by_root.owning_workspace_deps(file_path) {
         return ws_deps.contains(package_name);
     }
 
     root_deps.contains(package_name)
-}
-
-fn owning_workspace_deps<'a>(
-    file_path: &Path,
-    ws_dep_map: &'a [(PathBuf, FxHashSet<String>)],
-) -> Option<&'a FxHashSet<String>> {
-    ws_dep_map
-        .iter()
-        .filter(|(ws_root, _)| file_path.starts_with(ws_root))
-        .max_by_key(|(ws_root, _)| ws_root.components().count())
-        .map(|(_, ws_deps)| ws_deps)
 }
 
 /// Check if a corresponding `@types/<package>` is listed in dependencies.
@@ -1315,10 +1367,10 @@ fn has_types_package_for_file(
     file_path: &Path,
     package_name: &str,
     root_deps: &FxHashSet<String>,
-    ws_dep_map: &[(PathBuf, FxHashSet<String>)],
+    ws_deps_by_root: &WorkspaceDepIndex<'_>,
 ) -> bool {
     let types_name = types_package_name(package_name);
-    is_package_listed_for_file(file_path, &types_name, root_deps, ws_dep_map)
+    is_package_listed_for_file(file_path, &types_name, root_deps, ws_deps_by_root)
 }
 
 /// Look up the import location (line, col) for a given package in a given file.
@@ -1533,11 +1585,12 @@ pub struct UnlistedDependencyInput<'a> {
 /// Find dependencies used in imports but not listed in package.json.
 pub fn find_unlisted_dependencies(input: UnlistedDependencyInput<'_>) -> Vec<UnlistedDependency> {
     let parts = build_unlisted_dependency_context_parts(&input);
+    let ws_deps_by_root = WorkspaceDepIndex::new(&parts.ws_dep_map);
     let ctx = UnlistedDependencyContext {
         graph: input.graph,
         config: input.config,
         all_deps: &parts.all_deps,
-        ws_dep_map: &parts.ws_dep_map,
+        ws_deps_by_root: &ws_deps_by_root,
         virtual_prefixes: &parts.virtual_prefixes,
         virtual_suffixes: &parts.virtual_suffixes,
         plugin_tooling: &parts.plugin_tooling,
@@ -1684,7 +1737,7 @@ struct UnlistedDependencyContext<'a> {
     graph: &'a ModuleGraph,
     config: &'a ResolvedConfig,
     all_deps: &'a FxHashSet<String>,
-    ws_dep_map: &'a [(std::path::PathBuf, FxHashSet<String>)],
+    ws_deps_by_root: &'a WorkspaceDepIndex<'a>,
     virtual_prefixes: &'a [&'a str],
     virtual_suffixes: &'a [&'a str],
     plugin_tooling: &'a FxHashSet<&'a str>,
@@ -1736,10 +1789,20 @@ fn collect_unlisted_import_site(
     if package_imports_are_all_npm_scheme(ctx.import_spans_by_file, id, package_name) {
         return None;
     }
-    if is_package_listed_for_file(&module.path, package_name, ctx.all_deps, ctx.ws_dep_map) {
+    if is_package_listed_for_file(
+        &module.path,
+        package_name,
+        ctx.all_deps,
+        ctx.ws_deps_by_root,
+    ) {
         return None;
     }
-    if has_types_package_for_file(&module.path, package_name, ctx.all_deps, ctx.ws_dep_map) {
+    if has_types_package_for_file(
+        &module.path,
+        package_name,
+        ctx.all_deps,
+        ctx.ws_deps_by_root,
+    ) {
         return None;
     }
     let relative_path = relative_module_path(&module.path, &ctx.config.root);

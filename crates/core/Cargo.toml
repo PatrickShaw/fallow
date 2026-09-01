@@ -33,6 +33,7 @@ oxc_str = { workspace = true }
 oxc_syntax = { workspace = true }
 
 # Parallelism
+dashmap = { workspace = true }
 rayon = { workspace = true }
 
 # File system

@@ -1147,6 +1147,7 @@ name = "fallow-core"
 version = "3.21.0"
 dependencies = [
  "codspeed-criterion-compat",
+ "dashmap",
  "dhat",
  "dunce",
  "fallow-config",

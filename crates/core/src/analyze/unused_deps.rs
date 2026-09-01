@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use dashmap::DashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use fallow_config::{PackageJson, ResolvedConfig};
 
@@ -82,19 +83,23 @@ pub struct SharedDepSets<'a> {
     pub ignore_deps: &'a FxHashSet<&'a str>,
 }
 
+/// Resolves the peer dependencies a package declares where it is installed.
+///
+/// Lookups memoize on the individual `node_modules` probe — one entry per
+/// (directory, package) — rather than on the querying package root. Both
+/// formulations answer the same question, but the probe is the unit that
+/// repeats: every workspace's ancestor walk ends at the same hoisted install,
+/// so keying on the querying root gave each of a monorepo's workspaces a
+/// private cache that started empty and re-`stat`ed the shared directories.
+/// The cache is concurrent because the per-workspace pass runs under Rayon.
+#[derive(Default)]
 struct PeerDependencyResolver {
-    cache: FxHashMap<(PathBuf, String), Vec<String>>,
+    probes: DashMap<(PathBuf, String), Option<Arc<[String]>>, FxBuildHasher>,
 }
 
 impl PeerDependencyResolver {
-    fn new() -> Self {
-        Self {
-            cache: FxHashMap::default(),
-        }
-    }
-
     fn peer_dependency_closure<'b>(
-        &mut self,
+        &self,
         package_root: &Path,
         seeds: impl IntoIterator<Item = &'b str>,
     ) -> FxHashSet<String> {
@@ -107,9 +112,12 @@ impl PeerDependencyResolver {
                 continue;
             }
 
-            for peer in self.peer_dependencies_for(package_root, &package_name) {
+            for peer in self
+                .peer_dependencies_for(package_root, &package_name)
+                .iter()
+            {
                 if peer_used.insert(peer.clone()) {
-                    queue.push(peer);
+                    queue.push(peer.clone());
                 }
             }
         }
@@ -117,31 +125,40 @@ impl PeerDependencyResolver {
         peer_used
     }
 
-    fn peer_dependencies_for(&mut self, package_root: &Path, package_name: &str) -> Vec<String> {
-        let key = (package_root.to_path_buf(), package_name.to_string());
-        if let Some(cached) = self.cache.get(&key) {
+    /// Peer dependencies declared by the nearest install of `package_name`
+    /// reachable from `package_root`, or empty when it is not installed.
+    fn peer_dependencies_for(&self, package_root: &Path, package_name: &str) -> Arc<[String]> {
+        for base in package_root.ancestors() {
+            if let Some(peers) = self.probe(base, package_name) {
+                return peers;
+            }
+        }
+        Arc::from([])
+    }
+
+    /// Read the peer dependencies of `package_name` installed directly under
+    /// `base`, or `None` when it is not installed there.
+    ///
+    /// An install whose manifest exists but cannot be parsed answers with an
+    /// empty list rather than `None`: the package *is* installed here, so the
+    /// walk must stop, exactly as it did when the probe was a single
+    /// `is_file` check followed by a fallible load.
+    fn probe(&self, base: &Path, package_name: &str) -> Option<Arc<[String]>> {
+        let key = (base.to_path_buf(), package_name.to_string());
+        if let Some(cached) = self.probes.get(&key) {
             return cached.clone();
         }
 
-        let peer_dependencies: Vec<String> =
-            find_installed_package_json(package_root, package_name)
-                .and_then(|path| PackageJson::load(&path).ok())
-                .map(|pkg| pkg.required_peer_dependency_names())
-                .unwrap_or_default();
-
-        self.cache.insert(key, peer_dependencies.clone());
-        peer_dependencies
+        let manifest = node_modules_package_json(base, package_name);
+        let peers = manifest.is_file().then(|| {
+            PackageJson::load(&manifest).map_or_else(
+                |_| Arc::from([]),
+                |pkg| Arc::from(pkg.required_peer_dependency_names()),
+            )
+        });
+        self.probes.insert(key, peers.clone());
+        peers
     }
-}
-
-fn find_installed_package_json(package_root: &Path, package_name: &str) -> Option<PathBuf> {
-    for base in package_root.ancestors() {
-        let candidate = node_modules_package_json(base, package_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 fn node_modules_package_json(base: &Path, package_name: &str) -> PathBuf {
@@ -613,6 +630,7 @@ impl<'a> UnusedDependencyScan<'a> {
             workspace_used_packages: &self.usage.workspace_used_packages,
             bundled_workspace_usage: &self.usage.bundled_workspace_usage,
             package_workspace_usage: &self.usage.package_workspace_usage,
+            peer_resolver: &self.usage.peer_resolver,
             root_flagged,
         }
     }
@@ -668,6 +686,9 @@ struct DependencyUsageIndices<'a> {
     workspace_used_packages: FxHashMap<&'a Path, FxHashSet<&'a str>>,
     bundled_workspace_usage: FxHashMap<&'a Path, FxHashSet<&'a str>>,
     root_peer_used: FxHashSet<String>,
+    /// Shared across the root pass and every workspace pass so a hoisted
+    /// install is probed once rather than once per workspace.
+    peer_resolver: PeerDependencyResolver,
 }
 
 /// Compute the package-usage indices used to decide whether a dependency is used.
@@ -677,8 +698,9 @@ fn collect_dependency_usage_indices<'a>(
     workspaces: &'a [fallow_config::WorkspaceInfo],
 ) -> DependencyUsageIndices<'a> {
     let used_packages: FxHashSet<&str> = graph.package_usage.keys().map(String::as_str).collect();
-    let root_peer_used = PeerDependencyResolver::new()
-        .peer_dependency_closure(&config.root, used_packages.iter().copied());
+    let peer_resolver = PeerDependencyResolver::default();
+    let root_peer_used =
+        peer_resolver.peer_dependency_closure(&config.root, used_packages.iter().copied());
     let manifests = read_workspace_manifests(workspaces, config);
     let workspace_roots = dependency_owning_workspace_roots(&manifests);
     let workspace_used_packages = collect_workspace_used_packages(graph, &workspace_roots);
@@ -690,6 +712,7 @@ fn collect_dependency_usage_indices<'a>(
         bundled_workspace_usage,
         used_packages,
         root_peer_used,
+        peer_resolver,
     }
 }
 
@@ -776,6 +799,7 @@ struct WorkspaceUnusedDependencyInputs<'a> {
     workspace_used_packages: &'a FxHashMap<&'a Path, FxHashSet<&'a str>>,
     bundled_workspace_usage: &'a FxHashMap<&'a Path, FxHashSet<&'a str>>,
     package_workspace_usage: &'a FxHashMap<String, Vec<PathBuf>>,
+    peer_resolver: &'a PeerDependencyResolver,
     root_flagged: &'a FxHashSet<String>,
 }
 
@@ -814,6 +838,7 @@ fn collect_workspace_unused_dependencies<'a>(
         &ws_used_packages,
         inputs.package_workspace_usage,
         inputs.bundled_workspace_usage.get(&ws_root),
+        inputs.peer_resolver,
         inputs.root_flagged,
     );
 
@@ -866,10 +891,11 @@ fn workspace_dependency_usage<'a>(
     ws_used_packages: &FxHashSet<&str>,
     package_workspace_usage: &'a FxHashMap<String, Vec<PathBuf>>,
     bundled_used: Option<&'a FxHashSet<&'a str>>,
+    peer_resolver: &PeerDependencyResolver,
     root_flagged: &'a FxHashSet<String>,
 ) -> WorkspaceDependencyUsage<'a> {
-    let ws_peer_used = PeerDependencyResolver::new()
-        .peer_dependency_closure(ws_root, ws_used_packages.iter().copied());
+    let ws_peer_used =
+        peer_resolver.peer_dependency_closure(ws_root, ws_used_packages.iter().copied());
     WorkspaceDependencyUsage {
         ws_root,
         ws_peer_used,

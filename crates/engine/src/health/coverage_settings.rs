@@ -81,24 +81,67 @@ fn load_health_coverage(
     .ok())
 }
 
+/// Canonicalize every discovered file and keep the regular files under the
+/// project root.
+///
+/// Canonicalizing a path resolves every component, so doing it per file
+/// re-resolves the same directory chain once for each of that directory's
+/// files — tens of thousands of `realpath` calls over a handful of distinct
+/// directories on a large repository.
+///
+/// Resolve directories instead, memoized, and derive each file from its parent.
+/// That is exact whenever the file itself is not a symlink, which a single
+/// `lstat` establishes — and the same `lstat` supplies the regular-file test
+/// that previously needed its own `stat`. Symlinked entries keep the direct
+/// canonicalization. The walk is parallel because the entries share nothing
+/// beyond the directory cache.
 fn discovered_regular_sources(
     file_paths: &rustc_hash::FxHashMap<crate::discover::FileId, &std::path::PathBuf>,
     project_root: &std::path::Path,
 ) -> rustc_hash::FxHashSet<std::path::PathBuf> {
+    use rayon::prelude::*;
+
     let Ok(canonical_root) = dunce::canonicalize(project_root) else {
         return rustc_hash::FxHashSet::default();
     };
+    let canonical_dirs: dashmap::DashMap<std::path::PathBuf, Option<std::path::PathBuf>> =
+        dashmap::DashMap::new();
+
     file_paths
-        .values()
-        .filter_map(|path| {
-            let canonical = dunce::canonicalize(path).ok()?;
-            if !canonical.starts_with(&canonical_root) {
-                return None;
-            }
-            std::fs::metadata(&canonical)
-                .ok()?
-                .is_file()
-                .then_some(canonical)
+        .par_iter()
+        .filter_map(|(_, path)| {
+            let canonical = canonical_regular_file(path, &canonical_dirs)?;
+            canonical.starts_with(&canonical_root).then_some(canonical)
         })
         .collect()
+}
+
+/// Canonical path of `path` when it names a regular file, or `None` otherwise.
+fn canonical_regular_file(
+    path: &std::path::Path,
+    canonical_dirs: &dashmap::DashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
+) -> Option<std::path::PathBuf> {
+    let Ok(entry) = std::fs::symlink_metadata(path) else {
+        return None;
+    };
+
+    if entry.is_symlink() {
+        let canonical = dunce::canonicalize(path).ok()?;
+        return std::fs::metadata(&canonical)
+            .ok()?
+            .is_file()
+            .then_some(canonical);
+    }
+    if !entry.is_file() {
+        return None;
+    }
+
+    let (parent, name) = (path.parent()?, path.file_name()?);
+    if let Some(cached) = canonical_dirs.get(parent) {
+        return cached.as_ref().map(|dir| dir.join(name));
+    }
+    let canonical_parent = dunce::canonicalize(parent).ok();
+    let joined = canonical_parent.as_ref().map(|dir| dir.join(name));
+    canonical_dirs.insert(parent.to_path_buf(), canonical_parent);
+    joined
 }
